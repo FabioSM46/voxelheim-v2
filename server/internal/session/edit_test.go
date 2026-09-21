@@ -481,12 +481,14 @@ func TestAJoinReceivesTheStarterLoadout(t *testing.T) {
 		Durability:    game.RustySwordMaxDurability,
 		MaxDurability: game.RustySwordMaxDurability,
 	}
-	if got := states[0].Stacks[0]; got != want {
-		t.Errorf("hotbar slot 0 is %+v, want the starter sword %+v", got, want)
+	mainHand := int(protocol.InventorySlots) - 1
+	if got := states[0].Stacks[mainHand]; got != want {
+		t.Errorf("the main hand is %+v, want the starter sword %+v", got, want)
 	}
-	for slot, stack := range states[0].Stacks[1:] {
-		if stack != (protocol.InventoryStack{}) {
-			t.Errorf("joined inventory slot %d is %+v, want empty (0, 0)", slot+1, stack)
+	// Hotbar slot 0 included: that is where the blade used to start.
+	for slot, stack := range states[0].Stacks {
+		if slot != mainHand && stack != (protocol.InventoryStack{}) {
+			t.Errorf("joined inventory slot %d is %+v, want empty (0, 0)", slot, stack)
 		}
 	}
 }
@@ -714,9 +716,9 @@ func TestBreakingThenPlacingReturnsTheStackToZero(t *testing.T) {
 		int32(math.Floor(float64(feet[2]))),
 	}
 
-	// The slot the yield actually landed in, not slot 0: that one holds the starter
-	// sword, which places no block, so a request naming it would be refused for a reason
-	// this test is not about.
+	// The slot the yield actually landed in, found rather than assumed: automatic insertion
+	// chooses it, and a request naming any other slot would be refused for a reason this
+	// test is not about.
 	yieldSlot := frames.slotOf(uint16(dropped))
 	if yieldSlot < 0 {
 		t.Fatal("the collected yield is in no slot at all")
@@ -760,9 +762,9 @@ func TestBreakingIronYieldsOneStateAndRawIronCannotBePlaced(t *testing.T) {
 	// same-slot move on the session's one read goroutine. Once its state arrives,
 	// both requests have definitely been processed without adding a timing
 	// assumption to the assertion, and exactly one of the three may emit state.
-	// Both requests name the slot the RawIron is in, which is not slot 0 — that holds
-	// the starter sword. Naming slot 0 would still produce a refused placement, and for
-	// the wrong reason: this test is about RawIron placing no block, not about a sword.
+	// Both requests name the slot the RawIron is in, found rather than assumed. Naming any
+	// other slot would still produce a refused placement, and for the wrong reason: this
+	// test is about RawIron placing no block, not about an empty slot.
 	ironSlot := frames.slotOf(uint16(game.ItemRawIron))
 	if ironSlot < 0 {
 		t.Fatal("the collected RawIron is in no slot at all")
@@ -934,26 +936,35 @@ func TestAnAttackIsAcceptedAndARefusedOneIsSilence(t *testing.T) {
 	chunks, sim, peers := editDeps(t, cfg)
 	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
 
+	// An attack spends the main hand, and a new character joins with the starter blade
+	// already in it, so nothing is moved first: the joining state is what is checked.
+	mainHand := protocol.InventorySlots - 1
+	waitUntil(t, "the starter blade in the main hand", func() bool {
+		states := frames.inventoryStates()
+		return len(states) > 0 && states[len(states)-1].Stacks[mainHand].ItemID == uint16(game.ItemRustySword)
+	})
 	joinStates := len(frames.inventoryStates())
 	joinUpdates := len(frames.blockUpdates())
 
-	// The starter blade is in slot 0. Nothing is in reach, so this lands on nothing —
-	// which is the point: a swing that hits nothing must still be an ordinary message.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	// Nothing is in reach, so this lands on nothing — which is the point: a swing that hits
+	// nothing must still be an ordinary message.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: mainHand, ClientTick: 1})
+	// The hotbar slot the blade used to swing from, which the simulation now refuses.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 2})
 	// A slot outside the inventory, which the simulation refuses rather than the decoder.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 255, ClientTick: 2})
-	// A stale tick, refused for a third reason.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 255, ClientTick: 3})
+	// A stale tick, refused for a fourth reason.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: mainHand, ClientTick: 1})
 
-	// A barrier behind all three: the move is processed on the same read goroutine, so
+	// A barrier behind all four: the move is processed on the same read goroutine, so
 	// its state arriving proves every frame before it was handled without ending the
-	// session. An accepted move is the only one of the four that replies at all.
+	// session. An accepted move is the only one of the five that replies at all.
 	freeSlot := frames.emptySlot()
 	if freeSlot < 0 {
 		t.Fatal("the starter inventory has no free slot to move into")
 	}
 	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{
-		From: 0, To: uint8(freeSlot), Count: 1,
+		From: mainHand, To: uint8(freeSlot), Count: 1,
 	})
 	waitUntil(t, "the inventory move behind the attacks", func() bool {
 		return len(frames.inventoryStates()) == joinStates+1
@@ -998,7 +1009,7 @@ func TestARefusedPlacementIsAnsweredARefusedRemovalIsNotAndTheSessionSurvivesBot
 	// Nothing in the starter pack plants a structure and nothing stands to be taken back,
 	// so both requests are ordinary refusals against well-formed frames.
 	conn.in <- protocol.EncodePlaceStructureRequest(protocol.PlaceStructureRequest{
-		Slot: 0, Anchor: surface, HasAnchor: true, Facing: vnet.FacingNorth, ClientTick: 1,
+		Slot: protocol.InventorySlots - 1, Anchor: surface, HasAnchor: true, Facing: vnet.FacingNorth, ClientTick: 1,
 	})
 	conn.in <- protocol.EncodeRemoveStructureRequest(protocol.RemoveStructureRequest{
 		StructureID: 1234, ClientTick: 2,
@@ -1026,8 +1037,8 @@ func TestARefusedPlacementIsAnsweredARefusedRemovalIsNotAndTheSessionSurvivesBot
 	if refusal.Action != vnet.RefusedActionPlaceStructure {
 		t.Errorf("action = %s, want PlaceStructure", refusal.Action)
 	}
-	// The starter blade is in slot 0 and plants nothing, which is the world answering
-	// rather than the frame being malformed.
+	// The request names the main hand, where the starter blade is, and a blade plants
+	// nothing, which is the world answering rather than the frame being malformed.
 	if refusal.Reason != vnet.RefusalReasonSlotUnusable {
 		t.Errorf("reason = %s, want SlotUnusable", refusal.Reason)
 	}
@@ -1099,12 +1110,13 @@ func TestARefusedRepairIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
 	surface := surfaceUnderSpawn(cfg.WorldSeed)
 
-	// No kit in slot 1, and the blade in slot 0 is at full durability anyway.
-	conn.in <- protocol.EncodeRepairRequest(protocol.RepairRequest{KitSlot: 1, TargetSlot: 0, ClientTick: 1})
+	// No kit in slot 1, and the blade in the main hand is at full durability anyway.
+	mainHand := protocol.InventorySlots - 1
+	conn.in <- protocol.EncodeRepairRequest(protocol.RepairRequest{KitSlot: 1, TargetSlot: mainHand, ClientTick: 1})
 	// Slots past the end of the pack, which the decoder carries rather than refuses.
 	conn.in <- protocol.EncodeRepairRequest(protocol.RepairRequest{KitSlot: 200, TargetSlot: 201, ClientTick: 2})
 	// One slot named twice, which is the other shape nothing else bounds.
-	conn.in <- protocol.EncodeRepairRequest(protocol.RepairRequest{KitSlot: 0, TargetSlot: 0, ClientTick: 3})
+	conn.in <- protocol.EncodeRepairRequest(protocol.RepairRequest{KitSlot: mainHand, TargetSlot: mainHand, ClientTick: 3})
 
 	// The legal break afterwards is how the test tells "refused" apart from "not processed
 	// yet": the read loop is sequential, so an update for the third request is proof the
@@ -1131,7 +1143,8 @@ func TestARefusedRepairIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 }
 
 // A consume the simulation refuses is silence, and the session survives it. The
-// starter pack holds only a blade, so slot 0 is not food, slot 1 is empty, and a uint16
+// starter pack holds only a blade, in the main hand, so that slot is not food, slot 1 is
+// empty, and a uint16
 // slot outside the pack exercises the decoder's deliberate carry-through rule.
 //
 // The routing is what this layer owns: before payload tag 28 had a handler, the default
@@ -1144,7 +1157,7 @@ func TestARefusedConsumeIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
 	surface := surfaceUnderSpawn(cfg.WorldSeed)
 
-	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 0, ClientTick: 1})
+	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: uint16(protocol.InventorySlots) - 1, ClientTick: 1})
 	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 1, ClientTick: 2})
 	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 65_535, ClientTick: 3})
 
@@ -1237,7 +1250,7 @@ func TestADurableDropEmptiesItsSlotAndPutsOneItemInTheWorld(t *testing.T) {
 	cfg := editConfig()
 	chunks, sim, peers := editDeps(t, cfg)
 	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
-	const slot = 0
+	const slot = protocol.InventorySlots - 1
 	states := len(frames.inventoryStates())
 
 	conn.in <- protocol.EncodeDropItemRequest(protocol.DropItemRequest{Slot: slot, ClientTick: 1})
@@ -1288,10 +1301,10 @@ func TestARefusedDropIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 	if got := sim.DropCount(); got > 1 {
 		t.Errorf("%d drops are lying in the world, want at most the mined yield's one", got)
 	}
-	// And the blade never left slot 0, in any state the session was ever sent.
+	// And the blade never left the main hand, in any state the session was ever sent.
 	for _, state := range frames.inventoryStates() {
-		if got := state.Stacks[0].ItemID; got != uint16(game.ItemRustySword) {
-			t.Fatalf("slot 0 holds item %d; a refused drop emptied it", got)
+		if got := state.Stacks[protocol.InventorySlots-1].ItemID; got != uint16(game.ItemRustySword) {
+			t.Fatalf("the main hand holds item %d; a refused drop emptied it", got)
 		}
 	}
 }

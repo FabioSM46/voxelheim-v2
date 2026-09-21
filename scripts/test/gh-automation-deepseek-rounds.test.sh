@@ -242,6 +242,8 @@ repo_lookup_calls() {
 
 gh() {
   case "$*" in
+    # `require_gh` refuses a release below GH_MIN_VERSION before `auth status`.
+    "--version") printf '%s\n' 'gh version 2.18.0'; return 0 ;;
     "auth status"*) return 0 ;;
     "repo view --json nameWithOwner --jq .nameWithOwner")
       printf 'repo-view\n' >>"$GH_REPO_CALL_LOG"

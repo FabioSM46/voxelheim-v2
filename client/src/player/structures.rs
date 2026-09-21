@@ -2331,9 +2331,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: SIZE,
             view_distance: 8,
-            inventory_slots: 37,
+            inventory_slots: 41,
             hotbar_slots: 9,
-            equipment_slots: 4,
+            equipment_slots: 5,
             player_token: crate::net::ANY_TOKEN,
             voice_range_blocks: 0.0,
         })
@@ -2445,6 +2445,24 @@ mod tests {
             .resource_mut::<InventoryInbox>()
             .push(InventoryState { stacks, silver: 0 });
         (app, sent)
+    }
+
+    /// Replaces the pack with `stack` in the main hand and nothing else.
+    fn hold_in_main_hand(app: &mut App, stack: InventoryStack) {
+        hold_in_main_hand_beside(app, stack, InventoryStack::default());
+    }
+
+    /// Replaces the pack with `stack` in the main hand and `slot_zero` on the hotbar.
+    fn hold_in_main_hand_beside(app: &mut App, stack: InventoryStack, slot_zero: InventoryStack) {
+        let main_hand =
+            crate::player::inventory::equipment_slot(&session().0, crate::player::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); usize::from(session().0.inventory_slots)];
+        stacks[0] = slot_zero;
+        stacks[usize::from(main_hand)] = stack;
+        app.world_mut()
+            .resource_mut::<InventoryInbox>()
+            .push(InventoryState { stacks, silver: 0 });
     }
 
     /// [`clicking_app`], with an outbound queue that has no room for anything.
@@ -3529,6 +3547,39 @@ mod tests {
         }
     }
 
+    /// **A drawn weapon plants nothing and ghosts nothing** (#1239): the right button then
+    /// raises a shield, and a footprint on the ground would promise a placement that the
+    /// press will not ask for. The tent stays selected on the hotbar the whole time.
+    #[test]
+    fn a_drawn_weapon_plants_no_structure_and_ghosts_nothing() {
+        let ground = IVec3::new(3, 81, 0);
+        let (mut app, sent) = clicking_app(store_with(&[ground]), one(ITEM_TENT));
+        hold_in_main_hand_beside(&mut app, blade_of(ITEM_IRON_SWORD), one(ITEM_TENT));
+        app.update();
+        app.update();
+        assert!(
+            app.world().resource::<FootprintPreview>().active(),
+            "the sheathed tent ghosted nothing, so this test proves nothing"
+        );
+
+        combat::press_draw_weapon(&mut app, bevy::input::ButtonState::Pressed);
+        app.update();
+        assert!(
+            ghost_cells(&mut app).is_empty(),
+            "a drawn weapon ghosted a tent"
+        );
+        assert!(!app.world().resource::<FootprintPreview>().active());
+        drain(&sent);
+
+        click(&mut app, PLACE_BUTTON);
+        app.update();
+        assert_eq!(
+            requests(&sent).placements,
+            0,
+            "a drawn weapon planted a tent"
+        );
+    }
+
     /// Nothing is ghosted while the hand holds no structure, and nothing while the
     /// crosshair is on nothing.
     ///
@@ -3735,8 +3786,8 @@ mod tests {
         assert!(found.mines > 0, "the wall behind it was not mined");
     }
 
-    /// A blade in hand does not turn a removal into a swing either: the structure takes
-    /// the press first, and one press sends at most one request.
+    /// A drawn blade does not turn a removal into a swing either: the structure takes the
+    /// press first, and one press sends at most one request.
     ///
     /// Both blades, because `AimStructures` ordering is what decides this and it knows
     /// nothing about which blade is held — asking the second one keeps that true rather
@@ -3747,9 +3798,17 @@ mod tests {
             ("the rusty sword", combat::ITEM_RUSTY_SWORD),
             ("the iron sword", ITEM_IRON_SWORD),
         ] {
-            let (mut app, sent) = clicking_app(store_with(&[]), blade_of(item_id));
+            let (mut app, sent) = clicking_app(store_with(&[]), InventoryStack::default());
+            hold_in_main_hand(&mut app, blade_of(item_id));
             deliver(&mut app, 1, vec![tent_at(900, [3, 80, 0], LOCAL_ID)]);
             app.update();
+            app.update();
+            combat::press_draw_weapon(&mut app, bevy::input::ButtonState::Pressed);
+            app.update();
+            assert!(
+                app.world().resource::<combat::WeaponDrawn>().0,
+                "{name}: the blade did not draw, so this test proves nothing"
+            );
             drain(&sent);
 
             click(&mut app, REMOVE_BUTTON);
@@ -3786,6 +3845,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         });
         app.update();
         drain(&sent);

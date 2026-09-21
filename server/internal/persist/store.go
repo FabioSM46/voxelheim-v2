@@ -131,7 +131,13 @@ import (
 // permanent progression while presenting it as a successful load.
 // 11 adds the monotonic boss-reward receipt epoch. Versions 10 and eligible 7
 // migrate losslessly with epoch zero: neither format could contain a boss receipt.
-const StoreVersion uint32 = 11
+//
+// **12 widens the fixed slot table to 41 entries for the trailing main-hand slot.**
+// V11 and v10 are migrated at 40 slots — see [migratedInventorySlots] for why that
+// number is a literal — so every slot keeps its index and the new tail is empty; a v11
+// epoch is carried unchanged. A reward journal's pending postimage keeps the format it
+// was sealed in until the journal is next committed.
+const StoreVersion uint32 = 12
 
 const (
 	previousStoreVersion   uint32 = 7
@@ -140,6 +146,39 @@ const (
 	// Historical persisted wire id, not a second item registry.
 	previousSilverItemID uint16 = 35
 )
+
+// migratedInventorySlots is the slot-table length of each older format this build
+// migrates, and false for every format it does not.
+//
+// **A literal per version, never protocol.InventorySlots.** A record's layout was fixed
+// by the build that wrote it. Reading a v10 file at whatever the table length is today
+// is correct only until that length next changes, and then every v10 record decodes at
+// the wrong size — refused as corrupt, which under this migration refuses the start.
+// Pinning each version here is what lets the constant move.
+func migratedInventorySlots(version uint32) (int, bool) {
+	switch version {
+	case previousStoreVersion:
+		return previousInventorySlots, true
+	case 10, 11:
+		return 40, true
+	default:
+		return 0, false
+	}
+}
+
+// recordNameOffset is where a record of this format and slot count keeps its name
+// length: the slot table, then the purse and learned-mount byte from v10, then the
+// reward epoch from v11.
+func recordNameOffset(version uint32, inventorySlots int) int {
+	offset := offSlots + inventorySlots*slotSize
+	if version >= 10 {
+		offset += 5
+	}
+	if version >= 11 {
+		offset += 8
+	}
+	return offset
+}
 
 // On-disk layout, little-endian throughout, one file per character.
 //
@@ -381,13 +420,23 @@ func NewMemoryStore() *Store {
 //
 // **The first start under this format sets a superseded directory aside**, before
 // anything else happens to it. See [Store.setAsideSuperseded].
+//
+// OpenStore holds no reward journal, so it never enforces strict receipts. Production
+// startup opens through [OpenStoreWithRewardRecovery], which does.
 func OpenStore(worldDir string) (*Store, error) {
-	return openPlayerStore(worldDir, nil)
+	return openPlayerStore(worldDir, false, nil)
 }
 
+// strict is the reward journal's receipt policy, and it is decided before anything is
+// read: a players directory in an older format is migrated first, and in a world that
+// has issued boss receipts only a migration that carries every character may run.
+//
 // beforeIndex is an exclusive startup hook; no character or ordinary writer is
-// published until it succeeds. Production OpenStore supplies no recovery hook.
-func openPlayerStore(worldDir string, beforeIndex func(*Store) error) (*Store, error) {
+// published until it succeeds. **It runs after that migration**, so what it reads is a
+// directory in this build's format — a recovery that ran first would find every older
+// record unreadable and take each one for a missing character. Production OpenStore
+// supplies no recovery hook.
+func openPlayerStore(worldDir string, strict bool, beforeIndex func(*Store) error) (*Store, error) {
 	if worldDir == "" {
 		// Not a nil store returned quietly: an empty -world-dir is the ephemeral
 		// world, and choosing it is main's decision to make rather than a shape this
@@ -405,18 +454,17 @@ func openPlayerStore(worldDir string, beforeIndex func(*Store) error) (*Store, e
 		return nil, fmt.Errorf("persist: creating %s: %w", s.dir, err)
 	}
 
+	s.strictRewards.Store(strict)
+	// Before the hook, the sweep and the scan: whatever is in a superseded directory moves
+	// whole, temporaries and all, so that "nothing was deleted" is true of every byte in
+	// it rather than of the records alone.
+	if _, err := s.setAsideSuperseded(); err != nil {
+		return nil, err
+	}
 	if beforeIndex != nil {
 		if err := beforeIndex(s); err != nil {
 			return nil, err
 		}
-	}
-	// Before the sweep and before the scan: whatever is in a superseded directory moves
-	// whole, temporaries and all, so that "nothing was deleted" is true of every byte in
-	// it rather than of the records alone.
-	_, err := s.setAsideSuperseded()
-
-	if err != nil {
-		return nil, err
 	}
 	// Whatever a crash left mid-rename. Inert, because a reader only ever opens an
 	// exact <character-id>.bin path, so this is housekeeping rather than correctness.
@@ -472,8 +520,17 @@ func (s *Store) Unreadable() []string {
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
 // nothing about experience; a v6 record has no worn-equipment slots — so there is no
 // migration for those formats. V7 maps losslessly to the first 39 slots only when it has
-// no historical silver stack; otherwise it stays in the directory kept aside. Current
-// records sharing that directory are copied byte-for-byte into the replacement.
+// no historical silver stack; otherwise it stays in the directory kept aside. V10 and
+// v11 always map losslessly to the first 40 slots, so a record in either is migrated or
+// the start is refused. Current records
+// sharing that directory are copied byte-for-byte into the replacement.
+//
+// **A world that has issued boss receipts may not leave a character behind.** Strict
+// receipts exist so that no start ever treats a character who holds a receipt as new,
+// and a record left in the directory kept aside is exactly that. So under them every
+// older record must be carried: one in a format with no migration, an unreadable v7
+// record, or one holding a silver stack refuses the start before anything moves. A
+// migration that carries everyone keeps each epoch it read, which is why it may run.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
 // a fixed name would be destroyed by the second run that found something to move, which
@@ -515,38 +572,58 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 			return false, fmt.Errorf("%w: %s was written by a build that speaks format version %d; this build speaks %d and will not move a newer world aside",
 				world.ErrCorruptStore, s.dir, version, StoreVersion)
 		default:
-			if s.strictRewards.Load() {
-				return false, ErrRewardRecoveryRequired
-			}
 			older = true
-			if version == previousStoreVersion || version == 10 {
-				info, infoErr := entry.Info()
-				if infoErr != nil || info.Size() > int64(maxRecordSize) {
-					if version == 10 {
-						return false, fmt.Errorf("%w: unreadable v10 migration source", world.ErrCorruptStore)
-					}
-					continue
+			strict := s.strictRewards.Load()
+			slots, migrates := migratedInventorySlots(version)
+			if !migrates {
+				if strict {
+					return false, ErrRewardRecoveryRequired
 				}
-				path := filepath.Join(s.dir, entry.Name())
-				data, readErr := os.ReadFile(path)
-				if readErr != nil {
-					if version == 10 {
-						return false, readErr
-					}
-					continue
-				}
-				slots := previousInventorySlots
-				if version == 10 {
-					slots = int(protocol.InventorySlots)
-				}
-				record, decodeErr := decodeRecordLayout(data, version, slots)
-				if version == 10 && decodeErr != nil {
-					return false, decodeErr
-				}
-				if decodeErr == nil && (version == 10 || v7RecordHasNoSilverStack(record)) {
-					migrations = append(migrations, migration{name: entry.Name(), record: record})
+				continue
+			}
+			// leftBehind answers what a record this pass cannot carry costs. Under strict
+			// receipts it is always ErrRewardRecoveryRequired, wrapping the cause, so every
+			// leave-behind in a receipt world reports the same error. Otherwise it is
+			// nothing for v7 and the cause itself for every later format, which always
+			// migrates losslessly.
+			leftBehind := func(cause error) error {
+				switch {
+				case strict:
+					return fmt.Errorf("%w: %w", ErrRewardRecoveryRequired, cause)
+				case version != previousStoreVersion:
+					return cause
+				default:
+					return nil
 				}
 			}
+			info, infoErr := entry.Info()
+			if infoErr != nil || info.Size() > int64(maxRecordSize) {
+				if err := leftBehind(fmt.Errorf("%w: unreadable v%d migration source", world.ErrCorruptStore, version)); err != nil {
+					return false, err
+				}
+				continue
+			}
+			data, readErr := os.ReadFile(filepath.Join(s.dir, entry.Name()))
+			if readErr != nil {
+				if err := leftBehind(readErr); err != nil {
+					return false, err
+				}
+				continue
+			}
+			record, decodeErr := decodeRecordLayout(data, version, slots)
+			if decodeErr != nil {
+				if err := leftBehind(decodeErr); err != nil {
+					return false, err
+				}
+				continue
+			}
+			if version == previousStoreVersion && !v7RecordHasNoSilverStack(record) {
+				if strict {
+					return false, ErrRewardRecoveryRequired
+				}
+				continue
+			}
+			migrations = append(migrations, migration{name: entry.Name(), record: record})
 		}
 	}
 	if !older {
@@ -956,13 +1033,7 @@ func encodeRecord(rec Record) []byte {
 func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	name := rec.Name
 	silverOffset := offSlots + inventorySlots*slotSize
-	nameOffset := silverOffset
-	if version >= 10 {
-		nameOffset += 5
-	}
-	if version >= 11 {
-		nameOffset += 8
-	}
+	nameOffset := recordNameOffset(version, inventorySlots)
 	headerSize := nameOffset + 2
 
 	buf := world.NewRecord(headerSize, len(name), playerMagic, version)
@@ -1028,13 +1099,7 @@ func v7RecordHasNoSilverStack(rec Record) bool {
 
 func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
 	silverOffset := offSlots + inventorySlots*slotSize
-	nameOffset := silverOffset
-	if version >= 10 {
-		nameOffset += 5
-	}
-	if version >= 11 {
-		nameOffset += 8
-	}
+	nameOffset := recordNameOffset(version, inventorySlots)
 	headerSize := nameOffset + 2
 	if len(data) < headerSize+world.ChecksumSize {
 		return Record{}, fmt.Errorf("%w: %d bytes is shorter than an empty player record",

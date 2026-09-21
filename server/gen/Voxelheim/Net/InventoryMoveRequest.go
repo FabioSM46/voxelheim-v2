@@ -9,7 +9,12 @@ import (
 // / Moves up to `count` items between authoritative inventory slots. Client ->
 // / server, and intent only: the server decides whether any move is legal and
 // / sends a complete `InventoryState` when its answer changes the inventory.
-// / There is no acknowledgement or rejection payload.
+// / There is no acknowledgement payload.
+// /
+// / **A move can be refused.** Since V44 a move the equipment rules forbid is answered
+// / with `ActionRefused{MoveInventory, <reason>}` — a two-handed weapon and an off-hand
+// / item worn together is `HandsOccupied` — and nothing moves. The inventory the player
+// / holds is still the complete answer; the refusal says why it did not change.
 // /
 // / Decoder invariants the server enforces on this untrusted input:
 // /   - `from` and `to` must each be < `ServerWelcome.inventory_slots`

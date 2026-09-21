@@ -4,7 +4,7 @@ pub(super) mod sounds;
 
 use super::{
     Body, EYE_HEIGHT, InputMode, LocalMount, SnapshotBuffer, WorldCamera,
-    combat::{ITEM_RUSTY_SWORD, SwingSent},
+    combat::{ITEM_RUSTY_SWORD, SwingAbandoned, SwingSent},
     crafting::ITEM_IRON_SWORD,
     target::MiningFeedback,
 };
@@ -50,6 +50,8 @@ struct Voice {
     actor: u64,
     activity: Option<u64>,
     completion: bool,
+    /// A weapon's whoosh, which a refusal for energy cuts (#1228).
+    swing: bool,
     target: Option<BlockCoord>,
     playback: Playback,
     occlusion: f32,
@@ -67,6 +69,7 @@ pub(super) fn register(app: &mut App) {
     app.init_resource::<Tools>()
         .init_resource::<MiningActivityInbox>()
         .add_message::<SwingSent>()
+        .add_message::<SwingAbandoned>()
         .add_systems(
             Update,
             update
@@ -236,6 +239,7 @@ impl Tools {
                 actor,
                 activity,
                 completion: matches!(cue, Cue::Break(..)),
+                swing: matches!(cue, Cue::Swing(_)),
                 target: activity.and_then(|id| {
                     self.attempts
                         .get(&actor)
@@ -247,6 +251,16 @@ impl Tools {
                 next_occlusion: frame.now + OCCLUSION_PERIOD,
             });
         }
+    }
+
+    /// Cuts this player's own whoosh, because the swing it was playing for was refused.
+    ///
+    /// Only the swing cue and only the local actor: a strike or a collapse is a mining
+    /// observation the refusal says nothing about. Dropping the voice drops its producer,
+    /// which is what silences it.
+    fn abandon_swing(&mut self, local: u64) {
+        self.playing
+            .retain(|voice| !(voice.swing && voice.actor == local));
     }
 
     fn advance(&mut self, mixer: &AudioMixer, frame: &Frame<'_>) {
@@ -345,6 +359,7 @@ fn update(
     mut tools: ResMut<Tools>,
     mut inbox: ResMut<MiningActivityInbox>,
     mut swings: MessageReader<SwingSent>,
+    mut abandons: MessageReader<SwingAbandoned>,
     session: Option<Res<Session>>,
     mixer: Option<Res<AudioMixer>>,
     snapshots: Res<SnapshotBuffer>,
@@ -358,6 +373,7 @@ fn update(
     let now = Instant::now();
     let observations = inbox.take(now);
     let swing_items: Vec<_> = swings.read().map(|event| event.item_id).collect();
+    let abandoned = abandons.read().count() > 0;
     let Some(session) = session else {
         *tools = Tools::default();
         return;
@@ -400,6 +416,12 @@ fn update(
         }
     }
     tools.advance(&mixer, &frame);
+    // A swing the server refused for energy was never made, so its whoosh is cut where it
+    // stands (#1228). Before this frame's swings start, for the reason the arc is taken back
+    // first: the refusal answers a swing that already left, never one pressed this frame.
+    if abandoned {
+        tools.abandon_swing(frame.local);
+    }
     // The transport's actual swing signal includes ranged actions. Only a melee blade
     // sweeps through air here; bow release, casting and landed impacts are not this cue.
     for item in swing_items {

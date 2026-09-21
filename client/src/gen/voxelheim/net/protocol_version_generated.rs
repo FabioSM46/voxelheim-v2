@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 43;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 44;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -346,10 +346,23 @@ impl ProtocolVersion {
     /// V43: chunk block ids 58/59 describe open iron grilles. Older clients would
     /// render and predict these unknown ids as full cubes, hiding the openings and
     /// disagreeing with authoritative bar collision despite unchanged RLE bytes.
-    pub const Current: Self = Self(43);
+    ///
+    /// V44: a main hand, two-handed weapons and a drawn bow. Two changes owe the bump and
+    /// one number covers both. `DrawRequest` is a client -> server union member a V43 server
+    /// cannot name, so it closes the session instead of dropping the frame — `BlockRequest`'s
+    /// argument at V22. And `AttackRequest.slot` changes meaning from whichever slot the
+    /// client names to the main-hand equipment slot, with any other slot refused: a V43
+    /// client keeps naming its hotbar slot and every swing is dropped after a clean
+    /// handshake, which is V11's silent disagreement rather than a decode error. The rest
+    /// would have owed nothing alone: `PlayerAppearance.worn_mainhand` and
+    /// `PlayerVitals.draw_progress` read as zero — nothing held, not drawing — from an older
+    /// server, and `RefusedAction.MoveInventory` and `RefusalReason.HandsOccupied` ride inside
+    /// an `ActionRefused`, whose decoders are total. The fifth equipment slot is a layout
+    /// the welcome announces, and the consumers adopt it separately, as they did at V22.
+    pub const Current: Self = Self(44);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 43;
+    pub const ENUM_MAX: u16 = 44;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

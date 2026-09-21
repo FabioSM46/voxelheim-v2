@@ -51,6 +51,9 @@ use icon::StackIcon;
 /// The character a launch named, for `main.rs` to hand to the character screen.
 pub use character::PlayAs;
 
+/// A refusal for energy, for `player/combat.rs` to abandon the swing it answers.
+pub(crate) use energy::EnergyRefused;
+
 use crate::net::{
     CancelLeaveRequest, CharacterChoice, ChooseCharacter, ConnectRequest, ConnectionState,
     DisconnectRequest, InventoryStack, LeaveCancellation, ReconnectRequest, RefreshServerList,
@@ -1671,6 +1674,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         }
     }
 

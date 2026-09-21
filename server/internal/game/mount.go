@@ -115,7 +115,8 @@ func (p *Player) Mount(kind vnet.MountKind) (vnet.RefusalReason, error) {
 		}
 		p.mounted = kind
 		p.pendingSwing = nil
-		p.blocking = false
+		p.lowerShieldLocked()
+		p.cancelDrawLocked()
 		p.setMiningLocked(nil)
 		p.closeVendorLocked()
 	})

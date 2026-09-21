@@ -58,6 +58,7 @@ impl<'a> PlayerVitals<'a> {
     pub const VT_BLOCKING: ::flatbuffers::VOffsetT = 24;
     pub const VT_ENERGY: ::flatbuffers::VOffsetT = 26;
     pub const VT_MAX_ENERGY: ::flatbuffers::VOffsetT = 28;
+    pub const VT_DRAW_PROGRESS: ::flatbuffers::VOffsetT = 30;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -84,6 +85,7 @@ impl<'a> PlayerVitals<'a> {
         builder.add_hunger(args.hunger);
         builder.add_max_health(args.max_health);
         builder.add_health(args.health);
+        builder.add_draw_progress(args.draw_progress);
         builder.add_blocking(args.blocking);
         builder.add_invulnerable(args.invulnerable);
         builder.add_life_state(args.life_state);
@@ -220,7 +222,10 @@ impl<'a> PlayerVitals<'a> {
         }
     }
     /// Whether the authoritative server currently holds this recipient's off-hand raised.
-    /// Intent alone never makes this true; the server's equipment and durability rules do.
+    /// Intent alone never makes this true; the server's equipment, durability and energy
+    /// rules do. A raised shield needs at least the parry's cost in energy: it lowers on the
+    /// tick the reserve falls below that cost and, while the press is still held, rises again
+    /// on the tick the reserve reaches it.
     #[inline]
     pub fn blocking(&self) -> bool {
         // Safety:
@@ -233,8 +238,8 @@ impl<'a> PlayerVitals<'a> {
         }
     }
     /// V40. Current energy, in the same units as `max_energy`, rounded down to a whole
-    /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
-    /// the blow through the shield at full damage, and nothing else changes. Attacks and
+    /// point. Zero is legal. Below an action's cost the server refuses the swing, or keeps
+    /// the shield down, and nothing else changes. Attacks and
     /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
     /// locally**: a client that drew its own regeneration would show a swing as ready the
     /// tick before the server refuses it.
@@ -261,6 +266,23 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
+    /// V44. How far this recipient's own bow draw has charged. Zero means the player is not
+    /// drawing; `1 .. 255` is the charge, a fraction of 255 as `CastState.progress` and
+    /// `MineProgress` are. Unlike a cast, 255 is legal and means a full draw still held,
+    /// because a draw ends only when the player lets go. **The server's number, measured
+    /// from its ticks**: the client animates the string from it and never runs a timer of
+    /// its own. Absent from a V43 server, it reads as zero, and that server has no draws.
+    #[inline]
+    pub fn draw_progress(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u8>(PlayerVitals::VT_DRAW_PROGRESS, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
@@ -283,6 +305,7 @@ impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
             .visit_field::<bool>("blocking", Self::VT_BLOCKING, false)?
             .visit_field::<u16>("energy", Self::VT_ENERGY, false)?
             .visit_field::<u16>("max_energy", Self::VT_MAX_ENERGY, false)?
+            .visit_field::<u8>("draw_progress", Self::VT_DRAW_PROGRESS, false)?
             .finish();
         Ok(())
     }
@@ -301,6 +324,7 @@ pub struct PlayerVitalsArgs {
     pub blocking: bool,
     pub energy: u16,
     pub max_energy: u16,
+    pub draw_progress: u8,
 }
 impl<'a> Default for PlayerVitalsArgs {
     #[inline]
@@ -319,6 +343,7 @@ impl<'a> Default for PlayerVitalsArgs {
             blocking: false,
             energy: 0,
             max_energy: 0,
+            draw_progress: 0,
         }
     }
 }
@@ -396,6 +421,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerVitalsBuilder<'a, 'b, A
             .push_slot::<u16>(PlayerVitals::VT_MAX_ENERGY, max_energy, 0);
     }
     #[inline]
+    pub fn add_draw_progress(&mut self, draw_progress: u8) {
+        self.fbb_
+            .push_slot::<u8>(PlayerVitals::VT_DRAW_PROGRESS, draw_progress, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerVitalsBuilder<'a, 'b, A> {
@@ -428,6 +458,7 @@ impl ::core::fmt::Debug for PlayerVitals<'_> {
         ds.field("blocking", &self.blocking());
         ds.field("energy", &self.energy());
         ds.field("max_energy", &self.max_energy());
+        ds.field("draw_progress", &self.draw_progress());
         ds.finish()
     }
 }

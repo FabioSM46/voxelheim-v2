@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 58] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 59] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -72,6 +72,7 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 58] = [
     RefusalReason::SessionMismatch,
     RefusalReason::EntryOfferUnknown,
     RefusalReason::NotEnoughEnergy,
+    RefusalReason::HandsOccupied,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -257,6 +258,9 @@ impl RefusalReason {
     /// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
     /// the answer, so no amount is carried here.
     pub const NotEnoughEnergy: Self = Self(53);
+    /// A two-handed weapon and an off-hand item cannot be worn together. Paired with
+    /// `RefusedAction.MoveInventory`. The player can take off one of them.
+    pub const HandsOccupied: Self = Self(54);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -327,6 +331,7 @@ impl RefusalReason {
         Self::SessionMismatch,
         Self::EntryOfferUnknown,
         Self::NotEnoughEnergy,
+        Self::HandsOccupied,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -389,6 +394,7 @@ impl RefusalReason {
             Self::SessionMismatch => Some("SessionMismatch"),
             Self::EntryOfferUnknown => Some("EntryOfferUnknown"),
             Self::NotEnoughEnergy => Some("NotEnoughEnergy"),
+            Self::HandsOccupied => Some("HandsOccupied"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

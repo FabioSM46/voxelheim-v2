@@ -81,11 +81,14 @@ func TestARelayedVoiceFrameOvertakesTheBulkLane(t *testing.T) {
 	listener.holdWrites()
 	before := len(listenerFrames.kindsReceived())
 
+	// Every holder, not merely some: a broadcast that finds a queue full drops the frame
+	// rather than waiting, and a backlog missing a frame is not the backlog counted below.
 	const backlog = 8
+	holders := peers.Holders(held[0])
 	for i := range backlog {
 		update := protocol.EncodeBlockUpdate(protocol.BlockUpdate{Pos: [3]int32{int32(i), 70, 0}, BlockID: 1})
-		if reached := peers.BroadcastChunk(held[0], update); reached == 0 {
-			t.Fatalf("bulk frame %d reached no session, so there is no backlog to overtake", i)
+		if reached := peers.BroadcastChunk(held[0], update); reached == 0 || reached != holders {
+			t.Fatalf("bulk frame %d reached %d of the %d sessions holding its chunk, so the backlog is not whole", i, reached, holders)
 		}
 	}
 
@@ -100,23 +103,37 @@ func TestARelayedVoiceFrameOvertakesTheBulkLane(t *testing.T) {
 	})
 
 	listener.releaseWrites()
-	waitUntil(t, "the relayed voice frame to reach the second session", func() bool {
-		return len(listenerFrames.voicesHeard()) == 1
+	// The whole backlog, not only the voice frame. The voice frame arriving says nothing
+	// about how many bulk frames have arrived behind it yet: they are still being written
+	// while this goroutine reads, and counting at that moment once found six of eight
+	// behind the voice with the other two simply not absorbed. Every bulk frame was queued
+	// for the listener — the broadcast loop above refuses a drop — and a queued frame is
+	// written, so waiting for all of them is waiting for a fact, and the count below is
+	// then read from a complete order.
+	var arrived []vnet.Payload
+	waitUntil(t, "the voice frame and the whole bulk backlog to reach the second session", func() bool {
+		arrived = listenerFrames.kindsReceived()[before:]
+		bulk := 0
+		for _, kind := range arrived {
+			if kind == vnet.PayloadBlockUpdate {
+				bulk++
+			}
+		}
+		return bulk == backlog && slices.Contains(arrived, vnet.PayloadVoiceHeard)
 	})
 
-	arrived := listenerFrames.kindsReceived()[before:]
 	spoken := slices.Index(arrived, vnet.PayloadVoiceHeard)
-	if spoken < 0 {
-		t.Fatalf("the voice frame is not among the %d frames that arrived after the hold", len(arrived))
-	}
 	overtaken := 0
 	for _, kind := range arrived[spoken:] {
 		if kind == vnet.PayloadBlockUpdate {
 			overtaken++
 		}
 	}
-	// One fewer than the backlog: the writer may already have been inside WriteFrame with
-	// a bulk frame when the gate closed, and that one is past overtaking.
+	// One fewer than the backlog, and that bound is exact rather than generous. The gate is
+	// closed before the first bulk frame is broadcast, so the writer can take at most one of
+	// them before the voice frame is queued: it dequeues that frame and then blocks inside
+	// WriteFrame holding it. Every later bulk frame is still in its lane when the gate
+	// opens, and the writer drains the fast lane before it looks at the bulk lane again.
 	if want := backlog - 1; overtaken < want {
 		t.Errorf("the voice frame overtook %d bulk frames, want at least %d; arrival order was %v",
 			overtaken, want, arrived)

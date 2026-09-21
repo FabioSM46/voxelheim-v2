@@ -180,6 +180,38 @@ func TestARecordRestoresAWornChestItemAndRejectsItInTheWrongSlot(t *testing.T) {
 	}
 }
 
+// Life.Validate reaches the fifth slot through wornAtForSlot like the other four: a
+// stored main hand holds one weapon or nothing, and a weapon is refused anywhere worn
+// but there.
+func TestAStoredMainHandHoldsOneWeaponOrNothing(t *testing.T) {
+	t.Parallel()
+
+	whole := func(item ItemID) protocol.InventoryStack {
+		definition, _ := itemByID(item)
+		return protocol.InventoryStack{ItemID: uint16(item), Count: 1, Durability: definition.maxDurability, MaxDurability: definition.maxDurability}
+	}
+	for name, tc := range map[string]struct {
+		slot  int
+		stack protocol.InventoryStack
+		legal bool
+	}{
+		"an empty main hand":           {slot: equipmentMainHand, legal: true},
+		"a sword in the main hand":     {slot: equipmentMainHand, stack: whole(ItemRustySword), legal: true},
+		"a sceptre in the main hand":   {slot: equipmentMainHand, stack: whole(ItemWoodenSceptre), legal: true},
+		"a shield in the main hand":    {slot: equipmentMainHand, stack: whole(ItemWoodenShield)},
+		"stone in the main hand":       {slot: equipmentMainHand, stack: protocol.InventoryStack{ItemID: uint16(ItemStone), Count: 1}},
+		"a sword in the off-hand":      {slot: equipmentOffHand, stack: whole(ItemRustySword)},
+		"a sword on the head":          {slot: equipmentHead, stack: whole(ItemIronSword)},
+		"a sword in the last pack row": {slot: equipmentFirst - 1, stack: whole(ItemBow), legal: true},
+	} {
+		life := Life{Pos: [3]float64{0.5, 64, 0.5}, Health: PlayerMaxHealth, Hunger: PlayerMaxHunger}
+		life.Slots[tc.slot] = tc.stack
+		if err := life.Validate(); (err == nil) != tc.legal {
+			t.Errorf("%s: Validate = %v, want legal %v", name, err, tc.legal)
+		}
+	}
+}
+
 // A restored player settles the same way a new one does, and keeps facing where they
 // were facing until their client says otherwise.
 //
@@ -227,7 +259,9 @@ func TestARestoredPlayerSettlesLikeANewOne(t *testing.T) {
 	}
 }
 
-// A player with no record joins exactly as they always did.
+// A player with no record joins with the starter pack: the rusty sword at full durability
+// in the main hand, hotbar slot 0 empty, and a record of it that Life.Validate accepts —
+// the same check a stored life has to pass before it can be restored.
 func TestAPlayerWithNoRecordJoinsWithTheStarterPack(t *testing.T) {
 	t.Parallel()
 
@@ -247,13 +281,42 @@ func TestAPlayerWithNoRecordJoinsWithTheStarterPack(t *testing.T) {
 	if life.Pos != ([3]float64{0.5, 64, 0.5}) {
 		t.Errorf("a new player's position is %v, want the join spawn", life.Pos)
 	}
-	if got, want := life.Slots[0], starterSword(); got != want {
-		t.Errorf("slot 0 is %+v, want the starter sword %+v", got, want)
+	if got, want := life.Slots[equipmentMainHand], starterSword(); got != want {
+		t.Errorf("the main hand is %+v, want the starter sword %+v", got, want)
 	}
-	for slot := 1; slot < int(protocol.InventorySlots); slot++ {
-		if life.Slots[slot] != (protocol.InventoryStack{}) {
+	for slot := 0; slot < int(protocol.InventorySlots); slot++ {
+		if slot != equipmentMainHand && life.Slots[slot] != (protocol.InventoryStack{}) {
 			t.Errorf("slot %d is %+v, want empty", slot, life.Slots[slot])
 		}
+	}
+	if err := life.Validate(); err != nil {
+		t.Errorf("the starter record is refused: %v", err)
+	}
+}
+
+// A restored character keeps exactly the pack it saved. Moving the starter sword into the
+// main hand changed what a *new* character is handed and migrated nothing: a life saved
+// with its blade in hotbar slot 0 — every character created before the change — comes
+// back with it there and an empty main hand.
+func TestARestoredPackKeepsTheSwordWhereItWasSaved(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	saved := player.Record()
+	saved.Slots[0], saved.Slots[equipmentMainHand] = starterSword(), protocol.InventoryStack{}
+	if err := saved.Validate(); err != nil {
+		t.Fatalf("the hotbar layout older characters saved is refused: %v", err)
+	}
+
+	next := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	out := &dropSink{}
+	restored, err := next.sim.Join(2, testPlayerID(2), testCharacterName, [3]float32{0, 200, 0}, testAppearance(), &saved, out.deliver)
+	if err != nil {
+		t.Fatalf("Join with a record: %v", err)
+	}
+	if got := restored.Record().Slots; got != saved.Slots {
+		t.Errorf("the restored pack is %+v, want the saved %+v", got, saved.Slots)
 	}
 }
 
@@ -310,27 +373,27 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 	// The starter blade at four fifths of full, once. The number is the one wornByDeath
 	// produces, restated here so a change to the penalty fails this test rather than
 	// silently agreeing with itself.
-	if got, want := life.Slots[0].Durability, wornByDeath(RustySwordMaxDurability); got != want {
+	if got, want := life.Slots[equipmentMainHand].Durability, wornByDeath(RustySwordMaxDurability); got != want {
 		t.Errorf("the recorded blade has %d durability, want %d", got, want)
 	}
-	if want := uint16(80); life.Slots[0].Durability != want {
-		t.Errorf("the recorded blade has %d durability, want the -20%% of %d", life.Slots[0].Durability, want)
+	if want := uint16(80); life.Slots[equipmentMainHand].Durability != want {
+		t.Errorf("the recorded blade has %d durability, want the -20%% of %d", life.Slots[equipmentMainHand].Durability, want)
 	}
 
 	// Charged once, and charging is what makes it once: a second record — and the tick
 	// that follows — must not spend it again.
 	second := player.Record()
-	if second.Slots[0].Durability != life.Slots[0].Durability {
+	if second.Slots[equipmentMainHand].Durability != life.Slots[equipmentMainHand].Durability {
 		t.Errorf("a second record charged the death again: %d, want %d",
-			second.Slots[0].Durability, life.Slots[0].Durability)
+			second.Slots[equipmentMainHand].Durability, life.Slots[equipmentMainHand].Durability)
 	}
 	h.advance(int(DefaultTickRate) * 5)
 	h.sim.mu.Lock()
-	afterRespawn := player.inventoryDurabilityLocked(0)
+	afterRespawn := player.inventoryDurabilityLocked(equipmentMainHand)
 	h.sim.mu.Unlock()
-	if afterRespawn != life.Slots[0].Durability {
+	if afterRespawn != life.Slots[equipmentMainHand].Durability {
 		t.Errorf("the respawn that followed charged the death again: %d, want %d",
-			afterRespawn, life.Slots[0].Durability)
+			afterRespawn, life.Slots[equipmentMainHand].Durability)
 	}
 }
 
@@ -358,7 +421,7 @@ func TestARecordAfterThePenaltyDoesNotChargeItTwice(t *testing.T) {
 	}
 
 	life := player.Record()
-	if got, want := life.Slots[0].Durability, wornByDeath(RustySwordMaxDurability); got != want {
+	if got, want := life.Slots[equipmentMainHand].Durability, wornByDeath(RustySwordMaxDurability); got != want {
 		t.Errorf("the recorded blade has %d durability, want %d charged exactly once", got, want)
 	}
 	if want := maxHealthFor(levelFor(life.Experience)); life.Health != want {

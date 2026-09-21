@@ -60,13 +60,18 @@ const REFUSAL_EDGE: Color = Color::srgb(1.0, 0.93, 0.70);
 /// there, lit dimly in the bar's own hue.
 const REFUSAL_TRACK: Color = Color::srgba(0.46, 0.30, 0.06, 0.94);
 
-/// One refused attack the energy bar answers.
+/// One request the server refused because the reserve could not pay for it.
 ///
 /// Written by `ui/status.rs`, which drains the refusal inbox and knows which refusal has a
 /// surface other than the chat log. A unit rather than a copy of the refusal, because the
 /// bar has nothing to say about its fields: the answer is the flash.
+///
+/// **It has a second reader, and that reader does not flash anything.** `player/combat.rs`
+/// abandons the swing still playing when the refusal answers one (#1228), so a starved press
+/// stops looking like a strike. Which request a refusal answers is that module's question —
+/// the server sends this same pair for a swing and for a shield raise — and not this one's.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct EnergyRefused;
+pub(crate) struct EnergyRefused;
 
 pub(super) struct EnergyUiPlugin;
 
@@ -346,6 +351,7 @@ mod tests {
             blocking: false,
             energy,
             max_energy,
+            draw_progress: 0,
         }
     }
 

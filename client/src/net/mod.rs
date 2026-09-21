@@ -57,7 +57,6 @@ pub use codec::WorldChange;
 
 use bevy::prelude::*;
 
-pub use codec::BlockRequest;
 #[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
 pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, BlowKind, BlowLanded,
@@ -76,6 +75,7 @@ pub use codec::{
     StaticPropState, StructureKind, StructureState, WorldClock, WorldUpdate,
     map_tile_explored_bytes, map_tile_span,
 };
+pub use codec::{BlockRequest, DrawRequest};
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[cfg(test)]
 pub use codec::MountState;
@@ -124,7 +124,6 @@ pub use codec::{InstanceEntryAnswer, InstanceEntryOffer, encode_instance_entry_a
 // name nothing outside `net` can start deciding from.
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
-pub use codec::encode_block_request;
 #[allow(unused_imports)] // V28 outbound encoder precedes the player-trade UI.
 pub use codec::encode_player_trade_request;
 #[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
@@ -137,6 +136,7 @@ pub use codec::{
     encode_party_request, encode_place_structure_request, encode_player_input,
     encode_remove_structure_request, encode_repair_request,
 };
+pub use codec::{encode_block_request, encode_draw_request};
 pub use codec::{encode_dismount_request, encode_mount_request};
 // V30's voice surface, named here for the reason the blocks above are: `audio/` should not
 // have to reopen `codec.rs` to find out what it is allowed to spell. The frame's ceiling is a

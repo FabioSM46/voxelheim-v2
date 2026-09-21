@@ -11,20 +11,14 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
+use super::hands::arrow_mesh;
 use super::interpolate::{InterpolatedProjectile, SnapshotBuffer};
-use super::items::{ITEM_BONE, item_linear_rgba};
-use super::{ApplySnapshots, InputMode, merge_all};
+use super::{ApplySnapshots, InputMode};
 use crate::net::{ProjectileKind, Session};
 
-/// Tip to fletching, in blocks. The mesh is authored along -Z so `looking_to`
+/// Nock to point, in blocks. The mesh points along -Z so `looking_to`
 /// points its head in the newest non-zero velocity direction.
 pub(super) const ARROW_LENGTH: f32 = 0.8;
-const ARROW_SHAFT_WIDTH: f32 = 0.035;
-const ARROW_HEAD_LENGTH: f32 = 0.12;
-const ARROW_HEAD_RADIUS: f32 = 0.07;
-const ARROW_FLETCH_LENGTH: f32 = 0.10;
-const ARROW_FLETCH_WIDTH: f32 = 0.09;
-const ARROW_FLETCH_THICKNESS: f32 = 0.012;
 
 const ORB_DIAMETER: f32 = 0.3;
 const TRAIL_OFFSETS: [f32; 2] = [0.22, 0.38];
@@ -95,9 +89,11 @@ fn create_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let [r, g, b, a] = item_linear_rgba(ITEM_BONE);
+    // White, because the arrow carries its own shaft, bone point and fletching per vertex — see
+    // `hands::arrow_mesh`. A tint here would multiply over all three, which is how the whole
+    // arrow used to be one bone colour.
     let arrow_material = materials.add(StandardMaterial {
-        base_color: Color::linear_rgba(r, g, b, a),
+        base_color: Color::WHITE,
         perceptual_roughness: 0.88,
         ..default()
     });
@@ -117,7 +113,7 @@ fn create_visuals(
     });
 
     commands.insert_resource(ProjectileVisuals {
-        arrow_mesh: meshes.add(arrow_mesh()),
+        arrow_mesh: meshes.add(flying_arrow_mesh()),
         orb_mesh: meshes.add(Mesh::from(Sphere::new(ORB_DIAMETER / 2.0))),
         arrow_material,
         orb_material,
@@ -125,40 +121,14 @@ fn create_visuals(
     });
 }
 
-/// A shaft, bone point and crossed fletching notch inside one exact 0.8-block span.
-fn arrow_mesh() -> Mesh {
-    let shaft_length = ARROW_LENGTH - ARROW_HEAD_LENGTH - ARROW_FLETCH_LENGTH;
-    let head_centre = -ARROW_LENGTH / 2.0 + ARROW_HEAD_LENGTH / 2.0;
-    let shaft_centre = head_centre + ARROW_HEAD_LENGTH / 2.0 + shaft_length / 2.0;
-    let fletch_centre = ARROW_LENGTH / 2.0 - ARROW_FLETCH_LENGTH / 2.0;
-
-    let mut arrow = Mesh::from(Cuboid::from_size(Vec3::new(
-        ARROW_SHAFT_WIDTH,
-        ARROW_SHAFT_WIDTH,
-        shaft_length,
-    )))
-    .translated_by(Vec3::Z * shaft_centre);
-    let head = Mesh::from(Cone::new(ARROW_HEAD_RADIUS, ARROW_HEAD_LENGTH))
-        .rotated_by(Quat::from_rotation_x(-FRAC_PI_2))
-        .translated_by(Vec3::Z * head_centre);
-    let vertical_fletch = Mesh::from(Cuboid::from_size(Vec3::new(
-        ARROW_FLETCH_THICKNESS,
-        ARROW_FLETCH_WIDTH,
-        ARROW_FLETCH_LENGTH,
-    )))
-    .translated_by(Vec3::Z * fletch_centre);
-    let horizontal_fletch = Mesh::from(Cuboid::from_size(Vec3::new(
-        ARROW_FLETCH_WIDTH,
-        ARROW_FLETCH_THICKNESS,
-        ARROW_FLETCH_LENGTH,
-    )))
-    .translated_by(Vec3::Z * fletch_centre);
-    merge_all(
-        &mut arrow,
-        [head, vertical_fletch, horizontal_fletch],
-        "arrow",
-    );
-    arrow
+/// The arrow in flight: the one arrow every surface draws — [`arrow_mesh`] — at
+/// [`ARROW_LENGTH`], turned from point-up to point-forward along -Z.
+///
+/// Until #1231 this was a second arrow of its own, in one bone-coloured material; the ground
+/// and the hand drew a capsule. A quarter turn about X is exact, so the span along the forward
+/// axis is still exactly `ARROW_LENGTH`.
+fn flying_arrow_mesh() -> Mesh {
+    arrow_mesh(ARROW_LENGTH).rotated_by(Quat::from_rotation_x(-FRAC_PI_2))
 }
 
 fn apply_snapshots(
@@ -589,9 +559,74 @@ mod tests {
         assert!(trails[0].2 > trails[1].2);
     }
 
+    /// **The arrow in flight is the arrow on the ground and in the hand** (#1231): the shared
+    /// builder pointing forward, its shaft in the arrow item's own colour and its point in bone,
+    /// under a white material that multiplies over neither — rather than one bone-coloured
+    /// material over the whole arrow.
+    #[test]
+    fn the_flying_arrow_is_the_shared_arrow_pointing_forward_in_its_own_colours() {
+        use crate::player::crafting::ITEM_ARROW;
+        use crate::player::items::{ITEM_BONE, item_linear_rgba};
+
+        let mesh = flying_arrow_mesh();
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the arrow must carry positions");
+        };
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the arrow must carry its colours per vertex");
+        };
+        assert_eq!(
+            positions.len(),
+            arrow_mesh(ARROW_LENGTH).count_vertices(),
+            "the flying arrow is not the shared one"
+        );
+
+        let along = |pick: fn(f32, f32) -> bool| {
+            positions
+                .iter()
+                .zip(colours)
+                .reduce(|best, next| {
+                    if pick(next.0[2], best.0[2]) {
+                        next
+                    } else {
+                        best
+                    }
+                })
+                .map(|(_, colour)| *colour)
+                .expect("the arrow has vertices")
+        };
+        assert_eq!(
+            along(|z, best| z < best),
+            item_linear_rgba(ITEM_BONE),
+            "the arrow's frontmost point along -Z is not its bone point"
+        );
+        assert_eq!(
+            along(|z, best| z > best),
+            item_linear_rgba(ITEM_ARROW),
+            "the arrow's rearmost point is not its shaft in the arrow's colour"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world();
+        let visuals = world.resource::<ProjectileVisuals>();
+        assert_eq!(
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&visuals.arrow_material)
+                .expect("arrow material")
+                .base_color,
+            Color::WHITE,
+            "the flying arrow's material tints the colours it carries"
+        );
+    }
+
     #[test]
     fn the_arrow_mesh_is_exactly_arrow_length_along_its_forward_axis() {
-        let mesh = arrow_mesh();
+        let mesh = flying_arrow_mesh();
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {

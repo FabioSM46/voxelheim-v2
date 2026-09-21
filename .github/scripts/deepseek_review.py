@@ -433,6 +433,95 @@ def _safe_int(value, default=None):
         return default
 
 
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def commentable_lines(patch):
+    """The new-file line numbers a RIGHT-side review comment can be anchored to.
+
+    GitHub anchors an inline comment only to a line the file's patch shows: an added
+    line or a context line inside a hunk. Anything else is refused, and because every
+    inline comment travels in the one `create_review` request, a single bad anchor used
+    to cost the whole review (#1241).
+    """
+    lines = set()
+    new_line = None
+    for raw in (patch or "").splitlines():
+        header = _HUNK_HEADER.match(raw)
+        if header:
+            new_line = int(header.group(1))
+            continue
+        # Before the first hunk, a removed line, or "\ No newline at end of file":
+        # none of them occupies a line on the new side.
+        if new_line is None or raw.startswith("-") or raw.startswith("\\"):
+            continue
+        lines.add(new_line)
+        new_line += 1
+    return lines
+
+
+def anchor_problem(patches, path, line):
+    """Why an inline comment cannot be anchored, or None when GitHub should accept it.
+
+    `patches` maps each changed file to its patch, or is None when the file list could
+    not be read — then only the line number is checked and GitHub stays the judge.
+    """
+    if line is None:
+        return "has no usable line number"
+    if patches is None:
+        return None
+    if path not in patches:
+        return "is not a file this pull request changes"
+    if not patches[path]:
+        return "is in a file GitHub sent no patch for, so no line of it can carry a comment"
+    if line not in commentable_lines(patches[path]):
+        return "is outside every hunk of that file's diff"
+    return None
+
+
+def _general_comments_body(general):
+    """The review body's findings list. Its own header always comes first — the shell
+    helper relies on model prose never beginning a body."""
+    if not general:
+        return ""
+    entries = []
+    for i, g in enumerate(general):
+        where = ""
+        if g.get("path"):
+            line = _safe_int(g.get("line"))
+            where = f"In `{g['path']}{f':{line}' if line is not None else ''}`:\n\n"
+        entries.append(f"*{i + 1}.* {where}{g.get('body', '')}")
+    return "## General Comments\n\n" + "\n\n---\n\n".join(entries)
+
+
+def _describe_post_failure(exc):
+    """One line naming what GitHub answered, without leaking a credential."""
+    status = getattr(exc, "status", None)
+    message = _sanitize_error(" ".join(str(exc).split()))[:BODY_EXCERPT_CHARS]
+    return f"{type(exc).__name__}{f' {status}' if status else ''}: {message}"
+
+
+def _log_review_payload(body, review_comments):
+    """What a create_review request carries. A 500 names no culprit, so the log has to."""
+    print(f"Posting review: body {len(body)} chars, {len(review_comments)} inline comment(s)")
+    for i, c in enumerate(review_comments, 1):
+        print(f"  inline {i}: {c['path']}:{c['line']} ({len(c['body'])} chars)")
+
+
+def _log_unpublished_findings(findings):
+    """Every finding in full, when no review could carry it.
+
+    Unbounded on purpose, unlike the measure-only excerpts: this is the only copy left,
+    and before #1241 recovering one meant replaying the whole review with measure_only.
+    """
+    print(f"UNPUBLISHED FINDINGS — {len(findings)} item(s) GitHub did not accept:")
+    for i, f in enumerate(findings, 1):
+        where = f.get("path") or "(general)"
+        if f.get("path") and _safe_int(f.get("line")) is not None:
+            where = f"{where}:{_safe_int(f.get('line'))}"
+        print(f"--- finding {i} at {where}\n{f.get('body', '')}")
+
+
 def _count_bot_reviews(pr, bot_username):
     """Count the bot's Mode A full reviews — the only thing MAX_ROUNDS caps.
 
@@ -1094,8 +1183,10 @@ Rules:
                 event="COMMENT",
             )
             print("✓ Clean verdict posted as a COMMENT review")
-        except GithubException as exc:
-            print(f"ERROR posting the clean verdict: {exc}")
+        except (GithubException, RequestException) as exc:
+            # RequestException too: urllib3 exhausting its retries on a 5xx storm raises
+            # that, not a GithubException, and it escaped as a bare traceback (#1241).
+            print(f"ERROR posting the clean verdict: {_describe_post_failure(exc)}")
             raise RuntimeError(
                 "DeepSeek produced a clean verdict, but GitHub rejected the review that records it."
             ) from exc
@@ -1105,24 +1196,25 @@ Rules:
 
     print(f"Parsed {len(inline)} inline + {len(general)} general comments (review_complete={review_complete})")
 
-    pr_file_paths = set()
+    patches = None
     try:
-        pr_file_paths = {f.filename for f in pr.get_files()}
+        patches = {f.filename: f.patch for f in pr.get_files()}
     except Exception as e:
-        print(f"WARNING: Could not fetch PR files for path validation: {e}")
-        print("Skipping path validation — relying on GitHub API to reject invalid paths")
+        print(f"WARNING: Could not fetch PR files for anchor validation: {e}")
+        print("Skipping anchor validation — relying on GitHub API to reject invalid anchors")
 
+    # Anchors are checked here, before the request, because GitHub's answer to a bad one
+    # is not reliably a 422 naming it: on #1222 it was a 500 storm that named nothing and
+    # lost the whole review, three runs in a row (#1241). A comment that cannot be
+    # anchored is still a finding, so it moves to the body with its location.
     review_comments = []
     for c in inline:
         path = c.get("path", "")
-        if pr_file_paths and path not in pr_file_paths:
-            print(f"WARNING: File '{path}' not in PR changes — treating as general comment")
-            general.append({"path": path, "line": c.get("line"), "body": c["body"]})
-            continue
         line = _safe_int(c.get("line"))
-        if line is None:
-            print(f"WARNING: Invalid line number {c.get('line')!r} for {c.get('path')}, treating as general")
-            general.append({"path": c.get("path", ""), "line": c.get("line"), "body": c["body"]})
+        problem = anchor_problem(patches, path, line)
+        if problem:
+            print(f"WARNING: comment at {path}:{c.get('line')!r} {problem} — posting it as a general comment")
+            general.append({"path": path, "line": c.get("line"), "body": c["body"]})
             continue
         review_comments.append({
             "path": c["path"],
@@ -1131,11 +1223,7 @@ Rules:
             "body": c["body"],
         })
 
-    body = ""
-    if general:
-        body = "## General Comments\n\n" + "\n\n---\n\n".join(
-            f"*{i + 1}.* {g['body']}" for i, g in enumerate(general)
-        )
+    body = _general_comments_body(general)
 
     if not review_comments and not body:
         raise RuntimeError(
@@ -1154,33 +1242,67 @@ Rules:
     # unread findings until the DEEPSEEK_REVIEW_READ label says otherwise.
     event_type = "COMMENT"
 
+    posted_body = _stamp(body)
+    _log_review_payload(posted_body, review_comments)
     try:
         # PyGithub's create_review asserts comments is a list — pass [] instead of None
-        posted_body = _stamp(body)
         pr.create_review(body=posted_body, event=event_type, comments=review_comments or [])
         print(f"✓ Review posted as {event_type} — {len(review_comments)} inline comments")
-    except GithubException as exc:
-        print(f"ERROR posting review: {exc}")
-        # If line-based posting fails, convert inline to general and post as body-only
-        if "line" in str(exc).lower() or "position" in str(exc).lower():
-            print("Converting inline comments to general due to line/position error")
-            for c in review_comments:
-                general.append({
-                    "path": c["path"],
-                    "line": str(c["line"]),
-                    "body": c["body"],
-                })
-            body = "## General Comments\n\n" + "\n\n---\n\n".join(
-                f"*{i + 1}.* In `{g['path']}:{g.get('line', '?')}`:\n\n{g['body']}"
-                for i, g in enumerate(general)
-            )
-            try:
-                pr.create_review(body=_stamp(body), event=event_type)
-                print(f"✓ Review posted as general-only {event_type} — {len(general)} items")
-            except GithubException as exc2:
-                print(f"ERROR on fallback post: {exc2}")
-        else:
-            raise
+        return
+    except (GithubException, RequestException) as exc:
+        # RequestException as well: repeated 500s exhaust urllib3's retries and PyGithub
+        # raises requests' RetryError, which is no GithubException — so on #1222 this
+        # handler never ran and the generated review was lost with a traceback (#1241).
+        first_failure = _describe_post_failure(exc)
+        print(f"ERROR: GitHub refused the review ({first_failure})")
+
+    if not review_comments:
+        # Nothing left to take out: the body alone was the request.
+        _log_unpublished_findings(general)
+        raise RuntimeError(
+            "DeepSeek produced a review, but GitHub refused the body-only request that "
+            f"carried it ({first_failure}). Every finding is printed above."
+        )
+
+    # Degrade rather than lose it. Any failure, not only one whose message mentions a line:
+    # a 500 names nothing, and the old string match is exactly what let it through. The
+    # inline comments are the part that can be malformed, so they are the part dropped —
+    # each moved into the body with its location. The result is still stamped, and a body
+    # carrying findings is counted by the frozen rule's unread-findings half, so nothing
+    # that was generated escapes the merge gate; it merely arrives without threads.
+    #
+    # No read-back first, and what that costs (review on #1247): if GitHub created the
+    # review and still answered 500, this posts a second stamped review, and
+    # `_count_bot_reviews` counts both — one intended round spends two. At MAX_ROUNDS=1
+    # that changes nothing, since one stamped review already exhausts the cap; a higher
+    # cap would end one round early. Skipping the retry whenever a stamped review exists
+    # was rejected: every PR past its first round has one (#1222 did), so that guard
+    # would lose the review again in exactly the case this path exists for.
+    refused =[{"path": c["path"], "line": c["line"], "body": c["body"]} for c in review_comments]
+    print(
+        f"Retrying without the {len(refused)} inline comment(s), listed in the body instead: "
+        + ", ".join(f"{c['path']}:{c['line']}" for c in refused)
+    )
+    degraded_body = _stamp(
+        "## Inline comments GitHub refused\n\n"
+        f"GitHub refused this review while it carried {len(refused)} inline comment(s) "
+        f"({first_failure}), so they are listed below with the file and line each belongs "
+        "to. They create no review thread.\n\n"
+        + _general_comments_body(general + refused)
+    )
+    try:
+        pr.create_review(body=degraded_body, event=event_type)
+    except (GithubException, RequestException) as exc2:
+        print(f"ERROR: GitHub refused the body-only review too ({_describe_post_failure(exc2)})")
+        _log_unpublished_findings(general + refused)
+        raise RuntimeError(
+            "DeepSeek produced a review, but GitHub refused it both with its inline comments "
+            f"({first_failure}) and without them. Every finding is printed above."
+        ) from exc2
+    print(
+        f"✓ Review posted as body-only {event_type} — GitHub refused the inline comments, "
+        f"accepted the body; {len(general) + len(refused)} findings listed in it"
+    )
 
 
 # ──────────────── Mode B: reply to review comment ────────────────

@@ -33,12 +33,14 @@ type slotTable [protocol.InventorySlots]inventoryStack
 
 const (
 	// equipmentFirst is the first slot automatic insertion must never reach. The
-	// inventory is laid out as hotbar, pack, then the four worn slots.
-	equipmentFirst   = int(protocol.InventorySlots - protocol.EquipmentSlots)
-	equipmentHead    = equipmentFirst
-	equipmentChest   = equipmentFirst + 1
-	equipmentLegs    = equipmentFirst + 2
-	equipmentOffHand = equipmentFirst + 3
+	// inventory is laid out as hotbar, pack, then the five worn slots. The main hand is
+	// appended last, so the four worn slots before it keep their indices.
+	equipmentFirst    = int(protocol.InventorySlots - protocol.EquipmentSlots)
+	equipmentHead     = equipmentFirst
+	equipmentChest    = equipmentFirst + 1
+	equipmentLegs     = equipmentFirst + 2
+	equipmentOffHand  = equipmentFirst + 3
+	equipmentMainHand = equipmentFirst + 4
 )
 
 // inventoryStack is one slot's authoritative contents. The zero value is an empty slot.
@@ -100,8 +102,14 @@ func stackOf(itemID ItemID, count uint16) inventoryStack {
 
 func newInventory() inventory { return inventory{} }
 
-// newStarterInventory is what a player joins holding: one rusty sword at full
-// durability in the first hotbar slot, and nothing else.
+// newStarterInventory is what a new character joins holding: one rusty sword at full
+// durability in the main hand, and nothing else — the hotbar starts empty.
+//
+// In the main hand rather than on the hotbar because the main hand is the one slot an
+// attack may name and the one the draw key reads, so a sword anywhere else is a sword a
+// new player cannot fight with until they have found the equipment cell to drag it into.
+// Only a character with no stored life is handed this; a restored one keeps the pack it
+// saved, wherever its sword happens to be.
 //
 // Granted on join deliberately, and **crafting arriving did not change that**. The blade a
 // player can now make costs three raw iron, two coal, a log and a forge to make them at,
@@ -122,9 +130,14 @@ func newStarterInventory() inventory {
 // Split out because Join now chooses between this and a restored pack before it builds
 // the player, and slotTable is the type that can be chosen: `inventory` carries a mutex
 // and `go vet`'s copylocks check refuses to see one assigned from a variable.
+//
+// The sword is keyed by equipmentMainHand and not by a hotbar index: the rusty sword's
+// registry row is one-handed and names the main hand as where it is worn, so this is a
+// record Life.Validate accepts, and the death penalty reaches it there exactly as it did
+// on the hotbar because carriedOnPerson covers the equipment slots.
 func starterSlots() slotTable {
 	return slotTable{
-		0: stackOf(ItemRustySword, 1),
+		equipmentMainHand: stackOf(ItemRustySword, 1),
 	}
 }
 
@@ -444,6 +457,8 @@ func wornAtForSlot(slot uint8) (wornAt, bool) {
 		return wornLegs, true
 	case equipmentOffHand:
 		return wornOffHand, true
+	case equipmentMainHand:
+		return wornMainHand, true
 	default:
 		return wornNowhere, false
 	}
@@ -455,16 +470,17 @@ func equipmentSlot(slot uint8) bool {
 }
 
 // wornItemsLocked returns the item ids announced with this player's appearance.
-// The caller holds inventory.mu, so all four ids describe one authoritative instant.
-func (i *inventory) wornItemsLocked() (head, chest, legs, offHand uint16) {
+// The caller holds inventory.mu, so all five ids describe one authoritative instant.
+func (i *inventory) wornItemsLocked() (head, chest, legs, offHand, mainHand uint16) {
 	return uint16(i.slots[equipmentHead].item),
 		uint16(i.slots[equipmentChest].item),
 		uint16(i.slots[equipmentLegs].item),
-		uint16(i.slots[equipmentOffHand].item)
+		uint16(i.slots[equipmentOffHand].item),
+		uint16(i.slots[equipmentMainHand].item)
 }
 
-// refreshWornLocked rebuilds the combat summary from the four authoritative
-// equipment slots. The caller holds sim.mu and inventory.mu; assigning the complete
+// refreshWornLocked rebuilds the combat summary from the authoritative worn
+// equipment slots. A main-hand weapon carries no armour or threat, so it adds nothing. The caller holds sim.mu and inventory.mu; assigning the complete
 // local value at the end means the tick can never observe half of one refresh.
 //
 // A piece at zero durability stays equipped and visible but contributes nothing: worn
@@ -498,7 +514,13 @@ func (p *Player) refreshWornLocked() {
 	p.worn = worn
 	p.wornShield = shield
 	if shield.fraction == 0 {
-		p.blocking = false
+		p.lowerShieldLocked()
+	}
+	// A draw needs its bow in the main hand. Every path that empties that slot or leaves
+	// the bow in it worn through ends here, and ends the draw with it; a move that touches
+	// the slot at all is handled by MoveInventory.
+	if p.draw != nil && !p.mainHandHoldsADrawableBowLocked() {
+		p.cancelDrawLocked()
 	}
 }
 
@@ -565,29 +587,74 @@ func wornByDeath(current uint16) uint16 {
 	return uint16(uint32(current) * deathDurabilityKept / deathDurabilityScale)
 }
 
-// moveLocked applies one authoritative slot move and reports whether the state
+// ErrHandsOccupied refuses a move that would leave a two-handed weapon in the main hand
+// beside anything in the off hand. It is the one move refusal the session answers —
+// with ActionRefused{MoveInventory, HandsOccupied} — and, like every refusal, nothing moves.
+var ErrHandsOccupied = errors.New("a two-handed weapon and an off-hand item cannot be worn together")
+
+// errMoveChangesNothing is every other refused move, which is answered with silence.
+var errMoveChangesNothing = errors.New("the inventory move changes no authoritative slot")
+
+// handsOccupied reports whether these two items may not be worn in the main and off hand
+// together: both are present and the main-hand item is not registered one-handed.
+//
+// The unregistered branch is a fail-closed default and is reached by neither caller:
+// moveLocked refuses an unregistered source before asking, and Life.Validate's per-slot
+// loop refuses an unregistered id before it reaches the hands. Neither can therefore
+// report an unknown item as a two-handed conflict.
+func handsOccupied(mainHand, offHand ItemID) bool {
+	if mainHand == ItemNone || offHand == ItemNone {
+		return false
+	}
+	definition, registered := itemByID(mainHand)
+	return !registered || !definition.oneHanded
+}
+
+// placingOccupiesHandsLocked reports whether putting item into slot would break the
+// two-handed rule against what the *other* hand holds now. Reading the other hand before
+// the move is exact rather than a shortcut: wornAt already refuses every move between the
+// two hand slots, so the other hand is never the far end of the move being judged.
+func (i *inventory) placingOccupiesHandsLocked(slot uint8, item ItemID) bool {
+	switch int(slot) {
+	case equipmentMainHand:
+		return handsOccupied(item, i.slots[equipmentOffHand].item)
+	case equipmentOffHand:
+		return handsOccupied(i.slots[equipmentMainHand].item, item)
+	default:
+		return false
+	}
+}
+
+// moveLocked applies one authoritative slot move, and returns nil exactly when the state
 // changed. A partial move into an occupied different-item slot is refused: there
 // is nowhere to keep both that slot's old stack and the source remainder. A whole
 // source stack swaps with a different item instead.
-func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
+//
+// The two-handed rule is asked wherever an item enters a hand: at the destination, and
+// at the source when a swap sends the destination's item back into it. Both answer
+// ErrHandsOccupied; every other refusal is errMoveChangesNothing.
+func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) error {
 	if req.From >= protocol.InventorySlots || req.To >= protocol.InventorySlots || req.Count == 0 || req.From == req.To {
-		return false
+		return errMoveChangesNothing
 	}
 
 	source := &i.slots[req.From]
 	target := &i.slots[req.To]
 	definition, registered := itemByID(source.item)
 	if source.count == 0 || source.item == ItemNone || !registered {
-		return false
+		return errMoveChangesNothing
 	}
 	toPlace, toEquipment := wornAtForSlot(req.To)
 	if toEquipment && definition.wornAt != toPlace {
-		return false
+		return errMoveChangesNothing
 	}
 
 	moveCount := min(req.Count, source.count)
 	if toEquipment && moveCount != 1 {
-		return false
+		return errMoveChangesNothing
+	}
+	if i.placingOccupiesHandsLocked(req.To, source.item) {
+		return ErrHandsOccupied
 	}
 	switch {
 	case target.count == 0:
@@ -596,7 +663,7 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		// durable item is one to a slot — min(req.Count, 1) is always 1 — and written
 		// anyway, because "one to a slot" is a registry entry somebody can change.
 		if source.durable() && moveCount != source.count {
-			return false
+			return errMoveChangesNothing
 		}
 		// The whole struct, then the count: this is what carries durability across with
 		// the item instead of leaving the new slot holding a wearless copy of it.
@@ -606,41 +673,46 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		if source.count == 0 {
 			*source = inventoryStack{}
 		}
-		return true
+		return nil
 
 	case target.item == source.item:
 		// Never for equipment, for the reason insertLocked does not merge it: two
 		// blades have two different amounts of wear left and one slot to record it in.
 		if toEquipment || source.durable() || target.durable() {
-			return false
+			return errMoveChangesNothing
 		}
 		if target.count >= definition.maxStack {
-			return false
+			return errMoveChangesNothing
 		}
 		moveCount = min(moveCount, definition.maxStack-target.count)
 		if moveCount == 0 {
-			return false
+			return errMoveChangesNothing
 		}
 		target.count += moveCount
 		source.count -= moveCount
 		if source.count == 0 {
 			*source = inventoryStack{}
 		}
-		return true
+		return nil
 
 	case moveCount == source.count:
 		targetDefinition, ok := itemByID(target.item)
 		if !ok {
-			return false
+			return errMoveChangesNothing
 		}
 		if place, equipment := wornAtForSlot(req.From); equipment && (targetDefinition.wornAt != place || target.count != 1) {
-			return false
+			return errMoveChangesNothing
+		}
+		// The swap-back half of the two-handed rule: dragging a sword out of the main hand
+		// onto a bow would put the bow in the hand beside the shield.
+		if i.placingOccupiesHandsLocked(req.From, target.item) {
+			return ErrHandsOccupied
 		}
 		*source, *target = *target, *source
-		return true
+		return nil
 
 	default:
-		return false
+		return errMoveChangesNothing
 	}
 }
 
@@ -702,7 +774,8 @@ func (p *Player) tryApplyDeathPenaltyLocked() bool {
 
 // MoveInventory resolves one client intent against the live authoritative slots.
 // A changed state is returned whole; every refusal returns an error so the session
-// can log it and send nothing.
+// can log it. ErrHandsOccupied is the one the session also answers; every other refusal
+// sends nothing.
 func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.InventoryState, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
@@ -715,8 +788,13 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 	}
 	defer p.inventory.mu.Unlock()
 
-	if !p.inventory.moveLocked(req) {
-		return protocol.InventoryState{}, errors.New("the inventory move changes no authoritative slot")
+	if err := p.inventory.moveLocked(req); err != nil {
+		return protocol.InventoryState{}, err
+	}
+	if int(req.From) == equipmentMainHand || int(req.To) == equipmentMainHand {
+		// The drawn bow was moved, even when another bow took its place: the string that was
+		// held back belonged to the bow that left.
+		p.cancelDrawLocked()
 	}
 	p.refreshWornLocked()
 	if equipmentSlot(req.From) || equipmentSlot(req.To) {

@@ -328,7 +328,20 @@ const (
 	/// V43: chunk block ids 58/59 describe open iron grilles. Older clients would
 	/// render and predict these unknown ids as full cubes, hiding the openings and
 	/// disagreeing with authoritative bar collision despite unchanged RLE bytes.
-	ProtocolVersionCurrent ProtocolVersion = 43
+	///
+	/// V44: a main hand, two-handed weapons and a drawn bow. Two changes owe the bump and
+	/// one number covers both. `DrawRequest` is a client -> server union member a V43 server
+	/// cannot name, so it closes the session instead of dropping the frame — `BlockRequest`'s
+	/// argument at V22. And `AttackRequest.slot` changes meaning from whichever slot the
+	/// client names to the main-hand equipment slot, with any other slot refused: a V43
+	/// client keeps naming its hotbar slot and every swing is dropped after a clean
+	/// handshake, which is V11's silent disagreement rather than a decode error. The rest
+	/// would have owed nothing alone: `PlayerAppearance.worn_mainhand` and
+	/// `PlayerVitals.draw_progress` read as zero — nothing held, not drawing — from an older
+	/// server, and `RefusedAction.MoveInventory` and `RefusalReason.HandsOccupied` ride inside
+	/// an `ActionRefused`, whose decoders are total. The fifth equipment slot is a layout
+	/// the welcome announces, and the consumers adopt it separately, as they did at V22.
+	ProtocolVersionCurrent ProtocolVersion = 44
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

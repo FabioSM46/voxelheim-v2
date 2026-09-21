@@ -4,9 +4,11 @@
 //! [`Gait::cycle`] — the distance phase `horse.rs` poses the legs from — and a beat is
 //! heard on the frame the cycle passes one of [`Gait::beats`], each distinct instant once:
 //! four at a walk, three at a canter, whose diagonal pair lands together. Standing is no
-//! cycle and so no beat, and a horse with nothing solid under its feet is airborne and
-//! strikes nothing. Which gait a horse uses is not chosen here: [`horse::gait`] is the one
-//! selection, and `horse::animate_gait` poses the legs from the same answer.
+//! cycle and so no beat; a horse with nothing solid under its feet is airborne and strikes
+//! nothing; and a horse in water is swimming rather than treading, so it strikes nothing
+//! either — see [`ground`], which asks `water_audio`'s probe before it asks the palette.
+//! Which gait a horse uses is not chosen here: [`horse::gait`] is the one selection, and
+//! `horse::animate_gait` poses the legs from the same answer.
 //!
 //! The whinny is a transition in the authoritative mount projection, observed between two
 //! snapshot ticks: a player the previous tick held unmounted whom this one holds mounted.
@@ -19,7 +21,7 @@ mod sounds;
 
 use super::{
     Body, SnapshotBuffer, WalkPose, WorldCamera,
-    constants::MOUNTED_WIDTH,
+    constants::{MOUNTED_HEIGHT, MOUNTED_WIDTH},
     horse::{self, Gait, Horse, PaddockHorse},
 };
 use crate::{
@@ -118,7 +120,18 @@ fn footfalls(gait: &Gait, from: f32, to: f32) -> usize {
 ///
 /// The centre first, then the corners of the mounted footprint, so a horse standing across
 /// an edge still finds the block it is standing on.
+///
+/// **A swimming horse strikes nothing, and that is asked before the ground is.** Water is
+/// not solid, so a horse afloat in deep water already found no ground here — but one
+/// swimming in shallower water sits over a bottom the probe *can* reach, and it would clop
+/// on stone while its legs are moving through water. The question "is this body in water"
+/// has exactly one definition on this side, [`super::water_audio::in_water`], and it is the
+/// server's own box test; the mounted box is what the server collides for horse and rider
+/// together.
 fn ground(store: &ChunkStore, feet: Vec3, size: usize) -> Option<MaterialClass> {
+    if super::water_audio::in_water(store, feet, MOUNTED_WIDTH, MOUNTED_HEIGHT, size) {
+        return None;
+    }
     let half = MOUNTED_WIDTH * 0.45;
     let y = (feet.y - GROUND_PROBE).floor() as i32;
     [

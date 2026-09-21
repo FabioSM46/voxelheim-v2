@@ -774,7 +774,7 @@ func TestNoSnapshotEverCarriesDying(t *testing.T) {
 	}
 
 	for blow := 1; blow <= 10; blow++ {
-		if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+		if err := h.swing(player, mainHandSlot, uint32(h.tick)+1); err != nil {
 			t.Fatalf("swing %d was refused: %v", blow, err)
 		}
 		h.step()

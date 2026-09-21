@@ -27,8 +27,8 @@ use bevy::prelude::*;
 
 use super::SelfVitals;
 use super::camera::ViewMode;
-use super::combat::SwingSent;
-use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
+use super::combat::{SwingAbandoned, SwingSent};
+use super::crafting::{ITEM_ARROW, ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
@@ -102,16 +102,27 @@ const _: () = assert!(
 /// ceiling is pinned rather than the ratio.
 const HAND_DROP_FRACTION: f32 = 0.670_619_3;
 
-/// And the same for the off-hand shield, which hangs nearer and higher.
+/// How long the left hand takes to move between its rest and the parry, in either direction.
 ///
-/// A second fraction rather than a share of the first: the two hands were never at one
-/// height, and the point of this change is that neither of them moves at the default field
-/// of view. What must not happen is one hand following the frame while the other stays put,
-/// which is the inconsistency deriving only the main hand would have introduced.
-const SHIELD_DROP_FRACTION: f32 = 0.528_098_9;
+/// Short enough that the shield is up while the server says the block is, long enough to read
+/// as a movement: at sixty frames a second it is seven frames, where one would be a snap.
+const PARRY_TIME: Duration = Duration::from_millis(120);
 
-/// How far in front of the eye the off-hand shield sits.
-const SHIELD_DEPTH: f32 = -0.16;
+/// How far the parry carries the left hand toward the centre of the frame, and away from the
+/// eye.
+///
+/// **Away, never toward.** The advance is the one direction that costs the near plane nothing,
+/// and the arm under it is lengthened by exactly what [`drawn_arm_reach`] gives any other
+/// composition carried that far out, so its end stays below the frame.
+const PARRY_INBOARD: f32 = 0.030;
+const PARRY_ADVANCE: f32 = 0.020;
+
+/// How far the parry rolls the left hand about the view axis.
+///
+/// Negative about the camera's `Z` carries the top of the limb — the fist, and the shield on
+/// it — toward `+X`, which is the centre of the frame for a hand on the left: the forearm tilts
+/// inward and the shield swings across the body.
+const PARRY_ROLL_RADIANS: f32 = -0.40;
 
 /// Where the view model sits for a camera projecting `field_of_view` radians vertically.
 ///
@@ -126,20 +137,157 @@ fn base_translation(field_of_view: f32) -> Vec3 {
 }
 
 /// The walking bare hand's resting pose, mirrored for the left rein.
-///
-/// All three limb boxes are symmetric in Z. Turning the left model halfway around Y
-/// therefore mirrors their X geometry while preserving outward triangle winding and the
-/// shared mesh/material. Negating the resting roll mirrors its lean as well.
-/// A negative X scale alone would reverse winding and back-face-cull the outside.
 pub(super) fn mounted_hand_transform(side: f32, field_of_view: f32) -> Transform {
-    let mut pose = presented_transform(&HandAnimation::default(), None, field_of_view);
-    if side < 0.0 {
-        pose.translation.x = -pose.translation.x;
-        pose.rotation = Quat::from_rotation_x(REST_PITCH_RADIANS)
-            * Quat::from_rotation_z(-REST_ROLL_RADIANS)
-            * Quat::from_rotation_y(PI);
+    hand_on_side(
+        side,
+        presented_transform(&HandAnimation::default(), None, field_of_view),
+    )
+}
+
+/// **A right-hand pose, put on `side`**: unchanged for a positive side, and for a negative one
+/// mirrored across the view's vertical plane — by rotation, never by a negative scale.
+///
+/// The mirror of a pose `T·R` is `M·T·R·M` with `M` negating `X`. The translation takes `M`
+/// directly. `M·R·M` is still a rotation — the same turn with its `Y` and `Z` components
+/// negated — and the trailing `M` is the geometry's own mirror, which is a half turn about `Y`
+/// followed by a mirror in `Z`. **Every limb box is symmetric in `Z`**, so that last mirror
+/// maps the fist, the wrist and the forearm onto themselves and the half turn is the whole of
+/// it. A negative `X` scale would say the same thing and reverse the triangle winding, and the
+/// outside of the hand would be back-face culled.
+///
+/// **Not a shield function.** Anything a left hand holds rides on this same pose; an item that
+/// is not symmetric in `Z` is turned the other half turn inside [`left_hand_mesh`], so it faces
+/// the world after the mirror exactly as it does in the right hand.
+pub(super) fn hand_on_side(side: f32, right_hand: Transform) -> Transform {
+    if side >= 0.0 {
+        return right_hand;
     }
-    pose
+    let [x, y, z, w] = right_hand.rotation.to_array();
+    Transform {
+        translation: right_hand.translation * Vec3::new(-1.0, 1.0, 1.0),
+        rotation: Quat::from_xyzw(x, -y, -z, w) * Quat::from_rotation_y(PI),
+        scale: right_hand.scale,
+    }
+}
+
+/// How far into the parry the left hand is drawn, eased: `fraction` is how far the transition
+/// has run, from `0.0` at rest to `1.0` at the parry.
+///
+/// Smoothstep, so the hand leaves one pose and arrives at the other at no speed rather than
+/// starting and stopping on a frame.
+fn parry_ease(fraction: f32) -> f32 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    fraction * fraction * (3.0 - 2.0 * fraction)
+}
+
+/// How far the parry has carried the left hand along the view, for the arm under it.
+fn off_hand_along_view(fraction: f32) -> f32 {
+    -PARRY_ADVANCE * parry_ease(fraction)
+}
+
+/// **The left hand**, `fraction` of the way from its rest to the parry.
+///
+/// At rest it is the right hand's resting pose on the other side — the mirrored position, the
+/// same depth, the same rest pitch — which is also the left rein hand, so the rest and the
+/// mounted pose are one pose. The parry adds its three terms about the hand's own origin: the
+/// roll about the view axis, then the step toward the centre and the advance away from the eye.
+fn off_hand_transform(field_of_view: f32, fraction: f32) -> Transform {
+    let rest = mounted_hand_transform(-1.0, field_of_view);
+    let eased = parry_ease(fraction);
+    Transform {
+        translation: rest.translation + Vec3::new(PARRY_INBOARD, 0.0, -PARRY_ADVANCE) * eased,
+        rotation: Quat::from_rotation_z(PARRY_ROLL_RADIANS * eased) * rest.rotation,
+        scale: rest.scale,
+    }
+}
+
+/// How many string pulls the drawn bow is built at besides rest (#1240): the quantised rebuilds
+/// [`bow_mesh_drawn`] records, each one stable mesh asset, swapped by handle and never rewritten.
+const DRAW_STEPS: usize = 12;
+/// Where the drawn bow's grip, and the left fist on it, sits: left of the eye, further out
+/// than the resting hands, this fraction of the way down the lower half of the frame.
+const DRAW_GRIP_INBOARD: f32 = -0.050;
+const DRAW_GRIP_DEPTH: f32 = -0.220;
+const DRAW_GRIP_DROP_FRACTION: f32 = 0.50;
+/// The drawn bow's cant about the arrow: its upper limb leans toward the string hand.
+const DRAW_CANT_RADIANS: f32 = -0.22;
+/// The time constant the drawn string follows the server's `draw_progress` with between
+/// snapshots — about one server tick.
+const DRAW_FOLLOW_SECONDS: f32 = 0.05;
+/// How long the string takes to snap from a full draw home once the server says the draw is over.
+const DRAW_SNAP_TIME: Duration = Duration::from_millis(70);
+
+/// **The drawn bow's frame**: the grip at its origin, the bow's string side (its own `+X`)
+/// turned toward the eye and its limbs up, canted by [`DRAW_CANT_RADIANS`]. The arrow therefore
+/// lies along the view and points where every line along it vanishes: the centre of the frame.
+fn draw_frame(field_of_view: f32) -> Transform {
+    Transform {
+        translation: Vec3::new(
+            DRAW_GRIP_INBOARD,
+            base_height(field_of_view, DRAW_GRIP_DROP_FRACTION, DRAW_GRIP_DEPTH),
+            DRAW_GRIP_DEPTH,
+        ),
+        rotation: Quat::from_rotation_z(DRAW_CANT_RADIANS)
+            * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+        scale: Vec3::ONE,
+    }
+}
+
+/// The string's nock at draw fraction `draw`, in the bow's own space: [`bow_string`]'s answer,
+/// the same one the drawn mesh is built from.
+fn nock_point(draw: f32) -> Vec3 {
+    bow_string(draw)[1].extend(0.0)
+}
+
+/// The rest pose's rotation, which both hands keep on the bow so each limb hangs as at rest.
+fn rest_rotation() -> Quat {
+    Quat::from_rotation_x(REST_PITCH_RADIANS) * Quat::from_rotation_z(REST_ROLL_RADIANS)
+}
+
+/// **The right hand while the bow is drawn**: its fist closed on the nock at `draw`, so it
+/// travels back with the string.
+fn string_hand_transform(field_of_view: f32, draw: f32) -> Transform {
+    Transform::from_translation(draw_frame(field_of_view).transform_point(nock_point(draw)))
+        .with_rotation(rest_rotation())
+}
+
+/// **The left hand while the bow is drawn**: the right hand's rest pose closed on the grip,
+/// mirrored onto the left by [`hand_on_side`].
+fn grip_hand_transform(field_of_view: f32) -> Transform {
+    let grip = draw_frame(field_of_view).translation * Vec3::new(-1.0, 1.0, 1.0);
+    hand_on_side(
+        -1.0,
+        Transform::from_translation(grip).with_rotation(rest_rotation()),
+    )
+}
+
+/// The nocked arrow at `draw`: [`arrow_mesh`] turned from point-up to run from the nock toward
+/// the grip, with its nock end on the string.
+fn nocked_arrow_transform(field_of_view: f32, draw: f32) -> Transform {
+    draw_frame(field_of_view)
+        * Transform::from_translation(nock_point(draw) - Vec3::X * ARROW_IN_HAND / 2.0)
+            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+}
+
+/// Which of the bows built at [`DRAW_STEPS`] is nearest a draw fraction.
+fn draw_step(draw: f32) -> usize {
+    (draw.clamp(0.0, 1.0) * DRAW_STEPS as f32).round() as usize
+}
+
+/// One frame of the drawn string toward the server's fraction `target`: an eased follow while
+/// it comes back, a short linear snap on the way home, never past the target and exactly on it
+/// once within a thousandth.
+fn settle_draw(shown: f32, target: f32, delta: f32) -> f32 {
+    let next = if target >= shown {
+        target - (target - shown) * (-delta / DRAW_FOLLOW_SECONDS).exp()
+    } else {
+        (shown - delta / DRAW_SNAP_TIME.as_secs_f32()).max(target)
+    };
+    if (target - next).abs() < 1e-3 {
+        target
+    } else {
+        next
+    }
 }
 
 /// How far below the eye a view model at `depth` sits, to land `fraction` of the way down
@@ -150,15 +298,6 @@ pub(super) fn mounted_hand_transform(side: f32, field_of_view: f32) -> Transform
 /// tangent — the same place in the frame whatever the frame is.
 fn base_height(field_of_view: f32, fraction: f32, depth: f32) -> f32 {
     -fraction * depth.abs() * (field_of_view / 2.0).tan()
-}
-
-/// Where the off-hand shield sits, for the same camera.
-fn shield_translation(field_of_view: f32) -> Vec3 {
-    Vec3::new(
-        -BASE_INBOARD,
-        base_height(field_of_view, SHIELD_DROP_FRACTION, SHIELD_DEPTH),
-        SHIELD_DEPTH,
-    )
 }
 
 /// The vertical field of view the hand is being placed against, in radians.
@@ -805,26 +944,18 @@ const SHADE_FLOOR: f32 = 0.45;
 /// stackable cube.
 const BUNDLE_SIZE: Vec3 = Vec3::new(0.075, 0.042, 0.048);
 
-/// An implement's haft: longer and thicker than a blade, because what tells an axe from
-/// a sword at a glance is that one is a handle with weight on the end and the other is
-/// mostly edge.
-const TOOL_HAFT_SIZE: Vec3 = Vec3::new(0.014, 0.130, 0.014);
-
-/// And its head, across the top of that haft. Wider than the haft in x and z and short in
-/// y, which is the T the axe is drawn as — and the whole of what distinguishes the
-/// silhouette from [`sword_mesh`]'s guard, grip and tapering blade.
-const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
-
-/// The length the pickaxe and the shovel are authored at, end to end, in the view model's
-/// metres.
+/// The length the axe, the pickaxe and the shovel are authored at, end to end, in the view
+/// model's metres.
 ///
-/// **The axe's haft length, so the three implements are the same size in the hand** and
-/// only their heads tell them apart. [`pickaxe_mesh`] and [`shovel_mesh`] scale from it, the
-/// way [`sceptre_mesh`] and [`bow_mesh`] do, so the ground drop and the body's fist get the
-/// same silhouette at world scale rather than a second authoring of it.
-const IMPLEMENT_LENGTH: f32 = TOOL_HAFT_SIZE.y;
+/// **One length, so the three implements are the same size in the hand** and only their
+/// heads tell them apart — longer than a blade's grip, because what tells an implement from a
+/// sword at a glance is that one is a handle with weight on the end and the other is mostly
+/// edge. [`axe_mesh`], [`pickaxe_mesh`] and [`shovel_mesh`] scale from it, the way
+/// [`sceptre_mesh`] and [`bow_mesh`] do, so the ground drop and the body's fist get the same
+/// silhouette at world scale rather than a second authoring of it.
+const IMPLEMENT_LENGTH: f32 = 0.130;
 
-/// The square section of a pickaxe's or a shovel's wooden haft.
+/// The square section of an implement's wooden haft.
 ///
 /// **Thirteen millimetres rather than twelve, and the millimetre is a plane.** At twelve the
 /// haft's side faces sit at `±0.006`, which is exactly the wrist's, and the two overlap where
@@ -837,42 +968,109 @@ const IMPLEMENT_HAFT: f32 = 0.013;
 const ARMOUR_BODY_SIZE: Vec3 = Vec3::new(0.060, 0.070, 0.016);
 const ARMOUR_SHOULDER_SIZE: Vec3 = Vec3::new(0.026, 0.018, 0.022);
 
+/// The bow's reach from tip to tip, in the view model's metres; [`bow_mesh`] scales from it.
 const BOW_LENGTH: f32 = 0.120;
+/// A limb's width where it leaves the grip. It narrows to [`BOW_TIP_FRACTION`] of this at
+/// the tip, which is the taper that makes a stave read as one rather than as a bar.
 const BOW_STAVE: f32 = 0.009;
+const BOW_TIP_FRACTION: f32 = 0.45;
+/// A limb's depth in z.
 const BOW_DEPTH: f32 = 0.008;
+/// The leather-wrapped grip at the middle of the bow, centred on the bow's own origin so a
+/// fist seated there closes on it.
+///
+/// **Every face of it is on a plane of its own.** Its sides at `±0.0065` clear the limbs'
+/// `±0.0045` where they leave it and the wrist's `±0.006`; its depth at `±0.0055` clears the
+/// limbs' `±0.004`; its ends at `±0.015` clear the fist's `±0.012` — the rule
+/// `no_two_colours_share_a_plane_in_the_hand` holds.
+const BOW_GRIP: Vec3 = Vec3::new(0.013, 0.030, 0.011);
+/// From the grip's centre to the string at rest: the brace height.
+const BOW_BRACE: f32 = 0.024;
+/// From the grip's centre to the nock at a full draw — a little under half the bow's length,
+/// the proportion a real longbow draws to.
+const BOW_DRAW_LENGTH: f32 = 0.056;
+/// How far the upper tip moves at a full draw; the lower one mirrors it. Toward the string
+/// side and toward the middle, which is the limbs flexing rather than the bow shrinking.
+const BOW_TIP_FLEX: Vec2 = Vec2::new(0.010, -0.008);
+/// How far each limb carries on past the point its string is tied to.
+const BOW_TIP_OVERHANG: f32 = 0.003;
+/// The string's square section: under a fifth of a limb's width, and still a few pixels
+/// wide in the hand.
+const BOW_CORD: f32 = 0.0024;
+/// How many straight spans each limb's curve is lofted in.
+const BOW_LIMB_SEGMENTS: usize = 6;
 const SCEPTRE_LENGTH: f32 = 0.130;
 const SCEPTRE_SHAFT: f32 = 0.013;
 const SCEPTRE_ORB_RADIUS: f32 = 0.018;
 const SCEPTRE_GREEN: [f32; 4] = [0.16, 0.82, 0.28, 1.0];
 
-/// A haft with a head across the top of it: one mesh, two boxes.
+/// An axe: a wooden haft under an iron head with a flared cutting bit on one side.
+///
+/// The head is an iron eye closed over the haft's end, a short square poll behind it, and the
+/// bit leaving the other side — one tapering bar, narrow where it leaves the eye and widest
+/// at the edge, whose far end drops a little into a beard. **One-sided on purpose**: the
+/// symmetric T this replaced (#1229) read as a hammer or a stick, and what makes an axe an axe
+/// at a glance is that the weight is all on the side that cuts.
 ///
 /// Merged rather than parented, for the reason the body's parts are merged in
 /// `player::part_mesh`: the view model is one entity with one transform that
 /// `animate_view_model` drives, and a second entity under it would be a second thing to
 /// keep in step with a swing.
 ///
-/// Only the axe is drawn from it since #1121 — see [`ItemShape::Tool`]. The pickaxe and the
-/// shovel have silhouettes of their own in [`pickaxe_mesh`] and [`shovel_mesh`].
-fn tool_mesh() -> Mesh {
-    let mut merged = Mesh::from(Cuboid::from_size(TOOL_HAFT_SIZE));
-    let head = Mesh::from(Cuboid::from_size(TOOL_HEAD_SIZE)).translated_by(Vec3::new(
-        0.0,
-        TOOL_HAFT_SIZE.y / 2.0,
-        0.0,
-    ));
-    merge_all(&mut merged, [head], "held tool");
-    merged
+/// Authored at [`IMPLEMENT_LENGTH`] and scaled to `length`, so the hand and the ground draw
+/// the same axe.
+pub(super) fn axe_mesh(length: f32) -> Mesh {
+    let (wood, iron) = implement_colours();
+    let half = IMPLEMENT_LENGTH / 2.0;
+    // The haft stops four millimetres short of the top and the eye closes over its end, so the
+    // whole axe is exactly `IMPLEMENT_LENGTH` and no face of the wood shares a plane with a
+    // face of the iron — the pickaxe's arrangement.
+    let haft_top = half - 0.004;
+    let mut axe = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(
+            IMPLEMENT_HAFT,
+            haft_top + half,
+            IMPLEMENT_HAFT,
+        )))
+        .translated_by(Vec3::Y * (haft_top - half) / 2.0),
+        wood,
+    );
+
+    // The eye's top face is the axe's top, at `half`; it is twenty-four millimetres tall.
+    let head_y = half - 0.012;
+    let eye = Mesh::from(Cuboid::from_size(Vec3::new(0.020, 0.024, 0.018)))
+        .translated_by(Vec3::Y * head_y);
+    // The poll: a short block behind the eye, sunk three millimetres into it so the two share
+    // no face, and a millimetre under the haft's end in y and half a millimetre wider than it
+    // in z for the same reason against the wood.
+    let poll = Mesh::from(Cuboid::from_size(Vec3::new(0.010, 0.014, 0.014)))
+        .translated_by(Vec3::new(-0.012, head_y, 0.0));
+    // The bit: rooted inside the eye, flaring from fourteen millimetres to thirty-six along
+    // the edge, and falling eight millimetres as it goes so the edge hangs below the eye and
+    // its upper corner stays under the eye's top. Thin in z, which is the other half of what
+    // reads as a blade rather than a block.
+    let bit = tapered_prism(
+        Vec2::new(0.006, head_y),
+        Vec2::new(0.040, head_y - 0.008),
+        0.014,
+        0.036,
+        0.006,
+    );
+    let mut head = eye;
+    merge_all(&mut head, [poll, bit], "axe head");
+    merge_all(&mut axe, [tinted(head, iron)], "axe");
+    axe.scaled_by(Vec3::splat(length / IMPLEMENT_LENGTH))
 }
 
-/// The two colours a pickaxe and a shovel are made of: a wooden haft and an iron head.
+/// The two colours every implement is made of: a wooden haft and an iron head.
 ///
 /// **What the implement is made of, not the ground it digs.** Until #1121 the shovel wore
-/// dirt and the pickaxe stone, which was a colour standing in for a silhouette they did not
-/// have. Now that they have one, the colour can say what the thing is: the log's own swatch
-/// for the wood, and the forged steel the iron sword already wears for the head. Both are absolute, the arrangement the shield and the sceptre use, so the hand
-/// skips the item-colour multiply for these shapes and the world draws them under a white
-/// material.
+/// dirt and the pickaxe stone, and until #1229 the axe was one bark-brown T — a colour
+/// standing in for a silhouette they did not have. Now that each has one, the colour can say
+/// what the thing is: the log's own swatch for the wood, and the forged steel the iron sword
+/// already wears for the head. Both are absolute, the arrangement the shield and the sceptre
+/// use, so the hand skips the item-colour multiply for these shapes and the world draws them
+/// under a white material.
 fn implement_colours() -> ([f32; 4], [f32; 4]) {
     (
         palette::linear_rgba(palette::LOG),
@@ -884,7 +1082,7 @@ fn implement_colours() -> ([f32; 4], [f32; 4]) {
 ///
 /// The head is an iron eye closed around the haft's end and two arms leaving it, each in two
 /// tapering segments that rise a little and then fall away to a point — the curve that makes
-/// a pick a pick rather than a hammer. Merged into one mesh for the reason [`tool_mesh`] is.
+/// a pick a pick rather than a hammer. Merged into one mesh for the reason [`axe_mesh`] is.
 ///
 /// Authored at [`IMPLEMENT_LENGTH`] and scaled to `length`, so the hand and the ground draw
 /// the same pick.
@@ -935,8 +1133,8 @@ pub(super) fn pickaxe_mesh(length: f32) -> Mesh {
 /// From the bottom: the grip's crossbar and the two cheeks that carry it into the haft, the
 /// haft, an iron socket flaring out of it, and the blade — thin, broad, and closing to a
 /// shallow point. The blade is the flattest thing in the vocabulary, which is what tells it
-/// from the pick's arms and the axe's block at a glance. Merged into one mesh for the reason
-/// [`tool_mesh`] is.
+/// from the pick's arms and the axe's one-sided bit at a glance. Merged into one mesh for the
+/// reason [`axe_mesh`] is.
 ///
 /// Authored at [`IMPLEMENT_LENGTH`] and scaled to `length`, so the hand and the ground draw
 /// the same shovel.
@@ -1033,60 +1231,353 @@ fn armour_mesh() -> Mesh {
 /// Written for the bow's limbs and shared since #1121 by the pickaxe's arms and the shovel's
 /// blade, grip and socket: every one of them is a flat piece that narrows along its length.
 fn tapered_prism(from: Vec2, to: Vec2, from_width: f32, to_width: f32, depth: f32) -> Mesh {
-    let along = (to - from).normalize();
-    // **To the right of the direction of travel**, and the handedness is the winding. With the
-    // left-hand perpendicular this used until #1121 every face below came out inside out — the
-    // bow's limbs included, which nothing measured until the pickaxe's arms reached
-    // `every_solid_in_the_sword_is_wound_outward` through this same function. The faces are
-    // symmetric about the bar's axis, so mirroring the corners changes the winding and nothing
-    // else about the geometry.
-    let across = Vec2::new(along.y, -along.x);
-    let [from_left, from_right] = [
-        from + across * from_width / 2.0,
-        from - across * from_width / 2.0,
-    ];
-    let [to_left, to_right] = [to + across * to_width / 2.0, to - across * to_width / 2.0];
+    // Nothing built from this wears a livery, so every corner points at the neutral band.
+    swept_bar(&[(from, from_width), (to, to_width)], depth, |_, _| {
+        livery::neutral_uv()
+    })
+}
+
+/// One rectangular bar swept along an XY polyline, `depth` thick in Z: each point of the
+/// spine is a section centre and the width the bar has there.
+///
+/// [`tapered_prism`] is this with two points. More points bend it — the bow's limbs and its
+/// drawn string — and **one sweep is one solid**: consecutive sections share their corners,
+/// so only the two ends are capped and nothing inside the bar is a face.
+///
+/// `uv` answers the texture coordinate for a corner from `around` the perimeter (`0..=1`,
+/// wrapping) and `along` the spine (`0..=1` by length), which is the pair
+/// [`livery::blade_uv`] takes — so a bar can wear a grain that runs along it.
+fn swept_bar(spine: &[(Vec2, f32)], depth: f32, uv: impl Fn(f32, f32) -> [f32; 2]) -> Mesh {
+    let count = spine.len();
+    let mut build = MeshBuild::default();
+    if count < 2 {
+        // A spine with one point has no direction to sweep in. Nothing in this module builds
+        // one; an empty mesh is the cosmetic direction to fail in.
+        return build.finish();
+    }
+    let direction = |from: usize, to: usize| (spine[to].0 - spine[from].0).normalize();
+    let mut lengths = vec![0.0_f32; count];
+    for index in 1..count {
+        lengths[index] = lengths[index - 1] + spine[index].0.distance(spine[index - 1].0);
+    }
+    let total = lengths[count - 1].max(f32::EPSILON);
+
     let point = |xy: Vec2, z: f32| Vec3::new(xy.x, xy.y, z);
     let near = -depth / 2.0;
     let far = depth / 2.0;
-    let fln = point(from_left, near);
-    let frn = point(from_right, near);
-    let tln = point(to_left, near);
-    let trn = point(to_right, near);
-    let flf = point(from_left, far);
-    let frf = point(from_right, far);
-    let tlf = point(to_left, far);
-    let trf = point(to_right, far);
+    // Left-near, right-near, left-far and right-far corners of every section.
+    let sections: Vec<[Vec3; 4]> = spine
+        .iter()
+        .enumerate()
+        .map(|(index, (centre, width))| {
+            // An end takes its one span's direction exactly; an interior section is mitred
+            // along the bisector and widened by the mitre, so a bend keeps the bar's width.
+            let (along, mitre) = if index == 0 {
+                (direction(0, 1), 1.0)
+            } else if index + 1 == count {
+                (direction(index - 1, index), 1.0)
+            } else {
+                let incoming = direction(index - 1, index);
+                let bisector = (incoming + direction(index, index + 1))
+                    .try_normalize()
+                    .unwrap_or(incoming);
+                (bisector, 1.0 / bisector.dot(incoming).max(0.5))
+            };
+            // **To the right of the direction of travel**, and the handedness is the winding.
+            // With the left-hand perpendicular this used until #1121 every face below came out
+            // inside out — the bow's limbs included, which nothing measured until the
+            // pickaxe's arms reached `every_solid_in_the_sword_is_wound_outward` through
+            // [`tapered_prism`]. The faces are symmetric about the bar's axis, so mirroring the
+            // corners changes the winding and nothing else about the geometry.
+            let across = Vec2::new(along.y, -along.x) * mitre;
+            let left = *centre + across * width / 2.0;
+            let right = *centre - across * width / 2.0;
+            [
+                point(left, near),
+                point(right, near),
+                point(left, far),
+                point(right, far),
+            ]
+        })
+        .collect();
 
-    let mut build = MeshBuild::default();
-    for face in [
-        [fln, frn, trn, tln],
-        [flf, tlf, trf, frf],
-        [fln, tln, tlf, flf],
-        [frn, frf, trf, trn],
-        [fln, flf, frf, frn],
-        [tln, trn, trf, tlf],
-    ] {
-        // Nothing built from this wears a livery, so every corner points at the neutral band.
-        build.quad(face, [livery::neutral_uv(); 4]);
+    for index in 1..count {
+        let [fln, frn, flf, frf] = sections[index - 1];
+        let [tln, trn, tlf, trf] = sections[index];
+        let (from, to) = (lengths[index - 1] / total, lengths[index] / total);
+        // Around the perimeter: left-near 0, right-near a quarter, right-far a half, left-far
+        // three quarters, and left-near again at 1 where the left face closes the loop.
+        let faces = [
+            (
+                [fln, frn, trn, tln],
+                [(0.0, from), (0.25, from), (0.25, to), (0.0, to)],
+            ),
+            (
+                [flf, tlf, trf, frf],
+                [(0.75, from), (0.75, to), (0.5, to), (0.5, from)],
+            ),
+            (
+                [fln, tln, tlf, flf],
+                [(1.0, from), (1.0, to), (0.75, to), (0.75, from)],
+            ),
+            (
+                [frn, frf, trf, trn],
+                [(0.25, from), (0.5, from), (0.5, to), (0.25, to)],
+            ),
+        ];
+        for (corners, coordinates) in faces {
+            build.quad(
+                corners,
+                coordinates.map(|(around, along)| uv(around, along)),
+            );
+        }
+        if index == 1 {
+            build.quad(
+                [fln, flf, frf, frn],
+                [0.0, 0.75, 0.5, 0.25].map(|around| uv(around, from)),
+            );
+        }
+        if index + 1 == count {
+            build.quad(
+                [tln, trn, trf, tlf],
+                [0.0, 0.25, 0.5, 0.75].map(|around| uv(around, to)),
+            );
+        }
     }
     build.finish()
 }
 
-/// Two tapered curved limbs and a taut string, shared by held and dropped presentations.
+/// A wooden bow: two curved limbs tapering from a leather-wrapped grip, and a string of
+/// lighter cord from tip to tip — at rest, which is how every surface draws it.
+///
+/// See [`bow_mesh_drawn`], which this is at a draw fraction of zero.
 pub(super) fn bow_mesh(length: f32) -> Mesh {
-    let centre = Vec2::new(-BOW_LENGTH * 0.24, 0.0);
-    let lower_tip = Vec2::new(0.0, -BOW_LENGTH / 2.0);
-    let upper_tip = Vec2::new(0.0, BOW_LENGTH / 2.0);
-    let mut bow = tapered_prism(centre, lower_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
-    let upper = tapered_prism(centre, upper_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
-    let string = Mesh::from(Cuboid::from_size(Vec3::new(
-        BOW_STAVE * 0.22,
-        BOW_LENGTH,
-        BOW_DEPTH * 0.28,
-    )));
-    merge_all(&mut bow, [upper, string], "bow stave and string");
+    bow_mesh_drawn(length, 0.0)
+}
+
+/// The bow at a draw fraction in `0..=1`, scaled from [`BOW_LENGTH`] to `length`.
+///
+/// **A pure function of the fraction.** At `0` the string runs straight from tip to tip at
+/// [`BOW_BRACE`] and the limbs are at rest; as it rises the nock is pulled back to
+/// [`BOW_DRAW_LENGTH`] behind the grip and the tips flex toward it by [`BOW_TIP_FLEX`], and the
+/// string is tied to both tips at every value because both are read from [`bow_string`].
+///
+/// **Quantised rebuilds, not a posed string, is what this supports.** The held mesh is one
+/// asset rebuilt only when the item or the skin changes, so a draw animation cannot rebuild it
+/// every frame; and a pose cannot move the nock, because the string is merged into the same
+/// mesh as limbs that flex with it. A draw builds this at a handful of fractions once, as that
+/// many stable assets, and swaps the handle.
+///
+/// Every part is absolute colour — see [`bow_colours`] — and the limbs carry the wood livery's
+/// grain in their texture coordinates, while the grip and the string point at the neutral band.
+/// Merged into one mesh for the reason [`axe_mesh`] is. The grip is centred on the origin, so
+/// a fist seated there closes on it.
+pub(super) fn bow_mesh_drawn(length: f32, draw: f32) -> Mesh {
+    let (wood, leather, cord) = bow_colours();
+    let [upper_tip, nock, lower_tip] = bow_string(draw);
+    let upper = bow_limb(upper_tip);
+    // Mirrored by reflecting the spine, not the mesh: a negative scale would flip the winding,
+    // while a reflected spine is swept outward from the grip like the original.
+    let lower: Vec<(Vec2, f32)> = upper
+        .iter()
+        .map(|(point, width)| (Vec2::new(point.x, -point.y), *width))
+        .collect();
+    let grain = |around: f32, along: f32| livery::blade_uv(Livery::Wood, around, along);
+    let limbs = [upper, lower].map(|spine| tinted(swept_bar(&spine, BOW_DEPTH, grain), wood));
+    let string = tinted(
+        swept_bar(
+            &[
+                (upper_tip, BOW_CORD),
+                (nock, BOW_CORD),
+                (lower_tip, BOW_CORD),
+            ],
+            BOW_CORD,
+            |_, _| livery::neutral_uv(),
+        ),
+        cord,
+    );
+
+    let mut bow = tinted(neutral(Mesh::from(Cuboid::from_size(BOW_GRIP))), leather);
+    let [upper, lower] = limbs;
+    merge_all(&mut bow, [upper, lower, string], "bow");
     bow.scaled_by(Vec3::splat(length / BOW_LENGTH))
+}
+
+/// Where the string is tied to the upper tip, where it is pulled to, and where it is tied to
+/// the lower tip, at one draw fraction and at authored scale.
+///
+/// The one answer both the limbs and the string are built from, which is what keeps the string
+/// attached at every fraction rather than two sums that happen to agree.
+fn bow_string(draw: f32) -> [Vec2; 3] {
+    let draw = draw.clamp(0.0, 1.0);
+    let upper = Vec2::new(BOW_BRACE, BOW_LENGTH / 2.0 - BOW_TIP_OVERHANG) + BOW_TIP_FLEX * draw;
+    let nock = Vec2::new(BOW_BRACE + (BOW_DRAW_LENGTH - BOW_BRACE) * draw, 0.0);
+    [upper, nock, Vec2::new(upper.x, -upper.y)]
+}
+
+/// The upper limb's spine: from inside the grip to `tip`, then a little past it.
+///
+/// A quadratic curve whose control point stands straight above the root, so the limb leaves
+/// the grip along the bow's axis and bends toward the string as it goes — a mid-limb point
+/// sits behind the straight line from grip to tip, which is what reads as a bow rather than
+/// two sticks. Moving the tip bends the whole curve with it, so the limb flexes rather than
+/// hinging at the grip.
+fn bow_limb(tip: Vec2) -> Vec<(Vec2, f32)> {
+    let root = Vec2::new(0.0, BOW_GRIP.y / 2.0 - 0.005);
+    let control = Vec2::new(0.0, (root.y + tip.y) / 2.0);
+    let tip_width = BOW_STAVE * BOW_TIP_FRACTION;
+    let mut spine: Vec<(Vec2, f32)> = (0..=BOW_LIMB_SEGMENTS)
+        .map(|step| {
+            let t = step as f32 / BOW_LIMB_SEGMENTS as f32;
+            let point = root * (1.0 - t) * (1.0 - t) + control * 2.0 * t * (1.0 - t) + tip * t * t;
+            (point, BOW_STAVE + (tip_width - BOW_STAVE) * t)
+        })
+        .collect();
+    spine.push((
+        tip + (tip - control).normalize() * BOW_TIP_OVERHANG,
+        tip_width,
+    ));
+    spine
+}
+
+/// The three colours a bow is made of: the log's wood for the limbs, the leather the packed
+/// structures' straps are for the grip, and a pale cord for the string.
+///
+/// **Absolute, like [`implement_colours`]**, because a vertex colour multiplies the item's
+/// and no multiple of a bark brown is a light cord. So the hand skips the item-colour multiply
+/// for a bow and the world draws it under a white material.
+fn bow_colours() -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (
+        palette::linear_rgba(palette::LOG),
+        bundle_strap_linear_rgba(),
+        bow_cord_linear_rgba(),
+    )
+}
+
+/// The bow string's cord, as linear vertex colour — read by the cell's drawing too, so the
+/// flat string and the modelled one are one colour.
+pub(crate) fn bow_cord_linear_rgba() -> [f32; 4] {
+    let colour = Color::srgb_u8(214, 199, 158).to_linear();
+    [colour.red, colour.green, colour.blue, colour.alpha]
+}
+
+/// An arrow's length in the first-person hand, nock to point, in the view model's metres.
+///
+/// Shorter than the [`BOW_LENGTH`] it is shot from, as an arrow is, and short enough that one
+/// stood on its nock in the fist reaches no higher above the hand than a sword's point does.
+const ARROW_IN_HAND: f32 = 0.085;
+/// How far below the fist's top face the nock end sits in the hand: the fist is closed on the
+/// nock, and the fletching leaves it just above.
+const ARROW_HELD_NOCK: f32 = 0.007;
+
+// An arrow's proportions, as fractions of its length from nock to point. [`arrow_mesh`] is
+// authored at unit length and scaled, so the hand, the ground and the flight share all of them.
+
+/// The square shaft's side. At the flying arrow's 0.8 blocks this is the 36 mm the projectile
+/// always had; in the hand it is under four millimetres.
+const ARROW_SHAFT: f32 = 0.045;
+/// The bone point, from its base to its tip.
+const ARROW_HEAD: f32 = 0.15;
+/// The point's radius at its base: nearly four shaft-halves, so the head reads as a point on a
+/// stick rather than the stick sharpened.
+const ARROW_HEAD_RADIUS: f32 = 0.085;
+/// How far the shaft runs up inside the point, so its end is inside the cone rather than on the
+/// cone's base plane in another colour.
+const ARROW_HEAD_SOCKET: f32 = 0.02;
+/// The bare shaft behind the fletching: the nock.
+const ARROW_NOCK: f32 = 0.06;
+/// The fletching's length along the shaft.
+const ARROW_FLETCH: f32 = 0.17;
+/// The fletching's span across the shaft at its back and at its front: tallest at the tail and
+/// cut down toward the point, which is how a vane is trimmed.
+const ARROW_FLETCH_BACK: f32 = 0.13;
+const ARROW_FLETCH_FRONT: f32 = 0.055;
+/// One vane's thickness.
+const ARROW_FLETCH_THICKNESS: f32 = 0.012;
+
+/// The fletching stands proud of the shaft along the whole of its length, or its front end
+/// would disappear into the wood.
+const _: () = assert!(ARROW_FLETCH_FRONT > ARROW_SHAFT && ARROW_FLETCH_THICKNESS < ARROW_SHAFT);
+
+/// An arrow: a long thin wooden shaft, a bone point, and two crossed vanes of dark fletching
+/// behind a short bare nock — point up along `+Y`, `length` from nock to point, centred on its
+/// origin.
+///
+/// **The one arrow in the client** (#1231). The hand, the ground drop, the body's fist and the
+/// projectile in flight all draw it: the hand stands it on its nock, the drop lays it flat, and
+/// `projectiles` turns it point-forward at its `ARROW_LENGTH`. **The arrow nocked on a drawing bow
+/// is meant to be this mesh too**, placed on the string of [`bow_mesh_drawn`] rather than authored
+/// again — which is why it is point-up like every other held mesh here and leaves the turning to
+/// its caller.
+///
+/// Every part is absolute colour — see [`arrow_colours`] — so the hand skips the item-colour
+/// multiply and the world draws it under a white material. Nothing on it wears a livery, so
+/// every coordinate points at the neutral band. Merged into one mesh for the reason [`axe_mesh`]
+/// is.
+pub(super) fn arrow_mesh(length: f32) -> Mesh {
+    let (wood, bone, feather) = arrow_colours();
+    let nock = -0.5;
+    let head_base = 0.5 - ARROW_HEAD;
+    let shaft_end = head_base + ARROW_HEAD_SOCKET;
+    let mut arrow = tinted(
+        neutral(
+            Mesh::from(Cuboid::from_size(Vec3::new(
+                ARROW_SHAFT,
+                shaft_end - nock,
+                ARROW_SHAFT,
+            )))
+            .translated_by(Vec3::Y * (shaft_end + nock) / 2.0),
+        ),
+        wood,
+    );
+    // Bevy's cone stands on its base with its apex toward `+Y`, which is already the arrow's way
+    // up.
+    let head = tinted(
+        neutral(
+            Mesh::from(Cone::new(ARROW_HEAD_RADIUS, ARROW_HEAD))
+                .translated_by(Vec3::Y * (head_base + ARROW_HEAD / 2.0)),
+        ),
+        bone,
+    );
+    let fletch_back = nock + ARROW_NOCK;
+    let vane = tinted(
+        tapered_prism(
+            Vec2::new(0.0, fletch_back),
+            Vec2::new(0.0, fletch_back + ARROW_FLETCH),
+            ARROW_FLETCH_BACK,
+            ARROW_FLETCH_FRONT,
+            ARROW_FLETCH_THICKNESS,
+        ),
+        feather,
+    );
+    // The second vane is the first turned a quarter about the shaft: a rotation keeps the
+    // winding, where a mirrored copy would turn it inside out.
+    let crossed = vane
+        .clone()
+        .rotated_by(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    merge_all(&mut arrow, [head, vane, crossed], "arrow");
+    arrow.scaled_by(Vec3::splat(length))
+}
+
+/// The three colours an arrow is made of: the arrow row's pale wood for the shaft, the bone the
+/// point is knapped from — the forge makes arrows of a log and a bone — and a dark feather for
+/// the fletching, which is the contrast that finds an arrow's tail at a glance.
+///
+/// **Absolute, like [`bow_colours`]**, because a vertex colour multiplies the item's and no
+/// multiple of a pale shaft is a dark feather beside a white point.
+fn arrow_colours() -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (
+        items::item_linear_rgba(ITEM_ARROW),
+        items::item_linear_rgba(items::ITEM_BONE),
+        arrow_fletching_linear_rgba(),
+    )
+}
+
+/// The fletching's dark feather, as linear vertex colour — read by the cell's drawing too, so
+/// the flat fletching and the modelled one are one colour. sRGB `#3A3430`.
+pub(crate) fn arrow_fletching_linear_rgba() -> [f32; 4] {
+    let colour = Color::srgb_u8(0x3A, 0x34, 0x30).to_linear();
+    [colour.red, colour.green, colour.blue, colour.alpha]
 }
 
 /// A wooden shaft and its small green focus, shared by held and dropped presentations.
@@ -1249,9 +1740,15 @@ fn drawn_arm_reach(along_view: f32) -> f32 {
 /// [`drawn_arm_reach`] and [`ARM_REACH`]: a constant length cannot satisfy both bounds, and
 /// rewriting the merged mesh every frame is an asset write per frame.
 fn forearm_transform(animation: &HandAnimation) -> Transform {
+    forearm_transform_along(along_view(animation))
+}
+
+/// The same, for a hand carried `along_view` by something other than [`HandAnimation`] — the
+/// left hand's parry is the one such thing.
+fn forearm_transform_along(along_view: f32) -> Transform {
     Transform::from_translation(Vec3::Y * FOREARM_TOP).with_scale(Vec3::new(
         1.0,
-        FOREARM_TOP + drawn_arm_reach(along_view(animation)),
+        FOREARM_TOP + drawn_arm_reach(along_view),
         1.0,
     ))
 }
@@ -1336,10 +1833,49 @@ impl MeshBuild {
         // The cap is never seen — the root is buried in the guard and the tip is a tenth of
         // a section — so it is pointed at the neutral band, where a coordinate that carries
         // no information cannot pick up a colour it did not ask for.
-        let first = self.push(corners.into_iter().zip([livery::neutral_uv(); 6]), normal);
+        self.polygon(&corners, normal);
+    }
+
+    /// One flat-shaded convex polygon of any number of corners, as a fan from its first.
+    ///
+    /// The shield's planks are the reason it takes a slice: a strip of a disc has as many
+    /// corners as the arc it cuts. The same winding rule as [`Self::fan`] applies, and every
+    /// corner points at the neutral band for the same reason.
+    fn polygon(&mut self, corners: &[Vec3], normal: Vec3) {
+        let first = self.push(
+            corners.iter().map(|corner| (*corner, livery::neutral_uv())),
+            normal,
+        );
         for corner in 1..corners.len() as u32 - 1 {
             self.indices
                 .extend([first, first + corner, first + corner + 1]);
+        }
+    }
+
+    /// A closed solid of revolution about the `Z` axis, flat-shaded in `sides` facets.
+    ///
+    /// `profile` is a closed loop of `(radius, z)` points. **Walked so that the outer wall
+    /// runs from `+Z` towards `-Z`**, every quad comes out wound outward — the rule the rim's
+    /// four walls and the boss's cap, flange and dome all follow, and what
+    /// [`every_solid_in_the_sword_is_wound_outward`] reads back. A span lying on the axis
+    /// encloses nothing and is skipped; a span with one end on it closes to a point, which
+    /// leaves one triangle of each quad with no area — harmless, since it covers nothing.
+    fn revolve(&mut self, profile: &[Vec2], sides: usize) {
+        let at = |point: Vec2, angle: f32| {
+            Vec3::new(point.x * angle.cos(), point.x * angle.sin(), point.y)
+        };
+        for (index, from) in profile.iter().enumerate() {
+            let to = profile[(index + 1) % profile.len()];
+            if from.x == 0.0 && to.x == 0.0 {
+                continue;
+            }
+            for side in 0..sides {
+                let [start, end] = [side, side + 1].map(|step| TAU * step as f32 / sides as f32);
+                self.quad(
+                    [at(*from, start), at(to, start), at(to, end), at(*from, end)],
+                    [livery::neutral_uv(); 4],
+                );
+            }
         }
     }
 
@@ -1583,7 +2119,7 @@ fn wood_over(item_colour: [f32; 4]) -> Option<[f32; 4]> {
 /// A gladius: a bevelled blade that tapers to a point, a cross guard, a grip and a pommel,
 /// merged into one mesh at whatever length the caller draws it.
 ///
-/// **One mesh, for the reason [`tool_mesh`] and [`fist_mesh`] are one each**: the view model
+/// **One mesh, for the reason [`axe_mesh`] and [`fist_mesh`] are one each**: the view model
 /// is a single entity with a single transform that `animate_view_model` drives, and a guard
 /// parented separately would be a second thing to keep in step with a swing.
 ///
@@ -1968,12 +2504,16 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
             merge_all(&mut roll, [straps], "held packed-gear bundle");
             neutral(roll)
         }
-        ItemShape::Tool => neutral(tool_mesh()),
+        ItemShape::Tool => neutral(axe_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Pickaxe => neutral(pickaxe_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Shovel => neutral(shovel_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Armour => neutral(armour_mesh()),
-        ItemShape::Shield => neutral(shield_mesh(0.065)),
-        ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
+        ItemShape::Shield => shield_mesh(SHIELD_IN_HAND),
+        // Not pointed at the neutral band: the limbs carry the wood's grain in their own
+        // coordinates, and the grip and the string already point there.
+        ItemShape::Bow => bow_mesh(BOW_LENGTH),
+        // Already on the neutral band, part by part.
+        ItemShape::Arrow => arrow_mesh(ARROW_IN_HAND),
         ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
         // Turned a quarter about X so the struck face, not the rim, is what the camera sees.
         ItemShape::Coin => neutral(
@@ -2016,12 +2556,21 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Blade => -sword_grip_centre(SWORD_LENGTH).y,
         ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
         // The head stays above the hand and most of the haft remains visible below it.
-        // The pickaxe and the shovel are the axe's length and are held the way it is.
+        // The three implements share one length and are held alike.
         ItemShape::Tool | ItemShape::Pickaxe | ItemShape::Shovel => HAND_SIZE.y * 0.35,
         ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
-        // Cross the top of the fist so the carried shield is gripped, not floating.
-        ItemShape::Shield => hand_top + 0.024,
-        ItemShape::Bow => HAND_SIZE.y * 0.20,
+        // **The one arrangement with a depth of its own, because a shield is held from
+        // behind.** The fist's centre is seated on the handle's grip point, so the face
+        // stands in front of the fist along `-Z` and the hand is on the handle — the whole
+        // translation, not only its height, since the grip is behind the face rather than
+        // beside it. See [`shield_grip_point`].
+        ItemShape::Shield => return -shield_grip_point(SHIELD_IN_HAND),
+        // The fist closes on the grip, which is the bow's own origin. Until #1230 the grip
+        // sat beside the fist and the string ran through it.
+        ItemShape::Bow => 0.0,
+        // **The fist is closed on the nock** (#1231): the arrow stands point up out of the top
+        // of the hand, and its fletching leaves the fist just above where it grips.
+        ItemShape::Arrow => hand_top - ARROW_HELD_NOCK + ARROW_IN_HAND / 2.0,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
         // Stood on the top of the fist by its radius, which is the block's and the stub's
         // arrangement: the coin is turned face-on, so its radius is its half height.
@@ -2032,20 +2581,272 @@ fn item_translation(shape: ItemShape) -> Vec3 {
     Vec3::new(0.0, y, 0.0)
 }
 
-/// A wooden board and iron boss shared by hands, bodies and drops.
-pub(super) fn shield_mesh(size: f32) -> Mesh {
-    let mut board = tinted(
-        Mesh::from(Cuboid::from_size(Vec3::new(size, size * 0.82, size * 0.10))),
-        items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD),
+/// The wooden shield's diameter in the first-person hand.
+///
+/// **Larger than the 65 × 53 mm board it replaces, and still smaller than it looks.** A round
+/// shield is carried *in front* of the fist rather than above it, so the width a player sees
+/// is the whole disc; a tenth of a metre at the hand's depth is about a third of the frame's
+/// height, which is a shield rather than a badge, and the fist centred on the handle behind it
+/// still clears the planks — see [`SHIELD_GRIP_DEPTH`].
+const SHIELD_IN_HAND: f32 = 0.10;
+
+/// Larger than the board it replaced, which was 65 mm across.
+const _: () = assert!(SHIELD_IN_HAND > 0.065);
+
+/// How many planks the face is built from, and how many facets a round edge is drawn in.
+const SHIELD_PLANKS: usize = 5;
+const SHIELD_SIDES: usize = 32;
+
+/// The planks' outline radius, and half their thickness, as fractions of the diameter.
+///
+/// **Inside the rim on both counts.** The outline sits between the rim's inner and outer walls,
+/// so the planks' cut edges are buried in it; the thickness is less than the rim's, so the rim
+/// stands proud of the face in front and behind and no face of the wood shares a plane with a
+/// face of the rim.
+const SHIELD_PLANK_RADIUS: f32 = 0.48;
+const SHIELD_PLANK_HALF_THICKNESS: f32 = 0.022;
+
+/// How far every other plank stands forward of its neighbours.
+///
+/// The planks read through this and through the alternating shade, the arrangement the issue
+/// asked for rather than separate boards with gaps: a step half a millimetre deep in the hand
+/// is enough for [`shaded`] to catch a sliver of side wall at every seam.
+const SHIELD_PLANK_STEP: f32 = 0.005;
+
+/// The rim's inner and outer radius and half its thickness, as fractions of the diameter.
+const SHIELD_RIM_INNER: f32 = 0.455;
+const SHIELD_RIM_OUTER: f32 = 0.5;
+const SHIELD_RIM_HALF_THICKNESS: f32 = 0.035;
+
+/// The boss: a flat flange, then a dome rising from it to a point on the axis.
+///
+/// The flange is sunk to the board's centre plane at the back and stands forward of the rim at
+/// the front, so the dome begins in front of everything else on the face.
+const SHIELD_BOSS_FLANGE_RADIUS: f32 = 0.14;
+const SHIELD_BOSS_FLANGE_FRONT: f32 = 0.042;
+const SHIELD_BOSS_DOME_RADIUS: f32 = 0.115;
+const SHIELD_BOSS_DOME_HEIGHT: f32 = 0.075;
+const SHIELD_BOSS_DOME_STEPS: usize = 4;
+
+/// The handle: a horizontal bar behind the boss, carried on two posts sunk into the planks.
+const SHIELD_HANDLE_HALF_SPAN: f32 = 0.17;
+const SHIELD_HANDLE_HALF_HEIGHT: f32 = 0.03;
+const SHIELD_HANDLE_HALF_DEPTH: f32 = 0.02;
+const SHIELD_POST_HALF_WIDTH: f32 = 0.02;
+
+/// How far behind the face's centre plane the handle's centre is, as a fraction of the
+/// diameter.
+///
+/// **Deep enough for a fist centred on it to clear the wood.** The hand's fist is a cube of
+/// [`HAND_SIZE`], so at [`SHIELD_IN_HAND`] half of it is 0.12 of the diameter; the planks' back
+/// reaches 0.022, so 0.16 leaves the fist's front face 0.018 of the diameter — 1.8 mm — behind
+/// them, and the gap between the wood's back and the bar's front the fingers pass through is
+/// `0.16 − 0.02 − 0.022 = 0.118` of the diameter.
+/// Both are measured rather than trusted, in
+/// [`a_fist_on_the_grip_point_holds_the_shield_from_behind_with_room_for_the_fingers`].
+const SHIELD_GRIP_DEPTH: f32 = 0.16;
+
+/// **The point on the shield's handle a fist closes on**, in a shield mesh built at `diameter`.
+///
+/// This is the contract the shield hand is written against, the counterpart of
+/// [`sword_grip_centre`]: the centre of the horizontal bar, on the axis behind the boss. The
+/// shield's face points along `-Z`, towards the world a body faces, and the handle stands
+/// behind it along `+Z`; a fist whose centre is placed here grips the handle from behind with
+/// the planks in front of it. [`item_translation`] already seats the held shield this way, and
+/// a renderer that poses a fist on a shield should ask this function rather than measure the
+/// mesh.
+pub(super) fn shield_grip_point(diameter: f32) -> Vec3 {
+    Vec3::Z * SHIELD_GRIP_DEPTH * diameter
+}
+
+/// The colours the shield is built in, each absolute.
+///
+/// **One convention, the one it already had.** The wood is the registry's own colour for the
+/// shield, read from [`items`] rather than written here, and every other part is a colour of
+/// its own; the hand therefore skips the item-colour multiply for this shape, and the ground
+/// and the body draw it under a white material — see `drops.rs` and `player/mod.rs`.
+#[derive(Debug, Clone, Copy)]
+struct ShieldColours {
+    /// The two alternating plank shades, the registry's wood first.
+    planks: [[f32; 4]; 2],
+    /// Darker than either plank.
+    rim: [f32; 4],
+    /// The forged iron the implements' heads wear.
+    boss: [f32; 4],
+    /// The leather the bundles' straps are, wrapped round the grip.
+    handle: [f32; 4],
+}
+
+fn shield_colours() -> ShieldColours {
+    let wood = items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD);
+    // **Darker by a hue as well as by a level, and the difference is load-bearing.** A tint
+    // that only scales the wood is, to [`every_held_arrangement_carries_relief`], the wood
+    // under a deeper shade than [`SHADE_FLOOR`] allows — that sweep knows a colour by its
+    // direction and reads every change of magnitude as light. So the second board is a touch
+    // greyer, as a different plank is, and the rim is the brown of a rawhide edge rather
+    // than of the planks it holds.
+    let darker = |by: [f32; 3]| [wood[0] * by[0], wood[1] * by[1], wood[2] * by[2], wood[3]];
+    ShieldColours {
+        planks: [wood, darker([0.78, 0.82, 0.88])],
+        rim: darker([0.55, 0.50, 0.45]),
+        boss: items::forged_iron_linear_rgba(),
+        handle: bundle_strap_linear_rgba(),
+    }
+}
+
+/// The outline of one plank, counter-clockwise seen from behind, at unit diameter.
+///
+/// A vertical strip of the disc: its two seams are straight and its two ends follow the circle,
+/// sampled at every [`SHIELD_SIDES`] facet angle between them. Every corner is on the circle —
+/// a seam's two ends are where it meets it — which is what makes the face measurably round.
+fn shield_plank_outline(plank: usize) -> Vec<Vec2> {
+    let radius = SHIELD_PLANK_RADIUS;
+    let width = 2.0 * radius / SHIELD_PLANKS as f32;
+    let [left, right] = [plank, plank + 1].map(|edge| -radius + width * edge as f32);
+    let angle_of = |x: f32| (x / radius).clamp(-1.0, 1.0).acos();
+    let on_circle = |angle: f32| Vec2::new(angle.cos(), angle.sin()) * radius;
+    let arc = |from: f32, to: f32| {
+        let step = TAU / SHIELD_SIDES as f32;
+        let inner = ((from / step).floor() as i32 + 1..)
+            .map(move |facet| facet as f32 * step)
+            .take_while(move |angle| *angle < to - 1e-4);
+        std::iter::once(from)
+            .chain(inner)
+            .chain(std::iter::once(to))
+    };
+    // The top end runs right to left and the bottom end left to right, both by increasing angle.
+    let mut outline: Vec<Vec2> = arc(angle_of(right), angle_of(left))
+        .chain(arc(TAU - angle_of(left), TAU - angle_of(right)))
+        .map(on_circle)
+        .collect();
+    // The two outer planks meet the circle at a single point on each side, which both ends
+    // reach; one copy of it is a corner and two are a triangle with no area.
+    outline.dedup_by(|one, two| one.distance(*two) < 1e-6);
+    if outline.len() > 1 && outline[0].distance(outline[outline.len() - 1]) < 1e-6 {
+        outline.pop();
+    }
+    outline
+}
+
+/// One plank as a flat-shaded prism, at unit diameter.
+fn shield_plank(plank: usize) -> Mesh {
+    let outline = shield_plank_outline(plank);
+    let forward = if plank % 2 == 1 {
+        SHIELD_PLANK_STEP
+    } else {
+        0.0
+    };
+    let [front, back] = [-1.0, 1.0].map(|side| side * SHIELD_PLANK_HALF_THICKNESS - forward);
+    let at = |point: Vec2, z: f32| point.extend(z);
+
+    let mut build = MeshBuild::default();
+    let backs: Vec<Vec3> = outline.iter().map(|point| at(*point, back)).collect();
+    build.polygon(&backs, Vec3::Z);
+    let fronts: Vec<Vec3> = outline
+        .iter()
+        .rev()
+        .map(|point| at(*point, front))
+        .collect();
+    build.polygon(&fronts, Vec3::NEG_Z);
+    for (index, from) in outline.iter().enumerate() {
+        let to = outline[(index + 1) % outline.len()];
+        build.quad(
+            [
+                at(*from, back),
+                at(*from, front),
+                at(to, front),
+                at(to, back),
+            ],
+            [livery::neutral_uv(); 4],
+        );
+    }
+    build.finish()
+}
+
+/// A round Norse shield shared by the hand, the ground and every body that wears one.
+///
+/// **Round planks inside a darker rim, a domed iron boss at the centre and a horizontal
+/// handle behind it.** It replaces a flat box with a grey cylinder on it, which had no outline,
+/// no rim and nothing behind — and whose boss faced the wielder, since `+Z` is towards the
+/// camera in the hand and towards the back of a body. The face now points along `-Z`, the way
+/// a body faces and the way the first-person view looks, and the handle is behind it along
+/// `+Z` where [`shield_grip_point`] names it.
+///
+/// Authored at unit diameter and scaled uniformly, so the three surfaces draw one shield at
+/// three sizes. Every vertex points at the neutral band: the ground drop's material wears the
+/// wood livery, and a mesh with Bevy's default coordinates would sample the whole image.
+pub(super) fn shield_mesh(diameter: f32) -> Mesh {
+    let colours = shield_colours();
+
+    let mut rim = MeshBuild::default();
+    rim.revolve(
+        &[
+            Vec2::new(SHIELD_RIM_OUTER, SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_OUTER, -SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_INNER, -SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_INNER, SHIELD_RIM_HALF_THICKNESS),
+        ],
+        SHIELD_SIDES,
     );
-    let boss = tinted(
-        Mesh::from(Cylinder::new(size * 0.17, size * 0.14))
-            .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-            .translated_by(Vec3::Z * size * 0.10),
-        [0.55, 0.60, 0.66, 1.0],
+
+    let mut boss = MeshBuild::default();
+    let dome = (0..=SHIELD_BOSS_DOME_STEPS).map(|step| {
+        let rise = step as f32 / SHIELD_BOSS_DOME_STEPS as f32 * PI / 2.0;
+        let radius = if step == SHIELD_BOSS_DOME_STEPS {
+            0.0
+        } else {
+            SHIELD_BOSS_DOME_RADIUS * rise.cos()
+        };
+        Vec2::new(
+            radius,
+            -SHIELD_BOSS_FLANGE_FRONT - SHIELD_BOSS_DOME_HEIGHT * rise.sin(),
+        )
+    });
+    let profile: Vec<Vec2> = [
+        Vec2::ZERO,
+        Vec2::new(SHIELD_BOSS_FLANGE_RADIUS, 0.0),
+        Vec2::new(SHIELD_BOSS_FLANGE_RADIUS, -SHIELD_BOSS_FLANGE_FRONT),
+    ]
+    .into_iter()
+    .chain(dome)
+    .collect();
+    boss.revolve(&profile, SHIELD_SIDES);
+
+    let bar = Cuboid::new(
+        2.0 * SHIELD_HANDLE_HALF_SPAN,
+        2.0 * SHIELD_HANDLE_HALF_HEIGHT,
+        2.0 * SHIELD_HANDLE_HALF_DEPTH,
     );
-    merge_all(&mut board, [boss], "wooden shield");
-    board
+    let posts = [-1.0, 1.0].map(|side| {
+        tinted(
+            neutral(Mesh::from(Cuboid::new(
+                2.0 * SHIELD_POST_HALF_WIDTH,
+                2.0 * SHIELD_HANDLE_HALF_HEIGHT,
+                SHIELD_GRIP_DEPTH,
+            ))),
+            colours.handle,
+        )
+        .translated_by(Vec3::new(
+            side * (SHIELD_HANDLE_HALF_SPAN - SHIELD_POST_HALF_WIDTH),
+            0.0,
+            SHIELD_GRIP_DEPTH / 2.0,
+        ))
+    });
+
+    let mut shield = tinted(rim.finish(), colours.rim);
+    merge_all(
+        &mut shield,
+        (0..SHIELD_PLANKS)
+            .map(|plank| tinted(shield_plank(plank), colours.planks[plank % 2]))
+            .chain([
+                tinted(boss.finish(), colours.boss),
+                tinted(neutral(Mesh::from(bar)), colours.handle)
+                    .translated_by(shield_grip_point(1.0)),
+            ])
+            .chain(posts),
+        "wooden shield",
+    );
+    shield.scaled_by(Vec3::splat(diameter))
 }
 
 /// The first-person hand: the player's fist, the wrist it steps into and, when selected, the
@@ -2075,30 +2876,76 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
         [tinted(neutral(wrist_mesh()), skin)],
         "hand and wrist",
     );
+    if let Some(item) = held_item_part(appearance) {
+        merge_all(&mut held, [item], "hand and held item");
+    }
+    // **Last, over the whole composition.** The fist, the wrist and the item are one mesh
+    // under one `unlit` material, so one pass gives all three their relief — and applying it
+    // after the merge rather than to each part is what stops a part being missed.
+    shaded(held)
+}
+
+/// **The left hand**: the same fist and wrist, and the item turned to face the world after the
+/// mirror.
+///
+/// [`hand_on_side`] mirrors the hand by a half turn about `Y`, which is exact for the limb and
+/// would turn anything not symmetric in `Z` around — a shield would show the world its handle.
+/// So the item is turned the other half turn here, about the fist's centre, and the two turns
+/// cancel on screen: it is the right hand's item, where the right hand holds it, seen from the
+/// left. Its shade is baked before the turn, so it reads under the same light it does in the
+/// right hand; the fist and wrist are shaded where they are and mirror with the hand.
+///
+/// The fist is first in the buffers, as in [`held_mesh`].
+fn left_hand_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
+    let mut hand = held_mesh(skin_colour, selected_appearance(None));
+    if let Some(item) = held_item_part(appearance) {
+        merge_all(
+            &mut hand,
+            [shaded(item).rotated_by(Quat::from_rotation_y(PI))],
+            "left hand and held item",
+        );
+    }
+    hand
+}
+
+/// What the shield hand holds: the wooden shield, the one item the off-hand slot takes.
+fn worn_shield_appearance() -> HeldAppearance {
+    HeldAppearance {
+        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
+        shape: Some(ItemShape::Shield),
+        item_colour: Some(items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD)),
+    }
+}
+
+/// The held item alone, placed on the fist and unshaded, or `None` for an empty hand.
+fn held_item_part(appearance: HeldAppearance) -> Option<Mesh> {
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
-        return shaded(held);
+        return None;
     };
 
     let item = if shape == ItemShape::Bundle {
         neutral(coloured_bundle_mesh(item_colour))
     } else if matches!(
         shape,
-        ItemShape::Shield | ItemShape::Sceptre | ItemShape::Pickaxe | ItemShape::Shovel
+        ItemShape::Shield
+            | ItemShape::Sceptre
+            | ItemShape::Tool
+            | ItemShape::Pickaxe
+            | ItemShape::Shovel
+            | ItemShape::Bow
+            | ItemShape::Arrow
     ) {
         // Built in the absolute colours of what they are made of — see
-        // [`implement_colours`] — so the item colour must not multiply over them.
+        // [`implement_colours`], [`bow_colours`] and [`arrow_colours`] — so the item colour
+        // must not multiply over them.
         item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
     }
     .translated_by(item_translation(shape));
-    merge_all(&mut held, [item], "hand and held item");
-    // **Last, over the whole composition.** The fist, the wrist and the item are one mesh
-    // under one `unlit` material, so one pass gives all three their relief — and applying it
-    // after the merge rather than to each part is what stops a part being missed.
-    shaded(held)
+    Some(item)
 }
 
 /// The forearm bar in the player's own skin.
@@ -2120,8 +2967,14 @@ impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
         livery::register(app);
         app.init_resource::<HandAnimation>()
+            .init_resource::<StringPull>()
             .init_resource::<SelfVitals>()
             .init_resource::<LocalMount>()
+            // `CombatPlugin` owns and writes it in the game; here for the focused tests.
+            .init_resource::<super::combat::WeaponDrawn>()
+            // `CombatPlugin` owns it in the game, and writes it; registered here so the
+            // focused animation tests stand this plugin up on its own.
+            .add_message::<SwingAbandoned>()
             // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
             // because the focused animation tests build this plugin on its own.
             .init_resource::<super::Appearances>()
@@ -2140,9 +2993,11 @@ impl Plugin for HandsPlugin {
                 (
                     attach_to_view_model_camera,
                     ApplyDeferred,
+                    pull_the_string,
                     refresh_held_item,
                     animate_view_model,
-                    place_off_hand,
+                    animate_off_hand,
+                    animate_drawn_bow,
                 )
                     .chain()
                     // After this frame's appearance message has been cached, so the fist
@@ -2160,7 +3015,10 @@ impl Plugin for HandsPlugin {
                     .after(ApplyMiningFeedback)
                     // After the swing is sent, so the feedback plays on the frame the
                     // request left rather than the one after it.
-                    .after(super::combat::ApplyCombatInput),
+                    .after(super::combat::ApplyCombatInput)
+                    // After the draw key, so the hand holds the drawn weapon on the frame it
+                    // was drawn. `ApplyCombatInput` implies it today; this states it.
+                    .after(super::combat::ApplyWeaponDrawn),
             );
     }
 }
@@ -2198,10 +3056,19 @@ struct ViewModelCamera;
 #[derive(Component)]
 struct Forearm;
 
+/// The left hand: always present, drawn while a usable shield is worn in the off-hand slot or
+/// while the reins borrow it.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct OffHandShield {
     skin_colour: u32,
     mounted: bool,
+    /// Whether the server says this player is blocking, with a usable shield worn to block
+    /// with. **The server's state, never the local press**: the parry is drawn from this and
+    /// from nothing `super::combat` sends.
+    blocking: bool,
+    /// How far the transition toward the parry has run, from zero at rest to [`PARRY_TIME`]
+    /// at the parry. Local time, and only the cadence of a movement the server already chose.
+    parry: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2220,7 +3087,32 @@ struct HandVisuals {
     /// The forearm bar both hands draw. Its contents change only with the player's skin
     /// colour; its *length* is a scale on each arm's own transform, never a rewrite of this.
     forearm_mesh: Handle<Mesh>,
+    /// The bow at rest and at every one of [`DRAW_STEPS`] pulls. Built once, because a bow has
+    /// no skin to rebuild for: a draw swaps [`DrawnBow`]'s handle among these and writes none.
+    drawn_bows: Vec<Handle<Mesh>>,
 }
+
+/// **The bow's draw as first person shows it** (#1240).
+///
+/// `two_handed` is whether the drawn main hand holds a bow on foot, which puts both hands on it.
+/// `drawing` and `shown` are the server's `PlayerVitals.draw_progress` and nothing else:
+/// `drawing` is whether it is non-zero, which is exactly when the arrow is nocked, and `shown` is
+/// it as a fraction, smoothed between snapshots by [`settle_draw`]. No press moves either, so a
+/// draw the server refused — for arrows or for energy — shows no arrow and no pull.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct StringPull {
+    two_handed: bool,
+    drawing: bool,
+    shown: f32,
+}
+
+/// The bow both hands draw, as its own entity showing one of [`HandVisuals::drawn_bows`].
+#[derive(Component)]
+struct DrawnBow;
+
+/// The arrow on the drawn bow's string: [`arrow_mesh`], shown only while the server is drawing.
+#[derive(Component)]
+struct NockedArrow;
 
 /// Which arc an attack draws.
 ///
@@ -2233,12 +3125,14 @@ struct HandVisuals {
 /// different door: drawing an item as a blade no more swings it than holding it as one does,
 /// and drawing a cast reaches no further than drawing a cut.
 ///
-/// **Three variants since #421, and the two that went were blade arcs.** The shape is now a
-/// function of what is held rather than of a counter — a blade cuts, a bow draws, a sceptre
-/// casts — which is why nothing in [`HandAnimation`] remembers what played last any more.
+/// **Two attack arcs since #1240.** #421 removed two blade arcs, which made the shape a function
+/// of what is held rather than of a counter — a blade cuts and a sceptre casts — and is why
+/// nothing in [`HandAnimation`] remembers what played last any more. #1240 removed the bow's
+/// draw: it follows the server's `draw_progress` ([`StringPull`]), not a clock, and a bow's
+/// `SwingSent` plays no arc.
 ///
-/// **Four since #626, and the fourth is not an attack.** [`Self::Eat`] plays on the frame a
-/// `ConsumeRequest` left, so the paragraph above is now a statement about the three arcs a
+/// **Three variants in all, and the third is not an attack** (#626). [`Self::Eat`] plays on the
+/// frame a `ConsumeRequest` left, so the paragraph above is a statement about the two arcs a
 /// *swing* can draw rather than about the whole enum. The paragraph before it is unchanged
 /// and is the one that matters: which arc played still reaches nothing, and the request that
 /// started it was already sent before the shape was chosen.
@@ -2247,8 +3141,6 @@ enum SwingShape {
     /// Down and across: the one arc a blade draws, from the upper right to the lower left.
     #[default]
     Cut,
-    /// The string hand drawing back. Chosen only for a bow request.
-    Draw,
     /// A short forward presentation thrust, never a blade arc.
     Cast,
     /// The held item tipped back toward the eye and returned to rest: eating.
@@ -2278,7 +3170,7 @@ impl SwingShape {
     /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
     /// turns up here the attribute comes off rather than the list changing.
     #[cfg(test)]
-    const ALL: [Self; 4] = [Self::Cut, Self::Draw, Self::Cast, Self::Eat];
+    const ALL: [Self; 3] = [Self::Cut, Self::Cast, Self::Eat];
 }
 
 /// One attack swing in flight: which shape is playing, and how far into it the hand is.
@@ -2344,14 +3236,6 @@ fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
             roll: arc * CUT_ROLL_RADIANS,
             ..default()
         },
-        SwingShape::Draw => SwingPose {
-            pitch: arc * 0.18,
-            roll: arc * 0.28,
-            // Back toward the string, while retaining enough near-plane clearance when a
-            // placement bump and the draw begin in the same frame.
-            reach: arc * 0.03,
-            ..default()
-        },
         SwingShape::Cast => SwingPose {
             pitch: -arc * 0.12,
             reach: -arc * CAST_REACH,
@@ -2380,7 +3264,11 @@ struct HandAnimation {
 
     /// The arc playing right now, if one is. Started by a `SwingSent` or a [`ConsumeSent`]
     /// message and by nothing else, so it plays exactly when a request left this client —
-    /// whether that request later hits, misses, feeds anybody or is refused.
+    /// whether that request later hits, misses, feeds anybody or is dropped in silence.
+    ///
+    /// **One answer takes an attack arc back: a refusal for energy** (#1228), which reaches
+    /// here as `SwingAbandoned` once `super::combat` has attributed it to the last swing.
+    /// It ends the arc on the frame it arrives. The eating arc is never abandoned by it.
     ///
     /// **Still one field for two senders, and deliberately.** The arcs are mutually
     /// exclusive on screen — one composition, one transform — so two fields would be two
@@ -2423,12 +3311,7 @@ fn spawn_view_model(
     let appearance = selected_appearance(None);
     let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
     let mesh = meshes.add(held_mesh(skin_colour, appearance));
-    let shield_appearance = HeldAppearance {
-        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
-        shape: Some(ItemShape::Shield),
-        item_colour: Some(items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD)),
-    };
-    let shield_mesh_handle = meshes.add(held_mesh(skin_colour, shield_appearance));
+    let shield_mesh_handle = meshes.add(left_hand_mesh(skin_colour, worn_shield_appearance()));
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         // **One material for the hand, the arm and every item it can hold**, exactly as
@@ -2445,11 +3328,35 @@ fn spawn_view_model(
         ..default()
     });
     let forearm_mesh_handle = meshes.add(skinned_forearm_mesh(skin_colour));
+    let drawn_bows: Vec<Handle<Mesh>> = (0..=DRAW_STEPS)
+        .map(|step| {
+            meshes.add(shaded(bow_mesh_drawn(
+                BOW_LENGTH,
+                step as f32 / DRAW_STEPS as f32,
+            )))
+        })
+        .collect();
     let visuals = HandVisuals {
         mesh: mesh.clone(),
         shield_mesh: shield_mesh_handle.clone(),
         forearm_mesh: forearm_mesh_handle.clone(),
+        drawn_bows: drawn_bows.clone(),
     };
+    // The drawn bow and its arrow: hidden until a bow is drawn, never rebuilt (#1240).
+    let fov = view_field_of_view(None);
+    let hidden = |mesh: Handle<Mesh>| {
+        (
+            ViewModel,
+            Mesh3d(mesh),
+            MeshMaterial3d(material.clone()),
+            Visibility::Hidden,
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+            NotShadowCaster,
+        )
+    };
+    commands.spawn((DrawnBow, draw_frame(fov), hidden(drawn_bows[0].clone())));
+    let arrow = meshes.add(shaded(arrow_mesh(ARROW_IN_HAND)));
+    commands.spawn((NockedArrow, nocked_arrow_transform(fov, 0.0), hidden(arrow)));
 
     // The arm each hand hangs. `Visibility` is left at its default `Inherited`, so a hand
     // hidden by the view toggle takes its own limb with it and there is no second thing to
@@ -2486,19 +3393,20 @@ fn spawn_view_model(
             OffHandShield {
                 skin_colour,
                 mounted: false,
+                blocking: false,
+                parry: Duration::ZERO,
             },
             ViewModel,
             Mesh3d(shield_mesh_handle),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(shield_translation(view_field_of_view(None)))
-                .with_rotation(Quat::from_rotation_z(-0.48)),
+            off_hand_transform(view_field_of_view(None), 0.0),
             Visibility::Hidden,
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
         ))
-        // The off-hand entity carries no animation of its own, so its arm never leaves the
-        // resting length. It is still the same bar under the same transform, which is what
-        // keeps the two hands one limb rather than two.
+        // The same bar under the same transform, which is what keeps the two hands one limb
+        // rather than two. Its length follows only the parry's advance — see
+        // [`animate_off_hand`].
         .with_child(arm(forearm_mesh_handle, material));
     commands.insert_resource(visuals);
 }
@@ -2528,8 +3436,9 @@ struct HandAssets<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
 }
 
-/// The two facts that choose what the view model draws: the selected authoritative stack
-/// and the local player's authoritative appearance.
+/// The two facts that choose what the view model draws: the authoritative stack in the hand
+/// — the drawn main hand, or the selected hotbar slot while sheathed — and the local player's
+/// authoritative appearance.
 ///
 /// They arrive on different streams and change independently, so keeping the lookup in one
 /// parameter is what prevents a slot refresh from forgetting skin or an appearance refresh
@@ -2543,11 +3452,13 @@ struct HandSubject<'w> {
     mode: Res<'w, InputMode>,
     view: Res<'w, ViewMode>,
     mount: Res<'w, LocalMount>,
+    drawn: Res<'w, super::combat::WeaponDrawn>,
 }
 
 impl HandSubject<'_> {
     fn read(&self) -> (HeldAppearance, u32) {
-        let appearance = selected_appearance(self.inventory.slot(self.selected.0));
+        let slot = super::combat::hand_slot(self.drawn.0, self.selected.0, self.session.as_deref());
+        let appearance = selected_appearance(slot.and_then(|slot| self.inventory.slot(slot)));
         let skin_colour = self
             .session
             .as_deref()
@@ -2587,11 +3498,14 @@ fn refresh_held_item(
     mut held: HeldItemViewModelQuery<'_, '_>,
     mut shields: OffHandShieldViewModelQuery<'_, '_>,
     vitals: Res<SelfVitals>,
+    pull: Res<StringPull>,
 ) {
     let (selected, skin_colour) = subject.read();
     // Both rein hands share this empty fist while mounted. The authoritative selected
-    // stack is read again on dismount, including changes made while riding.
-    let appearance = if subject.mount.mounted() {
+    // stack is read again on dismount, including changes made while riding. A drawn bow is
+    // held by both hands the same way: the bow is its own entity, and each fist is bare.
+    let two_handed = pull.two_handed;
+    let appearance = if subject.mount.mounted() || two_handed {
         selected_appearance(None)
     } else {
         selected
@@ -2653,49 +3567,49 @@ fn refresh_held_item(
     }
 
     let shield_equipped = subject.session.as_deref().is_some_and(|session| {
-        let params = session.0;
-        params.equipment_slots >= 4
-            && subject
-                .inventory
-                .slot(params.inventory_slots - params.equipment_slots + 3)
-                .is_some_and(|stack| {
-                    stack.item_id == super::crafting::ITEM_WOODEN_SHIELD
-                        && stack.count > 0
-                        && stack.durability > 0
-                })
+        super::inventory::equipment_slot(&session.0, super::inventory::OFF_HAND_OFFSET)
+            .and_then(|slot| subject.inventory.slot(slot))
+            .is_some_and(|stack| {
+                stack.item_id == super::crafting::ITEM_WOODEN_SHIELD
+                    && stack.count > 0
+                    && stack.durability > 0
+            })
     });
     let mounted = subject.mount.mounted();
-    let shield_visible = if visible == Visibility::Visible
-        && (mounted || (shield_equipped && vitals.get().is_some_and(|vitals| vitals.blocking)))
-    {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
+    // **The hand is carried whenever the shield is, not only while it is raised.** What
+    // blocking changes is the pose, and the pose is the server's `blocking` alone — a press
+    // the server has not answered raises nothing, and a block it re-raises by itself while
+    // the button is held raises the shield with no press at all.
+    let blocking = !mounted
+        && !two_handed
+        && shield_equipped
+        && vitals.get().is_some_and(|vitals| vitals.blocking);
+    let shield_visible =
+        if visible == Visibility::Visible && (mounted || two_handed || shield_equipped) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     let shield_mesh = assets.visuals.shield_mesh.clone();
     for (mut shield, mut mesh, mut visibility) in &mut shields {
         if shield.skin_colour != skin_colour {
             shield.skin_colour = skin_colour;
             if let Some(mut mesh) = assets.meshes.get_mut(&shield_mesh) {
-                *mesh = held_mesh(
-                    skin_colour,
-                    HeldAppearance {
-                        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
-                        shape: Some(ItemShape::Shield),
-                        item_colour: Some(items::item_linear_rgba(
-                            super::crafting::ITEM_WOODEN_SHIELD,
-                        )),
-                    },
-                );
+                *mesh = left_hand_mesh(skin_colour, worn_shield_appearance());
             }
         }
         // While mounted both entities draw the very same bare-hand asset. Keep the
         // shield asset ready for dismount even when an appearance arrived while riding.
-        let wanted = if mounted { &view_mesh } else { &shield_mesh };
+        let wanted = if mounted || two_handed {
+            &view_mesh
+        } else {
+            &shield_mesh
+        };
         if mesh.0 != *wanted {
             mesh.0 = wanted.clone();
         }
         shield.mounted = mounted;
+        shield.blocking = blocking;
         *visibility = shield_visible;
     }
 }
@@ -2751,7 +3665,9 @@ struct HandIntent<'w, 's> {
     target: Res<'w, BlockTarget>,
     feedback: Res<'w, MiningFeedback>,
     swings: MessageReader<'w, 's, SwingSent>,
+    abandons: MessageReader<'w, 's, SwingAbandoned>,
     consumes: MessageReader<'w, 's, ConsumeSent>,
+    drawn: Res<'w, super::combat::WeaponDrawn>,
 }
 
 impl HandIntent<'_, '_> {
@@ -2801,8 +3717,12 @@ impl HandIntent<'_, '_> {
     }
 
     /// A press that asked for a block somewhere there is room to put one.
+    ///
+    /// Never while a weapon is drawn: the right button then raises a shield and places
+    /// nothing, so the bump would play for a request that never left (#1239).
     fn placing(&self) -> bool {
         self.playing()
+            && !self.drawn.0
             && self
                 .buttons
                 .as_deref()
@@ -2814,6 +3734,14 @@ impl HandIntent<'_, '_> {
     fn swing_sent(&mut self) -> Option<u16> {
         let sent = self.swings.read().next().map(|swing| swing.item_id);
         if self.mount.mounted() { None } else { sent }
+    }
+
+    /// Whether the server refused the last swing for energy since the previous frame.
+    ///
+    /// Not a question this module answers: `super::combat` decides which request a refusal
+    /// belongs to, and this only reads that it did.
+    fn swing_abandoned(&mut self) -> bool {
+        self.abandons.read().count() > 0
     }
 
     /// Whether a consume request left this client this frame.
@@ -2841,6 +3769,7 @@ fn animate_view_model(
     mut held: Query<(Entity, &HeldItem, &mut Transform), Without<Forearm>>,
     mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
     camera: Query<&Projection, With<ViewModelCamera>>,
+    pull: Res<StringPull>,
 ) {
     let field_of_view = view_field_of_view(camera.iter().next());
     let mut next_animation = *animation;
@@ -2869,16 +3798,29 @@ fn animate_view_model(
     // them today — the left button and the consume key are two presses — but they share one
     // `may_act` gate and one frame, so a player can make both. A blow being answered is the
     // more urgent of the two things to show, and one composition can only draw one arc.
+    //
+    // **An abandoned swing is taken back first, before anything this frame starts** (#1228).
+    // The refusal was attributed before this frame's press was sent, so it answers an arc
+    // already playing and never the one a press on this same frame begins. A starved strike
+    // stops being drawn the frame its refusal arrives and the hand is back at rest — there
+    // is no recovery motion to play, because the blow the arc showed was never made.
+    if intent.swing_abandoned()
+        && next_animation
+            .attack
+            .is_some_and(|swing| swing.shape != SwingShape::Eat)
+    {
+        next_animation.attack = None;
+    }
     if intent.consume_sent() {
         next_animation.attack = Some(Swing {
             shape: SwingShape::Eat,
             elapsed: Duration::ZERO,
         });
     }
-    if let Some(item_id) = intent.swing_sent() {
-        let shape = if item_id == ITEM_BOW {
-            SwingShape::Draw
-        } else if item_id == ITEM_WOODEN_SCEPTRE {
+    // A bow never swings: its string follows the server's `draw_progress` ([`StringPull`]). A
+    // `SwingSent` naming one — which `super::combat` does not write — plays no arc, never a cut.
+    if let Some(item_id) = intent.swing_sent().filter(|item_id| *item_id != ITEM_BOW) {
+        let shape = if item_id == ITEM_WOODEN_SCEPTRE {
             SwingShape::Cast
         } else {
             SwingShape::Cut
@@ -2916,19 +3858,26 @@ fn animate_view_model(
 
     // The one transform the hand's own arm carries. It is read once and written into the
     // child below rather than being a second reading of the animation.
-    let arm = forearm_transform(&next_animation);
+    // On a drawn bow the right hand is the string's, and no arc of this animation moves it.
+    let arm = if pull.two_handed {
+        forearm_transform_along(0.0)
+    } else {
+        forearm_transform(&next_animation)
+    };
     for (entity, item, mut transform) in &mut held {
         let next = if intent.mount.mounted() {
             mounted_hand_transform(1.0, field_of_view)
+        } else if pull.two_handed {
+            string_hand_transform(field_of_view, pull.shown)
         } else {
             presented_transform(&next_animation, item.shape, field_of_view)
         };
         if *transform != next {
             *transform = next;
         }
-        // Only the hand that is animated lengthens its arm. The off-hand shield's entity
-        // never moves along the view, so its limb is already at the resting length and
-        // driving it from this animation would stretch an arm nothing had pushed away.
+        // Only the hand that is animated lengthens its arm. The left hand is carried along
+        // the view by its parry and by nothing here, so [`animate_off_hand`] sets its limb
+        // and driving it from this animation would stretch an arm nothing had pushed away.
         for (child_of, mut limb) in &mut forearms {
             if child_of.parent() == entity && *limb != arm {
                 *limb = arm;
@@ -2937,28 +3886,153 @@ fn animate_view_model(
     }
 }
 
-/// **The off-hand shield's placement, which is the only thing about it that moves.**
+/// **The left hand's pose: its rest, its parry and the eased move between them.**
 ///
-/// It carries no animation — [`animate_view_model`]'s note says why — so before #415 its
-/// transform was written once at spawn and never again. That was correct while the height
-/// was a constant and is not correct now: [`base_height`] follows the frame, and a main hand
-/// that follows it while the off hand stays put is two hands at two heights the moment a
-/// player moves the slider. Walking keeps that shield pose; mounting borrows the entity
-/// for the mirrored bare hand, and dismount restores the shield pose on the same frame.
-fn place_off_hand(
+/// Written every frame rather than once at spawn, because [`base_height`] follows the frame
+/// and a right hand that follows it while the left stays put is two hands at two heights the
+/// moment a player moves the slider (#415).
+///
+/// The parry runs toward [`OffHandShield::blocking`], which `refresh_held_item` copies from the
+/// server's vitals earlier in the same chain, over [`PARRY_TIME`] each way. It advances no
+/// request and reads no button. Mounting borrows the entity for the left rein, drops the parry
+/// on that frame and restores the rest pose on dismount; the rein pose is the rest pose.
+fn animate_off_hand(
+    time: Res<Time>,
     camera: Query<&Projection, With<ViewModelCamera>>,
-    mut shields: Query<(&OffHandShield, &mut Transform)>,
+    mut shields: Query<(Entity, &mut OffHandShield, &mut Transform), Without<Forearm>>,
+    mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
+    pull: Res<StringPull>,
 ) {
     let fov = view_field_of_view(camera.iter().next());
-    for (shield, mut transform) in &mut shields {
+    for (entity, mut shield, mut transform) in &mut shields {
+        let parry = if shield.mounted {
+            Duration::ZERO
+        } else if shield.blocking {
+            (shield.parry + time.delta()).min(PARRY_TIME)
+        } else {
+            shield.parry.saturating_sub(time.delta())
+        };
+        if shield.parry != parry {
+            shield.parry = parry;
+        }
+        let fraction = parry.as_secs_f32() / PARRY_TIME.as_secs_f32();
         let next = if shield.mounted {
             mounted_hand_transform(-1.0, fov)
+        } else if pull.two_handed {
+            grip_hand_transform(fov)
         } else {
-            Transform::from_translation(shield_translation(fov))
-                .with_rotation(Quat::from_rotation_z(-0.48))
+            off_hand_transform(fov, fraction)
         };
         if *transform != next {
             *transform = next;
+        }
+        let along = if pull.two_handed {
+            0.0
+        } else {
+            off_hand_along_view(fraction)
+        };
+        let arm = forearm_transform_along(along);
+        for (child_of, mut limb) in &mut forearms {
+            if child_of.parent() == entity && *limb != arm {
+                *limb = arm;
+            }
+        }
+    }
+}
+
+/// **Decides [`StringPull`] for this frame** (#1240), before the hands are refreshed from it.
+///
+/// Two-handed while the drawn hand holds a bow on foot. The pull is the server's
+/// `draw_progress` and nothing local: the button, the press sent and the time it has been held
+/// reach none of it. Off the bow, the pull is at rest.
+fn pull_the_string(
+    time: Res<Time>,
+    subject: HandSubject<'_>,
+    vitals: Res<SelfVitals>,
+    mut pull: ResMut<StringPull>,
+) {
+    let (appearance, _) = subject.read();
+    let two_handed =
+        subject.drawn.0 && appearance.shape == Some(ItemShape::Bow) && !subject.mount.mounted();
+    let progress = vitals
+        .get()
+        .filter(|_| two_handed)
+        .map_or(0, |vitals| vitals.draw_progress);
+    let shown = if two_handed {
+        settle_draw(pull.shown, f32::from(progress) / 255.0, time.delta_secs())
+    } else {
+        0.0
+    };
+    let next = StringPull {
+        two_handed,
+        drawing: progress > 0,
+        shown,
+    };
+    if *pull != next {
+        *pull = next;
+    }
+}
+
+type RightHandVisibilityQuery<'w, 's> =
+    Query<'w, 's, &'static Visibility, (With<HeldItem>, Without<DrawnBow>, Without<NockedArrow>)>;
+
+type DrawnBowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Mesh3d,
+        &'static mut Transform,
+        &'static mut Visibility,
+    ),
+    (With<DrawnBow>, Without<HeldItem>, Without<NockedArrow>),
+>;
+
+type NockedArrowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<NockedArrow>, Without<HeldItem>, Without<DrawnBow>),
+>;
+
+/// Places the drawn bow at its pull and the nocked arrow on its string, and shows both only with
+/// the right hand on screen (#1240). The bow's mesh is swapped by handle among the built steps.
+fn animate_drawn_bow(
+    pull: Res<StringPull>,
+    visuals: Res<HandVisuals>,
+    camera: Query<&Projection, With<ViewModelCamera>>,
+    hands: RightHandVisibilityQuery<'_, '_>,
+    mut bows: DrawnBowQuery<'_, '_>,
+    mut arrows: NockedArrowQuery<'_, '_>,
+) {
+    let fov = view_field_of_view(camera.iter().next());
+    let on_screen = pull.two_handed && hands.iter().any(|hand| *hand == Visibility::Visible);
+    let shown = |yes: bool| {
+        if yes {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        }
+    };
+    let bow_mesh = &visuals.drawn_bows[draw_step(pull.shown)];
+    for (mut mesh, mut transform, mut visibility) in &mut bows {
+        if mesh.0 != *bow_mesh {
+            mesh.0 = bow_mesh.clone();
+        }
+        let next = draw_frame(fov);
+        if *transform != next {
+            *transform = next;
+        }
+        if *visibility != shown(on_screen) {
+            *visibility = shown(on_screen);
+        }
+    }
+    for (mut transform, mut visibility) in &mut arrows {
+        let next = nocked_arrow_transform(fov, pull.shown);
+        if *transform != next {
+            *transform = next;
+        }
+        if *visibility != shown(on_screen && pull.drawing) {
+            *visibility = shown(on_screen && pull.drawing);
         }
     }
 }
@@ -3113,6 +4187,7 @@ mod tests {
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
             (ItemShape::Bow, crafting::ITEM_BOW),
+            (ItemShape::Arrow, crafting::ITEM_ARROW),
             (ItemShape::Sceptre, crafting::ITEM_WOODEN_SCEPTRE),
             (ItemShape::Coin, items::ITEM_SILVER),
             (ItemShape::HorseHead, items::ITEM_BLACK_HORSE),
@@ -4322,7 +5397,6 @@ mod tests {
             );
             let mut arcs: Vec<Option<SwingShape>> = match appearance.shape {
                 Some(ItemShape::Blade) => vec![Some(SwingShape::Cut)],
-                Some(ItemShape::Bow) => vec![Some(SwingShape::Draw)],
                 Some(ItemShape::Sceptre) => vec![Some(SwingShape::Cast)],
                 _ => Vec::new(),
             };
@@ -4938,12 +6012,13 @@ mod tests {
             (placement.x - 0.10).abs() < f32::EPSILON && (placement.z - -0.18).abs() < f32::EPSILON,
             "the two axes that stayed constant moved: {placement:?}"
         );
-        // The off-hand shield's own fraction, held to the height it was written at for the
-        // same reason: neither hand moves at the default field of view.
-        let shield = shield_translation(default_fov());
+        // **The left hand is this hand's mirror rather than a placement of its own** (#1233).
+        // It sat at (-0.10, -0.035, -0.16) on a fraction and a depth of its own; it now takes
+        // this placement with `X` negated, so it moves with this one rather than beside it.
+        let left = off_hand_transform(default_fov(), 0.0).translation;
         assert!(
-            (shield.y - -0.035).abs() < 1e-4 && (shield.z - -0.16).abs() < f32::EPSILON,
-            "the off-hand shield sits at {shield:?}, and it was spawned at (-0.10, -0.035, -0.16)"
+            left.abs_diff_eq(placement * Vec3::new(-1.0, 1.0, 1.0), 1e-6),
+            "the left hand sits at {left:?}, not at the mirror of {placement:?}"
         );
     }
 
@@ -4972,9 +6047,9 @@ mod tests {
                     HAND_DROP_FRACTION,
                 ),
                 (
-                    "the off-hand shield",
-                    shield_translation(field_of_view),
-                    SHIELD_DROP_FRACTION,
+                    "the left hand",
+                    off_hand_transform(field_of_view, 0.0).translation,
+                    HAND_DROP_FRACTION,
                 ),
             ] {
                 let at = translation.y / -translation.z / half_height;
@@ -5030,10 +6105,11 @@ mod tests {
     /// carry the composition toward the eye and a margin measured at rest is not one.
     #[test]
     fn the_whole_fist_stays_in_frame_at_every_field_of_view_a_player_can_choose() {
-        // **Two of the eight animations, and the other six are excluded by measurement rather
-        // than by omission.** A placement bump, all three swing arcs, a bow draw and a sceptre
-        // cast each carry the fist past the bottom edge **at the default field of view
-        // already** — measured here at 1.08, 1.08, 1.07, 1.05, 1.33 and 1.08 of the way to it.
+        // **Two of the seven animations, and the other five are excluded by measurement rather
+        // than by omission.** A placement bump, all three swing arcs and a sceptre cast each
+        // carry the fist past the bottom edge **at the default field of view already** —
+        // measured here at 1.08, 1.08, 1.07, 1.05 and 1.08 of the way to it. The bow's draw
+        // is not an arc of this hand since #1240, and its two hands are swept on their own.
         // The hand dipping out of frame is what those arcs are; requiring otherwise of them
         // would be inventing a property this composition has never had and calling the
         // invention a regression test. What is asserted is the property #384 established and
@@ -5414,7 +6490,7 @@ mod tests {
     ///
     /// | animation | before #396 | after #396 | **now** |
     /// |---|---|---|---|
-    /// | at rest / placement bump / bow draw | 60.5° | 61.2° | **61.2°** |
+    /// | at rest / placement bump | 60.5° | 61.2° | **61.2°** |
     /// | overhead cut | 56.2° | 54.2° | **54.2°** |
     /// | lateral slash | 52.8° | 53.8° | **53.8°** |
     /// | mining punch | 52.4° | 52.1° | **60.2°** |
@@ -5466,11 +6542,6 @@ mod tests {
                 "through a blade cut",
                 widest(Some(SwingShape::Cut), Some(ItemShape::Blade), true, false),
                 53.0,
-            ),
-            (
-                "through a bow draw",
-                widest(Some(SwingShape::Draw), Some(ItemShape::Bow), true, false),
-                60.0,
             ),
             (
                 "through a sceptre cast",
@@ -5629,24 +6700,20 @@ mod tests {
         );
     }
 
-    /// **The off-hand shield hand gets the same arm, and the shield's own roll mirrors it.**
+    /// **The left hand gets the same arm, and it is a left arm.**
     ///
-    /// `spawn_view_model` builds that entity from the same [`held_mesh`] and hangs the same
-    /// arm under it, so an arm added there arrives on the left hand whether anybody decided it
-    /// should or not — which is why #389 asked for the decision to be made rather than
-    /// discovered. It is kept: the left hand needs a limb for the same reason the right one
-    /// does, and the entity's own `Rz(-0.48)` is larger than anything the arm carries, so the
-    /// limb leans *outboard for a left hand* — down and to the left — instead of being a right
-    /// arm mirrored the wrong way. That is measured here rather than assumed, because it is
-    /// true by arithmetic on two numbers that live in different functions.
+    /// `spawn_view_model` hangs the same bar under the left hand that it hangs under the right,
+    /// so an arm added there arrives on the left whether anybody decided it should or not —
+    /// which is why #389 asked for the decision to be made rather than discovered. It is kept:
+    /// the left hand needs a limb for the same reason the right one does. Since #1233 the hand
+    /// is the right hand mirrored by [`hand_on_side`], so the limb's straight outboard edge is
+    /// on the left and its lean is the right arm's lean mirrored; that is measured here, and
+    /// every vertex of it in [`the_left_hand_is_the_right_hand_mirrored_by_rotation`].
     ///
-    /// **The arm is now an entity, so the first thing checked is that it is there.** #394 moved
-    /// the limb out of the hand's mesh and onto a child; the off-hand's copy is spawned by the
-    /// same closure and never animated, which is correct — that entity carries no `along_view`
-    /// of its own, so a limb driven from the *held* hand's animation would stretch an arm
-    /// nothing had pushed away. What must be asserted is that it exists and rests at the
-    /// resting length, because both of those are now spawn-time decisions rather than
-    /// properties of a merged mesh.
+    /// **The arm is an entity, so the first thing checked is that it is there.** #394 moved the
+    /// limb onto a child; the left hand's copy is driven by [`animate_off_hand`] from the parry's
+    /// advance and never from the right hand's animation, which would stretch an arm nothing had
+    /// pushed away. At rest it is at the resting length.
     #[test]
     fn the_off_hand_shield_carries_a_left_arm_of_its_own() {
         let mut app = app();
@@ -5678,13 +6745,19 @@ mod tests {
              below the hand"
         );
 
-        let wrist = shield.transform_point(Vec3::new(0.0, -HAND_SIZE.y / 2.0, 0.0));
-        let end = shield.transform_point(far_end);
+        // **Outboard is the limb's flush edge, and on the left hand it is on the left.** This
+        // read the arm's lean while that lean was the −0.48 roll's. The left hand now leans as
+        // the mirror of the right one, so what makes this a left arm is where the limb's
+        // straight outer edge — [`LIMB_OUTBOARD_OFFSET`] out from the fist's centre line —
+        // lands on screen.
+        let centre_line = shield.transform_point(Vec3::new(0.0, far_end.y / 2.0, 0.0));
+        let outboard =
+            shield.transform_point(Vec3::new(LIMB_OUTBOARD_OFFSET, far_end.y / 2.0, 0.0));
         assert!(
-            end.x < wrist.x,
-            "the shield hand's arm runs from x {} to x {}, which is inboard rather than out",
-            wrist.x,
-            end.x
+            outboard.x < centre_line.x && shield.translation.x < 0.0,
+            "the left arm's outboard offset lands at x {} against its centre line at x {}",
+            outboard.x,
+            centre_line.x
         );
 
         let cap = forearm_cap(&HandAnimation::default());
@@ -5765,22 +6838,24 @@ mod tests {
         }
     }
 
-    /// **The pickaxe and the shovel stay inside the envelope an implement is held in**, and
-    /// each is a wooden haft under an iron head rather than one colour borrowed from the ground
-    /// it digs (#1121).
+    /// **Every implement stays inside the envelope an implement is held in**, and each is a
+    /// wooden haft under an iron head rather than one colour borrowed from the ground it digs
+    /// (#1121 for the pickaxe and the shovel, #1229 for the axe).
     ///
-    /// The envelope is the axe's: as long as its haft, since all three implements are held at
-    /// the same [`item_translation`], no wider than the bow is long, and no deeper than the axe's
-    /// head, so neither new silhouette reaches anywhere of the view model's space that an
-    /// implement did not already occupy. [`every_held_arrangement_clears_the_near_plane_through_every_swing`]
-    /// is what measures that space against the camera; this pins the two meshes to it.
+    /// The envelope is the one the axe's old T occupied: as long as [`IMPLEMENT_LENGTH`], since
+    /// all three implements are held at the same [`item_translation`], no wider than the bow is
+    /// long, and no deeper than the T's 26 mm head, so no silhouette reaches anywhere of the
+    /// view model's space that an implement did not already occupy.
+    /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] is what measures
+    /// that space against the camera; this pins the three meshes to it.
     #[test]
-    fn the_pickaxe_and_the_shovel_are_wood_under_iron_inside_the_hold_envelope() {
-        let envelope = Vec3::new(BOW_LENGTH, IMPLEMENT_LENGTH, TOOL_HEAD_SIZE.z);
+    fn every_implement_is_wood_under_iron_inside_the_hold_envelope() {
+        let envelope = Vec3::new(BOW_LENGTH, IMPLEMENT_LENGTH, 0.026);
         let (wood, iron) = implement_colours();
         let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
 
         for (shape, item_id) in [
+            (ItemShape::Tool, crafting::ITEM_AXE),
             (ItemShape::Pickaxe, crafting::ITEM_PICKAXE),
             (ItemShape::Shovel, crafting::ITEM_SHOVEL),
         ] {
@@ -5873,6 +6948,306 @@ mod tests {
                     "two implements are held as the same silhouette: {one:?} and {two:?}"
                 );
             }
+        }
+    }
+
+    /// **The axe's head is a cutting bit on one side of the haft, not a T** (#1229).
+    ///
+    /// Read from the merged vertices by colour, so it measures what is drawn rather than the
+    /// constants it was authored from: the iron reaches much farther on the bit's side than on
+    /// the poll's, the iron is taller along the edge than at the eye, and the wood is a haft
+    /// the width of [`IMPLEMENT_HAFT`] and nothing else.
+    #[test]
+    fn the_axe_is_a_one_sided_iron_bit_on_a_wooden_haft() {
+        let mesh = axe_mesh(IMPLEMENT_LENGTH);
+        let (wood, iron) = implement_colours();
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        let points = positions(&mesh);
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the axe must carry per-vertex colour");
+        };
+        let of = |material: [f32; 4]| -> Vec<[f32; 3]> {
+            points
+                .iter()
+                .zip(colours)
+                .filter(|(_, colour)| quantise(**colour) == quantise(material))
+                .map(|(point, _)| *point)
+                .collect()
+        };
+        let (head, haft) = (of(iron), of(wood));
+        assert!(!head.is_empty() && !haft.is_empty());
+
+        for point in &haft {
+            assert!(
+                point[0].abs() <= IMPLEMENT_HAFT / 2.0 + 1e-6
+                    && point[2].abs() <= IMPLEMENT_HAFT / 2.0 + 1e-6,
+                "a wooden vertex at {point:?} is outside the haft, so the head is not iron"
+            );
+        }
+
+        // One-sided: the bit's reach is more than twice the poll's.
+        let (behind, ahead) = extent(&head, 0);
+        assert!(
+            ahead > -behind * 2.0,
+            "the axe's iron reaches {ahead} ahead of the haft and {} behind it, which is a T \
+             rather than an axe",
+            -behind
+        );
+
+        // Wider along the edge than at the eye: the iron at the far edge spans more of the
+        // haft's length than the iron around the haft does.
+        let span = |points: Vec<[f32; 3]>| {
+            let (low, high) = extent(&points, 1);
+            high - low
+        };
+        let at_eye = span(
+            head.iter()
+                .filter(|point| point[0].abs() <= 0.010 + 1e-6)
+                .copied()
+                .collect(),
+        );
+        let at_edge = span(
+            head.iter()
+                .filter(|point| point[0] >= ahead - 0.010)
+                .copied()
+                .collect(),
+        );
+        assert!(
+            at_edge > at_eye,
+            "the axe's edge is {at_edge} tall against {at_eye} at the eye, so it does not flare"
+        );
+    }
+
+    /// The XY position of every vertex of a bow mesh drawn in one colour.
+    fn bow_points(mesh: &Mesh, colour: [f32; 4]) -> Vec<Vec2> {
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the bow must carry per-vertex colour");
+        };
+        positions(mesh)
+            .iter()
+            .zip(colours)
+            .filter(|(_, tint)| quantise(**tint) == quantise(colour))
+            .map(|(point, _)| Vec2::new(point[0], point[1]))
+            .collect()
+    }
+
+    /// The mean of the points within `radius` of `centre`, which must be some.
+    fn mean_near(points: &[Vec2], centre: Vec2, radius: f32) -> Vec2 {
+        let close: Vec<Vec2> = points
+            .iter()
+            .copied()
+            .filter(|point| point.distance(centre) <= radius)
+            .collect();
+        assert!(
+            !close.is_empty(),
+            "nothing is drawn within {radius} of {centre}"
+        );
+        close.iter().copied().sum::<Vec2>() / close.len() as f32
+    }
+
+    /// **The bow is curved, grained limbs tapering from a leather grip, strung with a lighter
+    /// cord** (#1230), read from the merged vertices by colour rather than from the constants
+    /// they were authored from.
+    #[test]
+    fn the_bow_is_curved_grained_limbs_on_a_leather_grip_with_a_lighter_cord() {
+        let mesh = bow_mesh(BOW_LENGTH);
+        let (wood, leather, cord) = bow_colours();
+
+        // Lighter than the wood in every channel, and by a margin — what reads as cord against
+        // bark rather than as another brown.
+        assert!(
+            (0..3).all(|channel| cord[channel] > wood[channel] * 2.0),
+            "the string's {cord:?} is not a lighter cord than the limbs' {wood:?}"
+        );
+        // Three colours and nothing else: no arrow is drawn on the bow.
+        assert_eq!(
+            tints(&mesh).len(),
+            3,
+            "the bow is not wood, leather and cord: {:?}",
+            tints(&mesh)
+        );
+
+        let span = |points: &[Vec2], axis: usize| {
+            points
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+                    (low.min(point[axis]), high.max(point[axis]))
+                })
+        };
+
+        // The grip: centred on the origin a fist is seated at, and thicker than any limb.
+        let grip = bow_points(&mesh, leather);
+        let (left, right) = span(&grip, 0);
+        let (bottom, top) = span(&grip, 1);
+        assert!(
+            (left + right).abs() < 1e-6 && (bottom + top).abs() < 1e-6,
+            "the grip spans {left}..{right} by {bottom}..{top}, off the bow's origin"
+        );
+        let limbs = bow_points(&mesh, wood);
+        let root = BOW_GRIP.y / 2.0 - 0.005;
+        // The widest the limb's section is around one point on its spine: the farthest two
+        // limb vertices within `radius` of it. Its corners are not on one axis-aligned line,
+        // because each section is square to the curve rather than to the bow.
+        let width_at = |centre: Vec2, radius: f32| {
+            let close: Vec<Vec2> = limbs
+                .iter()
+                .copied()
+                .filter(|point| point.distance(centre) <= radius)
+                .collect();
+            assert!(
+                !close.is_empty(),
+                "no limb vertex within {radius} of {centre}"
+            );
+            close
+                .iter()
+                .flat_map(|one| close.iter().map(move |two| one.distance(*two)))
+                .fold(0.0_f32, f32::max)
+        };
+        let root_width = width_at(Vec2::new(0.0, root), BOW_STAVE * 0.7);
+        assert!(
+            right - left > root_width,
+            "the grip is {} across, no thicker than the {root_width} limb it holds",
+            right - left
+        );
+
+        // Tapering: the limb is less than half as wide at its tip as where it leaves the grip.
+        let [upper_tip, _, _] = bow_string(0.0);
+        let tip_width = width_at(upper_tip, BOW_STAVE * BOW_TIP_FRACTION * 0.7);
+        assert!(
+            tip_width < root_width * 0.5,
+            "the limb is {tip_width} wide at its tip against {root_width} at the grip, so it \
+             does not taper"
+        );
+
+        // Curved: halfway along the upper limb its centre stands well behind the straight
+        // line from the grip to the tip — behind meaning away from the string.
+        let middle: Vec<Vec2> = limbs
+            .iter()
+            .copied()
+            .filter(|point| (0.030..=0.040).contains(&point.y))
+            .collect();
+        assert!(!middle.is_empty(), "no limb vertex halfway up the bow");
+        let centre = middle.iter().copied().sum::<Vec2>() / middle.len() as f32;
+        let straight = upper_tip.x * (centre.y - root) / (upper_tip.y - root);
+        assert!(
+            straight - centre.x > 0.003,
+            "halfway up, the limb is at x {} against {straight} on the straight line from grip \
+             to tip, so it is a stick rather than a bow",
+            centre.x
+        );
+
+        // The grain reaches the limbs and nothing else.
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the bow must carry per-vertex colour");
+        };
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        for (colour, uv) in colours.iter().zip(uvs(&mesh)) {
+            if quantise(*colour) == quantise(wood) {
+                assert!(
+                    livery::band_holds(Livery::Wood, uv),
+                    "a limb samples {uv:?}, outside wood's own band"
+                );
+            } else {
+                assert_eq!(
+                    uv,
+                    livery::neutral_uv(),
+                    "the grip or the string samples the grain"
+                );
+            }
+        }
+    }
+
+    /// **The bow is a pure function of its draw fraction, and the string stays tied to both
+    /// tips at every value** (#1230).
+    ///
+    /// At rest the string is straight from tip to tip; at a full draw the nock is
+    /// [`BOW_DRAW_LENGTH`] behind the grip and both tips have come toward it. The tips are
+    /// found in the mesh, where the string's end sections and the limbs' tip sections are
+    /// centred, rather than taken on trust from [`bow_string`].
+    #[test]
+    fn the_bow_is_a_pure_function_of_its_draw_fraction() {
+        let (wood, leather, cord) = bow_colours();
+        assert_eq!(
+            positions(&bow_mesh(BOW_LENGTH)),
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.0)),
+            "the bow every surface draws is not the bow at rest"
+        );
+        assert_eq!(
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.5)),
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.5)),
+            "two builds at one draw fraction differ"
+        );
+
+        let rest = bow_mesh_drawn(BOW_LENGTH, 0.0);
+        for point in bow_points(&rest, cord) {
+            assert!(
+                (point.x - BOW_BRACE).abs() <= BOW_CORD / 2.0 + 1e-6,
+                "at rest the string has a vertex at {point}, off the straight line at x \
+                 {BOW_BRACE}"
+            );
+        }
+
+        for draw in [0.0, 0.5, 1.0] {
+            let mesh = bow_mesh_drawn(BOW_LENGTH, draw);
+            let [upper, _, lower] = bow_string(draw);
+            for tip in [upper, lower] {
+                let string_end = mean_near(&bow_points(&mesh, cord), tip, BOW_CORD * 0.6);
+                let limb_tip = mean_near(
+                    &bow_points(&mesh, wood),
+                    tip,
+                    BOW_STAVE * BOW_TIP_FRACTION * 0.7,
+                );
+                assert!(
+                    string_end.distance(tip) < 1e-5 && limb_tip.distance(tip) < 1e-5,
+                    "at draw {draw} the string ends at {string_end} and the limb's tip is at \
+                     {limb_tip}, not both at {tip}"
+                );
+            }
+        }
+
+        let drawn = bow_mesh_drawn(BOW_LENGTH, 1.0);
+        let nock: Vec<Vec2> = bow_points(&drawn, cord)
+            .into_iter()
+            .filter(|point| point.y.abs() < 1e-5)
+            .collect();
+        assert!(
+            !nock.is_empty(),
+            "a drawn string has no section at its nock"
+        );
+        let nock = nock.iter().copied().sum::<Vec2>() / nock.len() as f32;
+        let grip = bow_points(&drawn, leather);
+        let grip = grip.iter().copied().sum::<Vec2>() / grip.len() as f32;
+        assert!(
+            (nock.x - grip.x - BOW_DRAW_LENGTH).abs() < 1e-5,
+            "at a full draw the nock is {} behind the grip, not {BOW_DRAW_LENGTH}",
+            nock.x - grip.x
+        );
+
+        let extreme = |mesh: &Mesh, upper: bool| {
+            bow_points(mesh, wood)
+                .into_iter()
+                .max_by(|one, two| {
+                    if upper {
+                        one.y.total_cmp(&two.y)
+                    } else {
+                        two.y.total_cmp(&one.y)
+                    }
+                })
+                .expect("a bow has limbs")
+        };
+        for upper in [true, false] {
+            let (at_rest, at_full) = (extreme(&rest, upper), extreme(&drawn, upper));
+            assert!(
+                at_full.distance(nock) < at_rest.distance(nock)
+                    && at_full.y.abs() < at_rest.y.abs(),
+                "the {} tip is at {at_rest} at rest and {at_full} at a full draw, which has not \
+                 flexed toward the nock at {nock}",
+                if upper { "upper" } else { "lower" }
+            );
         }
     }
 
@@ -6166,6 +7541,444 @@ mod tests {
         );
     }
 
+    /// The vertices of one part of a shield mesh, found by the absolute colour it is authored in.
+    fn shield_part(mesh: &Mesh, colour: [f32; 4]) -> Vec<Vec3> {
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the shield must carry per-vertex colour");
+        };
+        positions(mesh)
+            .into_iter()
+            .zip(colours)
+            .filter(|(_, tint)| **tint == colour)
+            .map(|(point, _)| Vec3::from_array(point))
+            .collect()
+    }
+
+    /// The least and greatest corner of a set of points, per axis.
+    fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
+        points.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(low, high), point| (low.min(*point), high.max(*point)),
+        )
+    }
+
+    /// **The face is round, it is planks of the registry's wood, and a darker rim holds it.**
+    ///
+    /// Round is read off the vertices rather than the constants: every corner of every plank
+    /// is on one circle, and some corner reaches that circle at every facet angle, so no part
+    /// of the outline is cut flat. The rim stands proud of the wood in front and behind, and
+    /// buries the planks' cut edges between its two walls.
+    #[test]
+    fn the_shield_face_is_round_planks_of_wood_inside_a_darker_rim() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+
+        assert_eq!(
+            colours.planks[0],
+            items::item_linear_rgba(crafting::ITEM_WOODEN_SHIELD),
+            "the planks are not the wood the registry says the shield is"
+        );
+        let every = [
+            colours.planks[0],
+            colours.planks[1],
+            colours.rim,
+            colours.boss,
+            colours.handle,
+        ];
+        for (index, one) in every.iter().enumerate() {
+            for two in &every[index + 1..] {
+                assert_ne!(one, two, "two parts of the shield are one colour");
+            }
+        }
+        for plank in colours.planks {
+            assert!(
+                (0..3).all(|channel| colours.rim[channel] < plank[channel]),
+                "the rim {:?} is not darker than the plank {plank:?}",
+                colours.rim
+            );
+        }
+
+        let radius = SHIELD_PLANK_RADIUS * diameter;
+        let [even, odd] = colours.planks.map(|shade| shield_part(&shield, shade));
+        for (name, points) in [("the registry's", &even), ("the darker", &odd)] {
+            assert!(!points.is_empty(), "no plank is drawn in {name} shade");
+            for point in points {
+                assert!(
+                    (point.truncate().length() - radius).abs() < 1e-6,
+                    "a plank corner at {point:?} is off the face's circle of {radius}"
+                );
+            }
+        }
+        let planks: Vec<Vec3> = even.iter().chain(&odd).copied().collect();
+        for facet in 0..SHIELD_SIDES {
+            let angle = TAU * facet as f32 / SHIELD_SIDES as f32;
+            assert!(
+                planks.iter().any(|point| {
+                    let apart = (point.y.atan2(point.x) - angle).rem_euclid(TAU);
+                    !(1e-3..=TAU - 1e-3).contains(&apart)
+                }),
+                "no plank reaches the circle at {:.1}°, so the face is cut flat there",
+                angle.to_degrees()
+            );
+        }
+        assert!(
+            bounds(&odd).0.z < bounds(&even).0.z,
+            "the darker planks do not stand forward of their neighbours, so no seam shows"
+        );
+
+        let rim = shield_part(&shield, colours.rim);
+        for point in &rim {
+            let reach = point.truncate().length();
+            assert!(
+                [SHIELD_RIM_INNER, SHIELD_RIM_OUTER]
+                    .iter()
+                    .any(|wall| (reach - wall * diameter).abs() < 1e-6),
+                "a rim corner at {point:?} is on neither of its walls"
+            );
+        }
+        let (rim_low, rim_high) = bounds(&rim);
+        let (wood_low, wood_high) = bounds(&planks);
+        assert!(
+            (rim_high.x - rim_low.x - diameter).abs() < 1e-6
+                && (rim_high.y - rim_low.y - diameter).abs() < 1e-6,
+            "the shield is not {diameter} across in both directions"
+        );
+        assert!(
+            rim_low.z < wood_low.z && rim_high.z > wood_high.z,
+            "the rim does not stand proud of the planks in front and behind"
+        );
+        // A plank's end is a chord of at most one facet, so its deepest point is
+        // `cos(π / SHIELD_SIDES)` of the radius; the rim's inner wall must reach inside that,
+        // and its outer wall's own chords must stay outside the planks.
+        let chord = (PI / SHIELD_SIDES as f32).cos();
+        assert!(
+            SHIELD_RIM_INNER < SHIELD_PLANK_RADIUS * chord
+                && SHIELD_PLANK_RADIUS < SHIELD_RIM_OUTER * chord,
+            "the planks' cut edges are not buried between the rim's walls"
+        );
+    }
+
+    /// **The boss is an iron dome at the centre, standing out of everything else on the face.**
+    #[test]
+    fn the_boss_is_an_iron_dome_standing_out_of_the_centre_of_the_face() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+        assert_eq!(colours.boss, items::forged_iron_linear_rgba());
+
+        let boss = shield_part(&shield, colours.boss);
+        let (low, high) = bounds(&boss);
+        assert!(
+            (low.x + high.x).abs() < 1e-6 && (low.y + high.y).abs() < 1e-6,
+            "the boss is off the centre of the face: {low:?} to {high:?}"
+        );
+        let apex = low.z;
+        assert!(
+            boss.iter()
+                .filter(|point| (point.z - apex).abs() < 1e-7)
+                .all(|point| point.truncate().length() < 1e-6),
+            "the boss's foremost point is not on the axis, so it is not a dome"
+        );
+
+        let face: Vec<Vec3> = [colours.rim, colours.planks[0], colours.planks[1]]
+            .into_iter()
+            .flat_map(|colour| shield_part(&shield, colour))
+            .collect();
+        let flange = -SHIELD_BOSS_FLANGE_FRONT * diameter;
+        assert!(
+            flange < bounds(&face).0.z - 1e-6,
+            "the boss's flange does not stand in front of the rim and the planks"
+        );
+
+        // Domed: from the flange forward, each ring is no wider than the one behind it.
+        let mut rings: Vec<(f32, f32)> = boss
+            .iter()
+            .filter(|point| point.z < flange - 1e-7)
+            .map(|point| (point.z, point.truncate().length()))
+            .collect();
+        rings.sort_by(|one, two| two.0.total_cmp(&one.0));
+        assert!(
+            rings.len() > SHIELD_SIDES,
+            "the boss has no dome in front of its flange"
+        );
+        for pair in rings.windows(2) {
+            assert!(
+                pair[1].1 <= pair[0].1 + 1e-6,
+                "the boss widens from {} to {} going forward, so it is not a dome",
+                pair[0].1,
+                pair[1].1
+            );
+        }
+    }
+
+    /// **The handle runs level behind the boss, and a fist on its grip point holds the shield
+    /// from behind** — the contract the shield hand is placed against.
+    ///
+    /// Three measurements, each the thing a fist needs rather than a restatement of the
+    /// constants: the grip point is on the handle; the gap between the wood and the bar is at
+    /// least a quarter of the fist, room for the fingers to pass through; and a fist of
+    /// [`HAND_SIZE`] centred on the grip point is wholly behind the planks and the boss, between
+    /// the two posts. The held arrangement seats exactly that fist there.
+    #[test]
+    fn a_fist_on_the_grip_point_holds_the_shield_from_behind_with_room_for_the_fingers() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+        let grip = shield_grip_point(diameter);
+
+        let handle = shield_part(&shield, colours.handle);
+        let (low, high) = bounds(&handle);
+        assert!(
+            high.x - low.x > 4.0 * (high.y - low.y),
+            "the handle is not horizontal: {low:?} to {high:?}"
+        );
+        assert!(
+            grip.truncate() == Vec2::ZERO && (low.x + high.x).abs() < 1e-6,
+            "the handle is not centred behind the boss"
+        );
+        assert!(
+            low.cmple(grip).all() && grip.cmple(high).all(),
+            "the grip point {grip:?} is off the handle, {low:?} to {high:?}"
+        );
+
+        let wood = [colours.planks[0], colours.planks[1]]
+            .into_iter()
+            .flat_map(|colour| shield_part(&shield, colour))
+            .collect::<Vec<_>>();
+        let wood_back = bounds(&wood).1.z;
+        let boss_back = bounds(&shield_part(&shield, colours.boss)).1.z;
+        let bar_front = handle
+            .iter()
+            .map(|point| point.z)
+            .filter(|z| *z > wood_back)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            bar_front - wood_back >= HAND_SIZE.z / 4.0,
+            "only {} between the planks and the handle, where a fist's fingers need {}",
+            bar_front - wood_back,
+            HAND_SIZE.z / 4.0
+        );
+
+        let fist_front = grip.z - HAND_SIZE.z / 2.0;
+        assert!(
+            fist_front > wood_back && fist_front > boss_back,
+            "a fist on the grip point reaches {fist_front}, into the wood at {wood_back}"
+        );
+        let between_posts = (SHIELD_HANDLE_HALF_SPAN - 2.0 * SHIELD_POST_HALF_WIDTH) * diameter;
+        assert!(
+            HAND_SIZE.x / 2.0 < between_posts,
+            "a fist on the grip point does not fit between the handle's posts"
+        );
+
+        // **Against the fist the hand actually draws, not against the item frame's origin.**
+        // `held_mesh` puts the fist first in its buffers, so its own vertices say where it is;
+        // a composition whose fist were not centred on the origin would move this and not
+        // `item_translation`, which is the gap the review on #1250 named.
+        let held = held_mesh(
+            TEST_SKIN,
+            selected_appearance(Some(InventoryStack {
+                item_id: crafting::ITEM_WOODEN_SHIELD,
+                count: 1,
+                ..Default::default()
+            })),
+        );
+        let fist: Vec<Vec3> = positions(&held)
+            .into_iter()
+            .take(fist_mesh().count_vertices())
+            .map(Vec3::from_array)
+            .collect();
+        let (fist_low, fist_high) = bounds(&fist);
+        assert!(
+            (fist_high - fist_low - HAND_SIZE).length() < 1e-6,
+            "the first vertices of the held shield are not the fist: {fist_low:?} to {fist_high:?}"
+        );
+        let fist_centre = (fist_low + fist_high) / 2.0;
+        let seated = item_translation(ItemShape::Shield) + grip;
+        assert!(
+            seated.distance(fist_centre) < 1e-6,
+            "the held shield's grip point lands at {seated:?}, not on the fist's centre at \
+             {fist_centre:?}"
+        );
+    }
+
+    /// **The hand, the ground and a body draw one shield**, at their own scales and nothing
+    /// else — and every vertex of it points at the neutral band, because the ground drop's
+    /// material wears the wood livery.
+    #[test]
+    fn the_shield_is_one_model_at_every_scale() {
+        let hand = shield_mesh(SHIELD_IN_HAND);
+        let hand_points = positions(&hand);
+        for diameter in [0.5, 0.62] {
+            let other = shield_mesh(diameter);
+            let scale = diameter / SHIELD_IN_HAND;
+            let points = positions(&other);
+            assert_eq!(points.len(), hand_points.len());
+            for (point, held) in points.iter().zip(&hand_points) {
+                assert!(
+                    Vec3::from_array(*point).distance(Vec3::from_array(*held) * scale) < 1e-5,
+                    "the shield at {diameter} is not the hand's scaled: {point:?}"
+                );
+            }
+            assert_eq!(
+                other
+                    .attribute(Mesh::ATTRIBUTE_COLOR)
+                    .map(|colours| colours.len()),
+                hand.attribute(Mesh::ATTRIBUTE_COLOR)
+                    .map(|colours| colours.len())
+            );
+            assert_eq!(
+                other.indices().map(|indices| indices.len()),
+                hand.indices().map(|indices| indices.len())
+            );
+        }
+        let Some(VertexAttributeValues::Float32x2(uvs)) = hand.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("the shield must carry Float32x2 texture coordinates");
+        };
+        assert!(
+            uvs.iter().all(|uv| *uv == livery::neutral_uv()),
+            "the shield samples the livery image outside its neutral band"
+        );
+    }
+
+    /// **One arrow, proportioned like one** (#1231): a shaft many times longer than it is wide,
+    /// a point that narrows to nothing at the front, and fletching at the tail in a colour that
+    /// is neither the shaft's nor the point's — and the hand holds exactly that arrow, in those
+    /// colours.
+    ///
+    /// Each part is read off [`arrow_mesh`] by its colour, so it is measured as the solid it is
+    /// rather than from the constants that built it.
+    #[test]
+    fn the_arrow_is_a_long_shaft_a_point_and_fletching_at_the_tail() {
+        let length = 1.0;
+        let mesh = arrow_mesh(length);
+        let points = positions(&mesh);
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the arrow must carry per-vertex colour");
+        };
+        let (wood, bone, feather) = arrow_colours();
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        let part = |colour: [f32; 4]| -> Vec<[f32; 3]> {
+            points
+                .iter()
+                .zip(colours)
+                .filter(|(_, tint)| quantise(**tint) == quantise(colour))
+                .map(|(point, _)| *point)
+                .collect()
+        };
+        let [shaft, head, fletching] = [wood, bone, feather].map(part);
+        assert_eq!(
+            shaft.len() + head.len() + fletching.len(),
+            points.len(),
+            "the arrow carries a colour that is not its shaft, point or fletching"
+        );
+        for (name, vertices) in [
+            ("shaft", &shaft),
+            ("point", &head),
+            ("fletching", &fletching),
+        ] {
+            assert!(!vertices.is_empty(), "the arrow has no {name}");
+        }
+
+        // Nock to point is exactly the length asked for, along the arrow's own axis.
+        let (low, high) = extent(&points, 1);
+        assert!(
+            (high - low - length).abs() < 1e-5,
+            "the arrow is {} long",
+            high - low
+        );
+
+        // A shaft: far longer than it is wide, running from the nock into the point.
+        let (shaft_low, shaft_high) = extent(&shaft, 1);
+        let (across_low, across_high) = extent(&shaft, 0);
+        let shaft_width = across_high - across_low;
+        assert!(
+            shaft_high - shaft_low > 15.0 * shaft_width,
+            "the shaft is {} long and {shaft_width} wide, which is not an arrow's",
+            shaft_high - shaft_low
+        );
+        assert!(
+            (shaft_low - low).abs() < 1e-5,
+            "the shaft does not reach the nock"
+        );
+
+        // A point: it is the front of the arrow, and it narrows from wider than the shaft to
+        // nothing at its tip.
+        let (head_low, head_high) = extent(&head, 1);
+        assert!(
+            (head_high - high).abs() < 1e-5,
+            "the point is not at the front"
+        );
+        let radius_at = |y: f32| {
+            head.iter()
+                .filter(|point| (point[1] - y).abs() < 1e-5)
+                .map(|point| Vec2::new(point[0], point[2]).length())
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(
+            radius_at(head_high) < 1e-5,
+            "the point does not come to a point"
+        );
+        assert!(
+            radius_at(head_low) > shaft_width,
+            "the point's base is {} across a {shaft_width} shaft",
+            radius_at(head_low)
+        );
+
+        // Fletching: at the tail, short of the nock, and standing out of the shaft on both
+        // axes across it.
+        let (fletch_low, fletch_high) = extent(&fletching, 1);
+        assert!(
+            fletch_low > low + 1e-5 && fletch_high < low + length / 3.0,
+            "the fletching runs {fletch_low}..{fletch_high}, not at the tail of {low}..{high}"
+        );
+        for axis in [0, 2] {
+            let (from, to) = extent(&fletching, axis);
+            assert!(
+                to - from > 2.0 * shaft_width,
+                "the fletching is {} across axis {axis} over a {shaft_width} shaft",
+                to - from
+            );
+        }
+
+        // In colours that tell the three apart: the fletching darker than both in every
+        // channel, and the point not the shaft's wood.
+        for channel in 0..3 {
+            assert!(
+                feather[channel] < wood[channel] && feather[channel] < bone[channel],
+                "the fletching's {feather:?} does not contrast with the shaft and the point"
+            );
+        }
+        assert_ne!(
+            quantise(wood),
+            quantise(bone),
+            "the point is the shaft's colour"
+        );
+
+        // And the hand holds this arrow, at its own length, in these colours rather than the
+        // row's colour multiplied over them.
+        let held = item_mesh(ITEM_ARROW, ItemShape::Arrow);
+        assert_eq!(positions(&held), positions(&arrow_mesh(ARROW_IN_HAND)));
+        let mut expected = vec![quantise(wood), quantise(bone), quantise(feather)];
+        expected.sort_unstable();
+        assert_eq!(tints(&held), expected);
+        assert!(
+            matches!(
+                selected_appearance(Some(InventoryStack {
+                    item_id: ITEM_ARROW,
+                    count: 1,
+                    ..Default::default()
+                }))
+                .shape,
+                Some(ItemShape::Arrow)
+            ),
+            "the hand does not draw an arrow stack as an arrow"
+        );
+    }
+
     /// **Every solid in the sword is wound outward**, which is the one failure in a new part
     /// that costs the most to diagnose.
     ///
@@ -6255,9 +8068,13 @@ mod tests {
             ),
             ("a dropped sword", world_sword(0.05)),
             ("a dropped grip", sword_grip_mesh(0.05)),
+            ("the axe", axe_mesh(IMPLEMENT_LENGTH)),
             ("the pickaxe", pickaxe_mesh(IMPLEMENT_LENGTH)),
             ("the shovel", shovel_mesh(IMPLEMENT_LENGTH)),
             ("the bow", bow_mesh(BOW_LENGTH)),
+            ("a fully drawn bow", bow_mesh_drawn(BOW_LENGTH, 1.0)),
+            ("the arrow", arrow_mesh(ARROW_IN_HAND)),
+            ("the shield", shield_mesh(SHIELD_IN_HAND)),
         ] {
             let solids = solid_volumes(&mesh, false);
             // **The count says which surface this is**, which is the property #435 added and
@@ -6269,14 +8086,27 @@ mod tests {
             //
             // The pickaxe is a haft, an eye and two arms of two segments each; the shovel is
             // a haft, a crossbar, two cheeks, a socket and a blade whose two segments share
-            // their shoulder and weld into one solid.
+            // their shoulder and weld into one solid. The axe is a haft, an eye, a poll and a
+            // bit, none of which shares a corner with another.
             let want = match name {
                 "a dropped sword" => 3,
                 "a dropped grip" => 1,
+                "the axe" => 4,
                 "the pickaxe" | "the shovel" => 6,
-                // Two limbs and the string. It is here because its limbs are built by the same
-                // `tapered_prism` as the pick's arms, and were wound inside out until #1121.
-                "the bow" => 3,
+                // The grip, two limbs and the string (#1230: it was two straight limbs and a
+                // string). Each curved limb is one `swept_bar`, whose spans share their
+                // sections and weld, as is the string bent at its nock — at rest and at a full
+                // draw alike, so flexing the bow cannot split a part or turn one inside out.
+                // It is here because that sweep is the `tapered_prism` the pick's arms use,
+                // which wound the bow's old limbs inside out until #1121.
+                "the bow" | "a fully drawn bow" => 4,
+                // The shaft, the bone point and two crossed vanes, none of which shares a
+                // corner with another (#1231): the shaft ends inside the cone and the vanes
+                // cross without meeting at a vertex.
+                "the arrow" => 4,
+                // The rim, five planks that step alternately and so share no corner, the
+                // boss, and a handle whose bar and two posts meet without sharing one.
+                "the shield" => 10,
                 _ => 4,
             };
             assert_eq!(
@@ -6571,9 +8401,8 @@ mod tests {
     /// The sweep is the one
     /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] walks — the three
     /// blade arcs and the placement bump they can coincide with, plus rest — and the mining
-    /// loop besides, which a blade cannot reach: `player/target.rs` sends a swing instead of a
-    /// mining intent for both blades and `a_blade_in_hand_sends_a_swing_instead_of_mining`
-    /// pins it. It is swept anyway because the grip's containment is what makes the claim, and
+    /// loop besides, which a blade cannot reach: `player/target.rs` sends no mining intent for
+    /// either blade and `a_blade_on_the_hotbar_does_not_mine` pins it. It is swept anyway because the grip's containment is what makes the claim, and
     /// containment does not care which animation is playing.
     #[test]
     fn the_hand_stays_closed_over_the_grip_through_every_animation() {
@@ -6926,6 +8755,7 @@ mod tests {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 level: 1,
             });
         app.update();
@@ -7043,9 +8873,9 @@ mod tests {
         (*visibility, *transform)
     }
 
-    #[test]
-    fn authoritative_blocking_shows_a_separate_left_hand_shield() {
-        let mut app = app();
+    /// A wooden shield in the off-hand slot of an eight-slot pack with four worn slots, worn
+    /// through or not.
+    fn wear_a_shield(app: &mut App, usable: bool) {
         let mut params = session().0;
         params.inventory_slots = 8;
         params.equipment_slots = 4;
@@ -7054,31 +8884,371 @@ mod tests {
         stacks[7] = InventoryStack {
             item_id: crafting::ITEM_WOODEN_SHIELD,
             count: 1,
-            durability: 40,
+            durability: if usable { 40 } else { 0 },
             max_durability: 40,
         };
         app.insert_resource(Inventory::from_stacks(stacks));
+    }
+
+    /// The server's word on whether this player is blocking, as an accepted snapshot sets it.
+    fn say_blocking(app: &mut App, blocking: bool) {
         app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals {
-            blocking: true,
+            blocking,
             ..crate::net::PlayerVitals::unharmed()
         })));
-        app.update();
+    }
 
+    /// **The shield hand is carried, and the server's `blocking` is the one thing that raises
+    /// it** (#1233).
+    ///
+    /// It was hidden in every state but a block and appeared with no motion. Now it is drawn
+    /// whenever a usable shield is worn and the view is first person; the press alone moves
+    /// nothing, the server's `blocking` eases it into the parry and out again, and the right
+    /// hand's swing reaches none of it.
+    #[test]
+    fn a_worn_shield_keeps_the_left_hand_in_view_and_the_servers_blocking_raises_the_parry() {
+        const STEP: Duration = Duration::from_millis(16);
+        let frames = PARRY_TIME.as_millis().div_ceil(STEP.as_millis()) as usize;
+        let fov = default_fov();
+
+        let mut app = app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        wear_a_shield(&mut app, true);
+        say_blocking(&mut app, false);
+        app.update();
         let (visibility, resting) = off_hand_shield(&mut app);
-        assert_eq!(visibility, Visibility::Visible);
+        assert_eq!(
+            visibility,
+            Visibility::Visible,
+            "a worn shield's hand is hidden until a block"
+        );
+        assert_eq!(resting, off_hand_transform(fov, 0.0));
+
+        // The press, held, and not a word from the server: a local rule would already be up.
+        app.init_resource::<ButtonInput<MouseButton>>();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        for _ in 0..=frames {
+            app.update();
+        }
+        assert_eq!(
+            off_hand_shield(&mut app).1,
+            resting,
+            "the shield rose on the local press, before the server said it was blocking"
+        );
+
+        say_blocking(&mut app, true);
+        app.update();
+        let parry = off_hand_transform(fov, 1.0);
+        let first = off_hand_shield(&mut app).1;
+        assert!(
+            first != resting && first != parry,
+            "the first frame of the block drew {first:?}: either nothing or a snap to the parry"
+        );
+        for _ in 0..frames {
+            app.update();
+        }
+        assert_eq!(
+            off_hand_shield(&mut app).1,
+            parry,
+            "the parry did not settle"
+        );
+
         app.world_mut().write_message(SwingSent {
             item_id: ITEM_RUSTY_SWORD,
         });
         app.update();
         assert_eq!(
             off_hand_shield(&mut app).1,
-            resting,
+            parry,
             "the right-hand swing moved the shield arm"
         );
 
-        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals::unharmed())));
+        say_blocking(&mut app, false);
+        app.update();
+        assert_ne!(
+            off_hand_shield(&mut app).1,
+            resting,
+            "the parry snapped down"
+        );
+        for _ in 0..frames {
+            app.update();
+        }
+        assert_eq!(off_hand_shield(&mut app), (Visibility::Visible, resting));
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
         app.update();
         assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Visible);
+
+        // A shield worn through is no shield: no hand, and a block the server reports raises
+        // nothing behind it.
+        wear_a_shield(&mut app, false);
+        say_blocking(&mut app, true);
+        for _ in 0..=frames {
+            app.update();
+        }
+        assert_eq!(off_hand_shield(&mut app), (Visibility::Hidden, resting));
+    }
+
+    /// The left hand's mesh, split at the fist and wrist, with the shield's vertices read by the
+    /// absolute colour [`shield_mesh`] authors each part in — the drawn mesh carries them shaded.
+    fn left_shield_part(colour: [f32; 4]) -> Vec<Vec3> {
+        let drawn = positions(&left_hand_mesh(TEST_SKIN, worn_shield_appearance()));
+        let shield = shield_mesh(SHIELD_IN_HAND);
+        let hand = fist_mesh().count_vertices() + wrist_mesh().count_vertices();
+        assert_eq!(drawn.len(), hand + shield.count_vertices());
+        let Some(VertexAttributeValues::Float32x4(tints)) = shield.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the shield must carry per-vertex colour");
+        };
+        drawn[hand..]
+            .iter()
+            .zip(tints)
+            .filter(|(_, tint)| **tint == colour)
+            .map(|(point, _)| Vec3::from_array(*point))
+            .collect()
+    }
+
+    fn centroid(points: &[Vec3]) -> Vec3 {
+        points.iter().copied().sum::<Vec3>() / points.len() as f32
+    }
+
+    /// **The left hand is the right hand mirrored — by rotation, at the mirrored position, the
+    /// same depth and the same rest pitch** (#1233), and the left rein hand is that same pose.
+    #[test]
+    fn the_left_hand_is_the_right_hand_mirrored_by_rotation() {
+        let animation = HandAnimation::default();
+        let mirror = Vec3::new(-1.0, 1.0, 1.0);
+        for fov in every_field_of_view() {
+            let degrees = fov.to_degrees();
+            let right = presented_transform(&animation, None, fov);
+            let left = off_hand_transform(fov, 0.0);
+            assert_eq!(
+                left.scale,
+                Vec3::ONE,
+                "the left hand is mirrored by a scale"
+            );
+            assert_eq!(
+                left,
+                mounted_hand_transform(-1.0, fov),
+                "the left hand at rest is not the rein hand at {degrees:.0}°"
+            );
+            assert!(
+                left.translation
+                    .abs_diff_eq(right.translation * mirror, 1e-6),
+                "the left hand is not at the mirrored position at {degrees:.0}°"
+            );
+            // The rest pitch: the hand's own up axis, mirrored, is the right hand's.
+            assert!(
+                (left.rotation * Vec3::Y * mirror).abs_diff_eq(right.rotation * Vec3::Y, 1e-6),
+                "the left hand does not share the right hand's rest pitch at {degrees:.0}°"
+            );
+            // Every vertex of the limb — the forearm's outboard edge included — lands on the
+            // mirror of one of the right limb's.
+            for mesh in [fist_mesh(), wrist_mesh(), placed_forearm(&animation)] {
+                let points = positions(&mesh);
+                for p in &points {
+                    let mirrored = right.transform_point(Vec3::from_array(*p)) * mirror;
+                    assert!(
+                        points.iter().any(|q| left
+                            .transform_point(Vec3::from_array(*q))
+                            .abs_diff_eq(mirrored, 1e-6)),
+                        "the left limb is not the right limb mirrored at {degrees:.0}°"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            hand_on_side(1.0, presented_transform(&animation, None, default_fov())),
+            presented_transform(&animation, None, default_fov()),
+            "the right side is not the pose it was given"
+        );
+    }
+
+    /// **The fist grips the shield's horizontal handle from behind**: the face points at the
+    /// world, and the planks and the boss are in front of the fist, at rest and through the
+    /// parry.
+    ///
+    /// Measured on the left hand's own mesh through the pose it is drawn at, so the half turn
+    /// that mirrors the hand and the half turn [`left_hand_mesh`] gives the item are both in it.
+    #[test]
+    fn the_left_fist_grips_the_shields_handle_from_behind() {
+        let colours = shield_colours();
+        let boss = left_shield_part(colours.boss);
+        let handle = left_shield_part(colours.handle);
+        let wood: Vec<Vec3> = left_shield_part(colours.planks[0])
+            .into_iter()
+            .chain(left_shield_part(colours.planks[1]))
+            .collect();
+        for step in 0..=8u8 {
+            let fraction = f32::from(step) / 8.0;
+            let pose = off_hand_transform(default_fov(), fraction);
+            let drawn = |points: &[Vec3]| -> Vec<Vec3> {
+                points.iter().map(|p| pose.transform_point(*p)).collect()
+            };
+            let fist = pose.transform_point(Vec3::ZERO);
+            let facing = (centroid(&drawn(&boss)) - centroid(&drawn(&handle))).normalize();
+            assert!(
+                facing.z < -0.9,
+                "the shield's face points along {facing:?} at {fraction}, not at the world"
+            );
+            for point in drawn(&wood).into_iter().chain(drawn(&boss)) {
+                assert!(
+                    (point - fist).dot(facing) > HAND_SIZE.z / 2.0,
+                    "the shield's face reaches {point:?}, behind the front of the fist at {fist:?}"
+                );
+            }
+            let (low, high) = bounds(&drawn(&handle));
+            assert!(
+                low.cmple(fist).all() && fist.cmple(high).all(),
+                "the fist at {fist:?} is off the handle, {low:?} to {high:?}"
+            );
+        }
+    }
+
+    /// **The parry tilts the forearm toward the centre of the screen and advances the shield
+    /// across it** (#1233).
+    #[test]
+    fn the_parry_tilts_the_forearm_inward_and_advances_the_shield_toward_the_centre() {
+        let boss = left_shield_part(shield_colours().boss);
+        let project = |point: Vec3| point.truncate() / -point.z;
+        for fov in every_field_of_view() {
+            let degrees = fov.to_degrees();
+            // The forearm's direction on screen, from its far end up to the fist.
+            let forearm = |fraction: f32| {
+                let pose = off_hand_transform(fov, fraction);
+                let arm = forearm_transform_along(off_hand_along_view(fraction));
+                let top = project(pose.transform_point(Vec3::ZERO));
+                let bottom = project(pose.transform_point(arm.transform_point(Vec3::NEG_Y)));
+                (top - bottom).normalize()
+            };
+            let (rest, parry) = (forearm(0.0), forearm(1.0));
+            assert!(
+                parry.x > rest.x + 0.2,
+                "the forearm points along {parry:?} in the parry and {rest:?} at rest at \
+                 {degrees:.0}°, which is not a tilt toward the centre"
+            );
+            let shield = |fraction: f32| {
+                let pose = off_hand_transform(fov, fraction);
+                centroid(
+                    &boss
+                        .iter()
+                        .map(|p| pose.transform_point(*p))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (rest, parry) = (shield(0.0), shield(1.0));
+            assert!(
+                parry.z < rest.z - 0.01,
+                "the shield advanced from z {} only to z {} at {degrees:.0}°",
+                rest.z,
+                parry.z
+            );
+            assert!(
+                project(parry).x.abs() < project(rest).x.abs() && project(parry).x < 0.0,
+                "the shield's centre moved from {} to {} on screen at {degrees:.0}°, not toward \
+                 the centre from the left",
+                project(rest).x,
+                project(parry).x
+            );
+        }
+    }
+
+    /// **The move into and out of the parry is eased over a short transition, never a snap.**
+    #[test]
+    fn the_move_into_and_out_of_the_parry_is_eased_over_a_short_transition() {
+        assert!(
+            (Duration::from_millis(80)..=Duration::from_millis(250)).contains(&PARRY_TIME),
+            "{PARRY_TIME:?} is either a snap or a drag"
+        );
+        let fov = default_fov();
+        let (rest, parry) = (off_hand_transform(fov, 0.0), off_hand_transform(fov, 1.0));
+        let span = parry.translation - rest.translation;
+        let turn = rest.rotation.angle_between(parry.rotation);
+        let progress = |fraction: f32| {
+            let pose = off_hand_transform(fov, fraction);
+            (
+                (pose.translation - rest.translation).dot(span) / span.length_squared(),
+                rest.rotation.angle_between(pose.rotation) / turn,
+            )
+        };
+        let mut last = (0.0, 0.0);
+        for step in 1..32u8 {
+            let now = progress(f32::from(step) / 32.0);
+            assert!(
+                now.0 > last.0 && now.0 < 1.0 && now.1 > last.1 && now.1 < 1.0 + 1e-4,
+                "step {step}/32 of the parry is at {now:?}, not between {last:?} and the parry"
+            );
+            last = now;
+        }
+        // Eased at both ends: the first and the last sixteenth of the time each cover well under
+        // a sixteenth of the way, where a linear move would cover exactly that.
+        let (first, _) = progress(1.0 / 16.0);
+        let (last, _) = progress(15.0 / 16.0);
+        assert!(
+            first < 0.5 / 16.0 && 1.0 - last < 0.5 / 16.0,
+            "the parry starts at {first} and ends at {last} a sixteenth from either end"
+        );
+    }
+
+    /// **Rest and parry both clear the near plane, and the arm's end stays below the frame**, at
+    /// every step of the transition and every field of view.
+    ///
+    /// The right hand's swing is not swept here because nothing of it reaches this pose:
+    /// [`off_hand_transform`] reads no [`HandAnimation`], and
+    /// [`a_worn_shield_keeps_the_left_hand_in_view_and_the_servers_blocking_raises_the_parry`]
+    /// swings the right hand under a settled parry and reads the left hand unmoved.
+    #[test]
+    fn the_left_hand_clears_the_near_plane_at_rest_and_through_the_parry() {
+        let near = PerspectiveProjection::default().near;
+        let hand = positions(&left_hand_mesh(TEST_SKIN, worn_shield_appearance()));
+        let default = crate::settings::Settings::default().field_of_view();
+        for step in 0..=16u8 {
+            let fraction = f32::from(step) / 16.0;
+            let arm = forearm_transform_along(off_hand_along_view(fraction));
+            let forearm: Vec<Vec3> = positions(&forearm_mesh())
+                .into_iter()
+                .map(|p| arm.transform_point(Vec3::from_array(p)))
+                .collect();
+            for fov in every_field_of_view() {
+                let pose = off_hand_transform(fov, fraction);
+                for point in hand
+                    .iter()
+                    .map(|p| Vec3::from_array(*p))
+                    .chain(forearm.clone())
+                {
+                    let drawn = pose.transform_point(point);
+                    assert!(
+                        -drawn.z > near,
+                        "{point:?} reaches z {} against a near plane at {near}, {fraction} of \
+                         the way into the parry at {:.0}°",
+                        drawn.z,
+                        fov.to_degrees()
+                    );
+                }
+            }
+            let cap: Vec<Vec3> = forearm
+                .iter()
+                .copied()
+                .filter(|p| {
+                    (p.y - forearm.iter().map(|q| q.y).fold(f32::INFINITY, f32::min)).abs() < 1e-6
+                })
+                .collect();
+            let widest = widest_clipped_fov(&cap, &off_hand_transform(default_fov(), fraction));
+            assert!(
+                widest > default,
+                "the left arm shows its end above {widest:.1}°, inside the default {default}°, \
+                 {fraction} of the way into the parry"
+            );
+        }
     }
 
     #[test]
@@ -7095,6 +9265,46 @@ mod tests {
             app.update();
             assert_eq!(held(&mut app).0.shape, expected, "slot {slot}");
         }
+    }
+
+    /// **Drawn, the hand holds the main-hand weapon whatever the hotbar selects; sheathed, the
+    /// hotbar item** (#1239) — on the frame the state changes, both ways.
+    #[test]
+    fn the_view_model_holds_the_drawn_main_hand_and_the_hotbar_while_sheathed() {
+        let mut app = app();
+        let mut params = session().0;
+        params.inventory_slots = 9;
+        params.equipment_slots = 5;
+        app.insert_resource(Session(params));
+        let main_hand =
+            super::super::inventory::equipment_slot(&params, super::super::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); 9];
+        stacks[0] = InventoryStack {
+            item_id: ITEM_STONE,
+            count: 2,
+            ..Default::default()
+        };
+        stacks[usize::from(main_hand)] = InventoryStack {
+            item_id: combat::ITEM_RUSTY_SWORD,
+            count: 1,
+            durability: 100,
+            max_durability: 100,
+        };
+        app.insert_resource(Inventory::from_stacks(stacks));
+        app.update();
+        assert_eq!(held(&mut app).0.item_id, Some(ITEM_STONE), "sheathed");
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = true;
+        app.update();
+        let (item, visibility, _) = held(&mut app);
+        assert_eq!(item.item_id, Some(combat::ITEM_RUSTY_SWORD), "drawn");
+        assert_eq!(item.shape, Some(ItemShape::Blade), "drawn");
+        assert_eq!(visibility, Visibility::Visible, "drawn");
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = false;
+        app.update();
+        assert_eq!(held(&mut app).0.item_id, Some(ITEM_STONE), "sheathed again");
     }
 
     #[test]
@@ -7211,7 +9421,11 @@ mod tests {
                     .expect("every drawn view-model part has a local transform")
             })
             .collect();
-        assert_eq!(models.len(), 4, "both hands and forearms are measured");
+        assert_eq!(
+            models.len(),
+            6,
+            "both hands, their forearms, the drawn bow and its arrow are measured"
+        );
         for entity in &models {
             assert_eq!(
                 app.world().get::<RenderLayers>(*entity),
@@ -7551,6 +9765,7 @@ mod tests {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 level: 1,
             });
         app.update();
@@ -7615,12 +9830,8 @@ mod tests {
         );
         assert_eq!(app.world().get::<Mesh3d>(off).unwrap().0, shield_mesh);
         assert_eq!(
-            app.world().get::<Transform>(off).unwrap().translation,
-            shield_translation(default_fov())
-        );
-        assert_eq!(
-            app.world().get::<Transform>(off).unwrap().rotation,
-            Quat::from_rotation_z(-0.48)
+            *app.world().get::<Transform>(off).unwrap(),
+            off_hand_transform(default_fov(), 0.0)
         );
     }
 
@@ -8134,6 +10345,7 @@ mod tests {
             .init_resource::<BlockTarget>()
             .init_resource::<ButtonInput<MouseButton>>()
             .add_message::<SwingSent>()
+            .add_message::<SwingAbandoned>()
             .add_message::<ConsumeSent>()
             .init_resource::<Inventory>()
             .init_resource::<InputMode>()
@@ -8277,12 +10489,20 @@ mod tests {
         panic!("a swing was still in flight after 256 frames");
     }
 
-    /// **The animation is driven by the request leaving, and by nothing coming back.**
+    /// **The animation is driven by the request leaving, and silence takes nothing back.**
     ///
     /// There is no session here, no snapshot, no inbound frame of any kind — which is exactly
-    /// the state a player is in when the server refuses a swing, because a refused blow
-    /// produces no reply at all. Six presses still draw six arcs, because what started them
-    /// was the asking.
+    /// the state a player is in when the server drops a swing in silence: a cooldown, a
+    /// shield raised on the tick, a slot that is not the main hand. Six presses still draw
+    /// six arcs, because what started them was the asking and nothing ever answered.
+    ///
+    /// **Revisited on #1228, deliberately.** This used to say a *refused* blow produces no
+    /// reply, and since #1134 that was no longer true of one refusal: a swing the reserve
+    /// cannot pay for is answered with `ActionRefused{Energy, NotEnoughEnergy}`, and that
+    /// answer now abandons the arc —
+    /// [`a_swing_the_server_refuses_for_energy_is_taken_back_mid_arc`]. What this test keeps is
+    /// the other half, which is still a real property: with no answer, the client cannot
+    /// tell a dropped swing from a landed one, so it plays both in full.
     ///
     /// **This is what survives of the rotation's test, and it is the half worth keeping.** It
     /// used to assert that six presses drew all three shapes and never one twice running;
@@ -8325,27 +10545,556 @@ mod tests {
         );
     }
 
+    /// **A swing the server refuses for energy stops being drawn the frame the refusal
+    /// arrives** (#1228).
+    ///
+    /// Every attack arc, because the server charges the same reserve for a cut and a cast, and
+    /// refuses both the same way. The bow plays no arc since #1240, so it has none to take back.
+    /// Part way in on purpose: a refusal lands a tick or two into a 220 ms arc, so what is being
+    /// tested is an arc abandoned mid-flight, not one that had already ended by itself.
     #[test]
-    fn a_bow_request_draws_the_string_rather_than_a_blade_arc() {
+    fn a_swing_the_server_refuses_for_energy_is_taken_back_mid_arc() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        for item_id in [ITEM_RUSTY_SWORD, crafting::ITEM_WOODEN_SCEPTRE] {
+            let mut app = hand_only_app();
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+            app.world_mut().write_message(SwingSent { item_id });
+            app.update();
+            app.update();
+            let swing = app
+                .world()
+                .resource::<HandAnimation>()
+                .attack
+                .unwrap_or_else(|| panic!("item {item_id}: the swing never played"));
+            assert!(
+                swing.elapsed < ATTACK_SWING_TIME,
+                "item {item_id}: the arc had already ended, so this test proves nothing"
+            );
+
+            app.world_mut().write_message(SwingAbandoned);
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().attack,
+                None,
+                "item {item_id}: the arc went on after the server refused the swing"
+            );
+        }
+    }
+
+    /// **A refusal takes back a swing and nothing else**: not the eating arc, and not a swing
+    /// pressed on the frame the refusal is read.
+    ///
+    /// The second half is the ordering `animate_view_model` states — abandon first, then
+    /// start — because `super::combat` attributes a refusal before that frame's press is
+    /// sent, so it can only ever answer the arc that was already playing.
+    #[test]
+    fn a_refusal_never_takes_back_the_eating_arc_or_a_swing_pressed_with_it() {
         const STEP: Duration = Duration::from_millis(16);
 
         let mut app = hand_only_app();
         app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().write_message(ConsumeSent);
+        app.update();
+        app.world_mut().write_message(SwingAbandoned);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<HandAnimation>()
+                .attack
+                .map(|swing| swing.shape),
+            Some(SwingShape::Eat),
+            "an energy refusal took back an eating arc"
+        );
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
+        app.update();
+        app.world_mut().write_message(SwingAbandoned);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
+        app.update();
+        let swing = app
+            .world()
+            .resource::<HandAnimation>()
+            .attack
+            .expect("the swing pressed with the refusal was taken back too");
+        assert_eq!(
+            swing.elapsed, STEP,
+            "the new press did not start its own arc"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The two-handed draw (#1240), which replaced the 220 ms tip-back a bow request played
+    // -----------------------------------------------------------------------
+
+    /// **A bow's `SwingSent` plays no arc, and never a blade's cut.** `super::combat` writes none
+    /// for a bow, whose press is a draw; this holds the picture to that if one arrives anyway. The
+    /// sceptre's message after it is what keeps the first half from passing vacuously.
+    #[test]
+    fn a_bow_swing_message_plays_no_arc() {
+        let mut app = hand_only_app();
         app.world_mut().write_message(SwingSent {
             item_id: crafting::ITEM_BOW,
         });
         app.update();
-
-        let animation = *app.world().resource::<HandAnimation>();
         assert_eq!(
-            animation.attack.expect("the bow played nothing").shape,
-            SwingShape::Draw
+            app.world().resource::<HandAnimation>().attack,
+            None,
+            "a bow's swing message played an arc"
         );
-        let pose = swing_pose(SwingShape::Draw, ATTACK_SWING_TIME / 2);
+
+        app.world_mut().write_message(SwingSent {
+            item_id: crafting::ITEM_WOODEN_SCEPTRE,
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<HandAnimation>()
+                .attack
+                .map(|swing| swing.shape),
+            Some(SwingShape::Cast)
+        );
+    }
+
+    /// **The string follows the server between snapshots and snaps home on release.**
+    #[test]
+    fn the_string_follows_the_servers_draw_smoothly_and_snaps_back_on_release() {
+        const FRAME: f32 = 0.016;
+        let first = settle_draw(0.0, 1.0, FRAME);
         assert!(
-            pose.reach > 0.0,
-            "the draw did not pull back toward the camera"
+            first > 0.0 && first < 1.0,
+            "the first frame of a draw drew {first}: a jump or nothing"
         );
+        let mut shown = first;
+        for _ in 0..30 {
+            let next = settle_draw(shown, 1.0, FRAME);
+            assert!(
+                next >= shown && next <= 1.0,
+                "the string overshot to {next}"
+            );
+            shown = next;
+        }
+        assert_eq!(
+            shown, 1.0,
+            "half a second did not settle on the server's value"
+        );
+
+        let released = settle_draw(1.0, 0.0, FRAME);
+        assert!(
+            released > 0.0 && released < 1.0,
+            "the release drew {released}: a jump or nothing"
+        );
+        let frames = (DRAW_SNAP_TIME.as_secs_f32() / FRAME).ceil() as usize;
+        assert!(
+            (2..=8).contains(&frames),
+            "{DRAW_SNAP_TIME:?} is not a short snap"
+        );
+        let mut shown = 1.0;
+        for _ in 0..frames {
+            shown = settle_draw(shown, 0.0, FRAME);
+        }
+        assert_eq!(
+            shown, 0.0,
+            "the string was not home after {DRAW_SNAP_TIME:?}"
+        );
+    }
+
+    /// **Both hands hold the drawn bow at every pull**: the left fist on the grip, the right
+    /// closed on the string's nock of the bow built for that pull, and the arrow's nock on the
+    /// string with its point past the grip and along the view. At rest, mid and full draw the
+    /// nock is at the brace, halfway and the full draw length, and the limbs flex with it.
+    #[test]
+    fn both_hands_hold_the_drawn_bow_and_the_arrow_rides_the_string_at_every_pull() {
+        let (wood, _, cord) = bow_colours();
+        let fov = default_fov();
+        let frame = draw_frame(fov);
+        let bows: Vec<Mesh> = (0..=DRAW_STEPS)
+            .map(|step| bow_mesh_drawn(BOW_LENGTH, step as f32 / DRAW_STEPS as f32))
+            .collect();
+        assert!(
+            grip_hand_transform(fov)
+                .translation
+                .abs_diff_eq(frame.translation, 1e-6),
+            "the left fist is off the grip"
+        );
+        for progress in 0..=u8::MAX {
+            let draw = f32::from(progress) / 255.0;
+            let right = string_hand_transform(fov, draw);
+            let inverse = right.compute_affine().inverse();
+            let nock: Vec<Vec2> = bow_points(&bows[draw_step(draw)], cord)
+                .into_iter()
+                .filter(|point| point.y.abs() < 1e-5)
+                .collect();
+            assert!(
+                !nock.is_empty(),
+                "the bow at {progress} has no nock section"
+            );
+            for point in nock {
+                let local = inverse.transform_point3(frame.transform_point(point.extend(0.0)));
+                assert!(
+                    local.abs().cmple(HAND_SIZE / 2.0).all(),
+                    "at {progress} the drawn string's nock is at {local:?} from the right fist"
+                );
+            }
+            let arrow = nocked_arrow_transform(fov, draw);
+            let arrow_nock = arrow.transform_point(Vec3::NEG_Y * ARROW_IN_HAND / 2.0);
+            let arrow_point = arrow.transform_point(Vec3::Y * ARROW_IN_HAND / 2.0);
+            assert!(
+                arrow_nock.abs_diff_eq(right.translation, 1e-5),
+                "at {progress} the arrow's nock is at {arrow_nock}, off the string hand"
+            );
+            assert!(
+                (arrow_point - arrow_nock)
+                    .normalize()
+                    .abs_diff_eq(Vec3::NEG_Z, 1e-5)
+                    && arrow_point.z < frame.translation.z,
+                "at {progress} the arrow points at {arrow_point}, not along the view past the grip"
+            );
+        }
+        for (progress, fraction) in [(0u8, 0.0), (128, 0.5), (255, 1.0)] {
+            let draw = f32::from(progress) / 255.0;
+            let expected = frame.transform_point(nock_point(fraction));
+            assert!(
+                string_hand_transform(fov, draw)
+                    .translation
+                    .abs_diff_eq(expected, 2e-4),
+                "at {progress} the string hand is not at {fraction} of the draw"
+            );
+            assert_eq!(draw_step(draw), (fraction * DRAW_STEPS as f32) as usize);
+        }
+        let tip = |step: usize| {
+            let at = bow_string(step as f32 / DRAW_STEPS as f32)[0];
+            mean_near(
+                &bow_points(&bows[step], wood),
+                at,
+                BOW_STAVE * BOW_TIP_FRACTION * 0.7,
+            )
+        };
+        assert!(
+            tip(DRAW_STEPS).x > tip(0).x + 0.005,
+            "the limbs do not flex at a full draw"
+        );
+    }
+
+    /// The server's word on this player's draw, as an accepted snapshot sets it.
+    fn say_drawing(app: &mut App, draw_progress: u8) {
+        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals {
+            draw_progress,
+            ..crate::net::PlayerVitals::unharmed()
+        })));
+    }
+
+    /// The drawn bow's visibility and which built step it shows — which must be one of them.
+    fn drawn_bow(app: &mut App) -> (Visibility, usize) {
+        let bows = app.world().resource::<HandVisuals>().drawn_bows.clone();
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&Visibility, &Mesh3d), With<DrawnBow>>();
+        let (visibility, mesh) = query.single(world).expect("one drawn bow");
+        let step = bows
+            .iter()
+            .position(|bow| *bow == mesh.0)
+            .expect("the drawn bow shows a mesh it was not built with");
+        (*visibility, step)
+    }
+
+    fn nocked_arrow(app: &mut App) -> Visibility {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Visibility, With<NockedArrow>>();
+        *query.single(world).expect("one nocked arrow")
+    }
+
+    fn string_hand(app: &mut App) -> Transform {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Transform, With<HeldItem>>();
+        *query.single(world).expect("one right hand")
+    }
+
+    /// **What the draw shows is the server's `draw_progress`, and a held press is not.**
+    ///
+    /// The left button is held throughout. With the server silent — which is what a draw refused
+    /// for arrows or for energy is — the bow is in both hands at rest with no arrow. Then the
+    /// server's progress pulls the string and nocks the arrow, and its zero looses both.
+    #[test]
+    fn the_drawn_bow_follows_the_servers_progress_and_a_refused_draw_draws_nothing() {
+        const STEP: Duration = Duration::from_millis(16);
+        let fov = default_fov();
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        let mut params = session().0;
+        params.inventory_slots = 9;
+        params.equipment_slots = 5;
+        let main_hand =
+            super::super::inventory::equipment_slot(&params, super::super::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); 9];
+        stacks[usize::from(main_hand)] = InventoryStack {
+            item_id: crafting::ITEM_BOW,
+            count: 1,
+            durability: 100,
+            max_durability: 100,
+        };
+        app.insert_resource(Session(params))
+            .insert_resource(Inventory::from_stacks(stacks));
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = true;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+
+        say_drawing(&mut app, 0);
+        for _ in 0..10 {
+            app.update();
+        }
+        let pull = *app.world().resource::<StringPull>();
+        assert!(pull.two_handed, "the drawn bow is not held with two hands");
+        assert_eq!(
+            (pull.drawing, pull.shown),
+            (false, 0.0),
+            "a press the server did not answer drew the string"
+        );
+        assert_eq!(drawn_bow(&mut app), (Visibility::Visible, 0));
+        assert_eq!(
+            nocked_arrow(&mut app),
+            Visibility::Hidden,
+            "a refused draw nocked an arrow"
+        );
+        assert_eq!(
+            held(&mut app).0.item_id,
+            None,
+            "the right fist still holds the bow"
+        );
+        assert_eq!(string_hand(&mut app), string_hand_transform(fov, 0.0));
+        assert_eq!(
+            off_hand_shield(&mut app),
+            (Visibility::Visible, grip_hand_transform(fov))
+        );
+
+        for (progress, step) in [(128u8, DRAW_STEPS / 2), (255, DRAW_STEPS)] {
+            say_drawing(&mut app, progress);
+            for _ in 0..40 {
+                app.update();
+            }
+            let pull = *app.world().resource::<StringPull>();
+            assert!(pull.drawing, "{progress}: the server's draw is not drawing");
+            assert_eq!(
+                pull.shown,
+                f32::from(progress) / 255.0,
+                "{progress}: unsettled"
+            );
+            assert_eq!(
+                drawn_bow(&mut app),
+                (Visibility::Visible, step),
+                "{progress}"
+            );
+            assert_eq!(nocked_arrow(&mut app), Visibility::Visible, "{progress}");
+            assert_eq!(
+                string_hand(&mut app),
+                string_hand_transform(fov, pull.shown),
+                "{progress}"
+            );
+        }
+
+        say_drawing(&mut app, 0);
+        app.update();
+        assert_eq!(
+            nocked_arrow(&mut app),
+            Visibility::Hidden,
+            "the loosed arrow stayed"
+        );
+        assert!(
+            app.world().resource::<StringPull>().shown > 0.0,
+            "the string jumped home rather than snapping"
+        );
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(drawn_bow(&mut app), (Visibility::Visible, 0));
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = false;
+        app.update();
+        assert!(!app.world().resource::<StringPull>().two_handed);
+        assert_eq!(
+            drawn_bow(&mut app).0,
+            Visibility::Hidden,
+            "a sheathed bow stayed drawn"
+        );
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+    }
+
+    /// **The two-handed draw clears the near plane at every built pull and every field of view,
+    /// and neither arm shows its end at the default one**: both hands with their forearms, the
+    /// bow at each step and the arrow on its string.
+    #[test]
+    fn the_two_handed_draw_clears_the_near_plane_and_hides_both_arms_at_every_pull() {
+        let near = PerspectiveProjection::default().near;
+        let default = crate::settings::Settings::default().field_of_view();
+        let rest = HandAnimation::default();
+        let limb: Vec<Vec3> = positions(&held_mesh(TEST_SKIN, selected_appearance(None)))
+            .into_iter()
+            .chain(positions(&placed_forearm(&rest)))
+            .map(Vec3::from_array)
+            .collect();
+        let arrow: Vec<Vec3> = positions(&arrow_mesh(ARROW_IN_HAND))
+            .into_iter()
+            .map(Vec3::from_array)
+            .collect();
+        for step in 0..=DRAW_STEPS {
+            let draw = step as f32 / DRAW_STEPS as f32;
+            let bow: Vec<Vec3> = positions(&bow_mesh_drawn(BOW_LENGTH, draw))
+                .into_iter()
+                .map(Vec3::from_array)
+                .collect();
+            for fov in every_field_of_view() {
+                for (name, pose, points) in [
+                    ("the left hand", grip_hand_transform(fov), &limb),
+                    ("the right hand", string_hand_transform(fov, draw), &limb),
+                    ("the bow", draw_frame(fov), &bow),
+                    ("the arrow", nocked_arrow_transform(fov, draw), &arrow),
+                ] {
+                    for point in points {
+                        let z = pose.transform_point(*point).z;
+                        assert!(
+                            -z > near,
+                            "{name} reaches z {z} against a near plane at {near}, drawn \
+                             {step}/{DRAW_STEPS} at {:.0}°",
+                            fov.to_degrees()
+                        );
+                    }
+                }
+            }
+            for (name, pose) in [
+                ("left", grip_hand_transform(default_fov())),
+                ("right", string_hand_transform(default_fov(), draw)),
+            ] {
+                let widest = widest_clipped_fov(&forearm_cap(&rest), &pose);
+                assert!(
+                    widest > default,
+                    "the {name} arm shows its end above {widest:.1}°, inside the default \
+                     {default}°, drawn {step}/{DRAW_STEPS}"
+                );
+            }
+        }
+    }
+
+    /// **Rule 2 of `client/AGENTS.md` for the two-handed draw**: no two faces of different colours
+    /// share a plane where they overlap — the bow at every built step, the arrow on its string
+    /// and both fists, each where it is drawn.
+    ///
+    /// The draw is canted and turned, so its faces are not axis-aligned and
+    /// [`no_two_colours_share_a_plane_in_the_hand`] cannot read them. Here each triangle is
+    /// compared by its plane, and two of different colours on one plane by the rectangle each
+    /// covers in it — which can only overstate an overlap, never miss one.
+    #[test]
+    fn no_two_colours_share_a_plane_in_the_two_handed_draw() {
+        struct Face {
+            normal: Vec3,
+            offset: f32,
+            points: [Vec3; 3],
+            colour: [u8; 4],
+        }
+        fn faces(mesh: &Mesh, pose: Transform) -> Vec<Face> {
+            let positions = positions(mesh);
+            let Some(VertexAttributeValues::Float32x4(colours)) =
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("the mesh must carry per-vertex colour");
+            };
+            let indices: Vec<usize> = mesh.indices().expect("indexed").iter().collect();
+            indices
+                .chunks_exact(3)
+                .filter_map(|corner| {
+                    let quantise = |index: usize| colours[index].map(|c| (c * 255.0).round() as u8);
+                    let colour = quantise(corner[0]);
+                    if corner.iter().any(|index| quantise(*index) != colour) {
+                        return None;
+                    }
+                    let points = [corner[0], corner[1], corner[2]]
+                        .map(|index| pose.transform_point(Vec3::from_array(positions[index])));
+                    let normal = (points[1] - points[0]).cross(points[2] - points[0]);
+                    (normal.length_squared() > 1e-18).then(|| {
+                        let normal = normal.normalize();
+                        Face {
+                            normal,
+                            offset: normal.dot(points[0]),
+                            points,
+                            colour,
+                        }
+                    })
+                })
+                .collect()
+        }
+        let span = |face: &Face, axis: Vec3| {
+            face.points
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+                    (low.min(point.dot(axis)), high.max(point.dot(axis)))
+                })
+        };
+        let overlaps = |a: (f32, f32), b: (f32, f32)| a.0.max(b.0) < a.1.min(b.1) - 1e-7;
+
+        let fov = default_fov();
+        let hand = held_mesh(TEST_SKIN, selected_appearance(None));
+        let arrow = arrow_mesh(ARROW_IN_HAND);
+        for step in 0..=DRAW_STEPS {
+            let draw = step as f32 / DRAW_STEPS as f32;
+            let mut all = faces(&bow_mesh_drawn(BOW_LENGTH, draw), draw_frame(fov));
+            all.extend(faces(&arrow, nocked_arrow_transform(fov, draw)));
+            all.extend(faces(&hand, grip_hand_transform(fov)));
+            all.extend(faces(&hand, string_hand_transform(fov, draw)));
+            for (index, one) in all.iter().enumerate() {
+                for two in &all[index + 1..] {
+                    if one.colour == two.colour
+                        || one.normal.dot(two.normal) < 1.0 - 1e-4
+                        || (one.offset - two.offset).abs() > 1e-5
+                    {
+                        continue;
+                    }
+                    let u = one.normal.any_orthonormal_vector();
+                    let v = one.normal.cross(u);
+                    assert!(
+                        !(overlaps(span(one, u), span(two, u))
+                            && overlaps(span(one, v), span(two, v))),
+                        "drawn {step}/{DRAW_STEPS}: {:?} and {:?} share the plane at {} along {}",
+                        one.colour,
+                        two.colour,
+                        one.offset,
+                        one.normal
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A right press while a weapon is drawn plays no placement bump** (#1239): the button
+    /// then raises a shield and places nothing, so the bump would animate a request that never
+    /// left. The sheathed half of the same frame is what keeps this from passing vacuously.
+    #[test]
+    fn a_right_press_while_drawn_plays_no_placement_bump() {
+        for (drawn, bumps) in [(false, true), (true, false)] {
+            let mut app = hand_only_app();
+            app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = drawn;
+            *app.world_mut().resource_mut::<BlockTarget>() = BlockTarget(Some(BlockHit {
+                block: IVec3::new(3, 0, 0),
+                face: IVec3::X,
+            }));
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<HandAnimation>()
+                    .bump_elapsed
+                    .is_some(),
+                bumps,
+                "drawn: {drawn}"
+            );
+        }
     }
 
     #[test]

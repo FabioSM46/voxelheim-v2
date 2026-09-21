@@ -132,6 +132,12 @@ type Sim struct {
 	// independently of the sword's.
 	bowCooldownTicks     uint32
 	sceptreCooldownTicks uint32
+	// fullDrawTicks is FullDrawDuration in authoritative ticks: how many ticks a held draw
+	// counts before it is fully charged.
+	fullDrawTicks uint32
+	// draws is what an arrow's spread is drawn from: seeded from the world seed on its own PCG
+	// stream, guarded by mu and advanced only inside Step, like spawns and loot. See draw.go.
+	draws *rand.Rand
 
 	// dropLifetime is DropLifetime expressed in the ticks Step counts, derived from the
 	// tick rate for the same reason the physics timestep is.
@@ -570,6 +576,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		attackCooldown:       ticksFor(SwordCooldown, tickRate),
 		bowCooldownTicks:     ticksFor(BowCooldown, tickRate),
 		sceptreCooldownTicks: ticksFor(SceptreCooldown, tickRate),
+		fullDrawTicks:        ticksFor(FullDrawDuration, tickRate),
+		draws:                newDrawRNG(worldSeed),
 		log:                  log,
 		players:              make(map[uint64]*Player),
 		chatLimiters:         make(map[identity.PlayerID]*tokenBucket),
@@ -780,7 +788,12 @@ type Player struct {
 		fraction uint16
 		slot     uint8
 	}
-	blocking bool
+	// wantsBlock is the block button as the client last left it — held from an admitted
+	// `active: true` until `active: false` or an authoritative removal — and blocking is
+	// what the server makes of it, re-derived every tick from that intent, the shield and
+	// the energy reserve (settleShieldLocked). Neither is persisted.
+	wantsBlock bool
+	blocking   bool
 
 	// sinceDamageTicks is how long since the last landed hit, regenTicks how far
 	// through the current point of regeneration, and hungerTicks how far through the
@@ -922,6 +935,12 @@ type Player struct {
 	lastAttackTick uint32
 	pendingSwing   *pendingSwing
 	attackCooldown uint32
+
+	// The bow's draw — see draw.go. Held rather than one-shot, like the shield's intent, and
+	// with its own ordering guard for both of its edges. Nil when not drawing.
+	haveDrawTick bool
+	lastDrawTick uint32
+	draw         *bowDraw
 
 	// Mining intent has its own ordering and idle window. It is refreshed by a
 	// different message from movement and neither client's cadence may keep the
@@ -1216,7 +1235,8 @@ func (s *Sim) Leave(p *Player) {
 		p.mineCompleting = false
 		p.miningCompleted = nil
 		p.mineReset = nil
-		p.blocking = false
+		p.lowerShieldLocked()
+		p.cancelDrawLocked()
 		delete(s.players, p.entityID)
 		// Every speaker forgets this listener, the way a refilled chat bucket is
 		// forgotten: the set is keyed by live entity id, and an id nobody holds any more
@@ -1281,7 +1301,8 @@ func (p *Player) BeginLeaving() {
 	p.mineCompleting = false
 	p.miningCompleted = nil
 	p.pendingSwing = nil
-	p.blocking = false
+	p.lowerShieldLocked()
+	p.cancelDrawLocked()
 }
 
 // CancelLeaving makes future client intent live again when this body is still in its
@@ -1524,6 +1545,9 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// that first draws it going down.
 	for _, p := range players {
 		p.resolveAttackLocked()
+		// The bow's draw, on the same terms: a loosed arrow leaves from this tick's
+		// positions and lands before a mob acts.
+		p.resolveDrawLocked()
 	}
 
 	// Projectiles use the positions produced above and land before a mob acts, exactly
@@ -1702,7 +1726,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 				if !p.inventory.mu.TryLock() {
 					continue
 				}
-				wornHead, wornChest, wornLegs, wornOffHand := p.inventory.wornItemsLocked()
+				wornHead, wornChest, wornLegs, wornOffHand, wornMainHand := p.inventory.wornItemsLocked()
 				p.inventory.mu.Unlock()
 				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
 					EntityID:      p.entityID,
@@ -1713,6 +1737,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 					WornChest:     wornChest,
 					WornLegs:      wornLegs,
 					WornOffHand:   wornOffHand,
+					WornMainHand:  wornMainHand,
 					HasAppearance: true,
 					HasName:       true,
 				})

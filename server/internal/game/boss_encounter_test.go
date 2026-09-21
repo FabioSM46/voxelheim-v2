@@ -74,7 +74,7 @@ func TestBossEncounterStartsOnceFromTargetAcquisitionOrDamage(t *testing.T) {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 		id := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-		if err := h.swing(player, 0, 1); err != nil {
+		if err := h.swing(player, mainHandSlot, 1); err != nil {
 			t.Fatal(err)
 		}
 		h.step()

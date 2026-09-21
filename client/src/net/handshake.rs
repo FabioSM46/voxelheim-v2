@@ -1145,6 +1145,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         };
 
         // The last row is the one that keeps this from being written as "dead_players must be
@@ -1388,6 +1389,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         };
         let frame = |self_vitals: PlayerVitals, dead_players: Vec<u64>| Snapshot {
             self_vitals,
@@ -1696,6 +1698,7 @@ mod tests {
             worn_chest: 0,
             worn_legs: 0,
             worn_offhand: 0,
+            worn_mainhand: 0,
             level: 1,
         }
     }

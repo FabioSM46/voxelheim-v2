@@ -7,8 +7,10 @@ pub enum BlockRequestOffset {}
 
 /// Raising or lowering whatever the player currently holds in the off-hand.
 /// Client -> server, and intent only: the server decides whether the authoritative
-/// off-hand item can block, whether it has durability left and whether anything is
-/// actually raised. The request carries no item, slot, damage reduction or outcome.
+/// off-hand item can block, whether it has durability left, whether there is the energy
+/// to parry and whether anything is actually raised. `active: true` is held until
+/// `active: false`, so a press made short of energy raises the shield by itself once the
+/// reserve allows. The request carries no item, slot, damage reduction or outcome.
 pub struct BlockRequest<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }

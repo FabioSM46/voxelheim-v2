@@ -181,7 +181,9 @@ func TestAddItemUsesOrdinaryStackingAndIsAllOrNothing(t *testing.T) {
 	if got := outcome.Inventory.Stacks[1]; got.ItemID != uint16(ItemStone) || got.Count != 64 {
 		t.Errorf("partial stack after additem = %+v", got)
 	}
-	if got := outcome.Inventory.Stacks[2]; got.ItemID != uint16(ItemStone) || got.Count != 1 {
+	// The remainder takes the lowest empty slot, which is hotbar slot 0: the starter blade
+	// is in the main hand, where automatic insertion never reaches.
+	if got := outcome.Inventory.Stacks[0]; got.ItemID != uint16(ItemStone) || got.Count != 1 {
 		t.Errorf("next stack after additem = %+v", got)
 	}
 

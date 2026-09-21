@@ -73,8 +73,9 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		Blocking:         p.blocking,
 		// Rounded down, so the wire never shows a swing as affordable a fraction of a
 		// point before the server would admit it.
-		Energy:    uint16(p.energy / energyScale),
-		MaxEnergy: MaxEnergy,
+		Energy:       uint16(p.energy / energyScale),
+		MaxEnergy:    MaxEnergy,
+		DrawProgress: p.drawProgressLocked(),
 	}
 }
 
@@ -190,7 +191,8 @@ func (p *Player) dieLocked() {
 	// The combat seam this comment promised. A swing accepted before the blow that
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
-	p.blocking = false
+	p.lowerShieldLocked()
+	p.cancelDrawLocked()
 	p.mounted = vnet.MountKindUnknown
 	p.sim.removeAllThreatFor(p.entityID)
 
@@ -210,6 +212,10 @@ func (p *Player) advanceVitalsLocked() {
 	// Leave returns an unfinished countdown cannot fire later and cannot reinsert the
 	// player. This is especially load-bearing for a body killed during leave linger.
 	p.regenerateEnergyLocked()
+	// Straight after the refill, so the tick on which energy regenerates to the parry's
+	// cost is the tick a held shield rises — and before anything this tick could swing at
+	// it, so a mob's blow is judged against the guard the reserve can actually pay for.
+	p.settleShieldLocked()
 	if p.protectionTicks > 0 {
 		p.protectionTicks--
 	}
@@ -363,6 +369,7 @@ func (p *Player) respawnLocked() {
 	p.haveTick, p.lastTick = false, 0
 	p.haveMineTick, p.lastMineTick = false, 0
 	p.haveAttackTick, p.lastAttackTick = false, 0
+	p.haveDrawTick, p.lastDrawTick = false, 0
 	p.haveLootOpenTick, p.lastLootOpenTick = false, 0
 	p.haveLootTakeTick, p.lastLootTakeTick = false, 0
 	// A new life swings immediately: the cooldown belonged to the blade of a player who

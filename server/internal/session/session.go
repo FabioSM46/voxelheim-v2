@@ -1727,6 +1727,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadInventoryMoveRequest,
 		vnet.PayloadAttackRequest,
 		vnet.PayloadBlockRequest,
+		vnet.PayloadDrawRequest,
 		vnet.PayloadPlaceStructureRequest,
 		vnet.PayloadRemoveStructureRequest,
 		vnet.PayloadCraftRequest,
@@ -2105,6 +2106,15 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 				"to", msg.InventoryMove.To,
 				"count", msg.InventoryMove.Count,
 			)
+			// The one move refusal a player is told about: their own equipment said no,
+			// and the inventory they hold does not show which hand is in the way. Every
+			// other refused move stays silence — the unchanged inventory is the answer.
+			if errors.Is(mErr, game.ErrHandsOccupied) {
+				refusal := protocol.ActionRefused{Action: vnet.RefusedActionMoveInventory, Reason: vnet.RefusalReasonHandsOccupied}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send hands-occupied move refusal: %w", sErr)
+				}
+			}
 			return nil
 		}
 		if sErr := send(protocol.EncodeInventoryState(state)); sErr != nil {
@@ -2154,7 +2164,39 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			log.Debug("block intent arrived with no player to attribute it to; discarding")
 			return nil
 		}
-		player.Block(msg.Block.Active)
+		// The simulation answers a press refused for energy once per press, and that one
+		// refusal is what flashes the energy bar. The press itself is still held: the
+		// shield rises on the tick the reserve allows, and every other refusal is silence.
+		if reason := player.Block(msg.Block.Active); reason != vnet.RefusalReasonUnknown {
+			log.Debug("block press refused", "code", reason.String())
+			if sErr := send(protocol.EncodeActionRefused(blockRefusal(reason))); sErr != nil {
+				return fmt.Errorf("session: send block refusal: %w", sErr)
+			}
+		}
+		return nil
+
+	case vnet.PayloadDrawRequest:
+		if player == nil || msg.Draw == nil {
+			log.Debug("draw arrived with no player to attribute it to; discarding")
+			return nil
+		}
+		// Admission only: the tick counts the charge and looses the arrow. A draw refused for
+		// arrows, energy or a mount is answered on the surfaces an attack's refusal uses;
+		// every other refusal is silence plus a debug line.
+		reason, dErr := player.Draw(*msg.Draw)
+		if dErr != nil {
+			log.Debug("refusing draw",
+				"reason", dErr.Error(),
+				"code", reason.String(),
+				"active", msg.Draw.Active,
+				"client_tick", msg.Draw.ClientTick,
+			)
+			if reason != vnet.RefusalReasonUnknown {
+				if sErr := send(protocol.EncodeActionRefused(attackRefusal(reason))); sErr != nil {
+					return fmt.Errorf("session: send draw refusal: %w", sErr)
+				}
+			}
+		}
 		return nil
 
 	case vnet.PayloadPlaceStructureRequest:
@@ -3040,4 +3082,11 @@ func attackRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
 		action = vnet.RefusedActionEnergy
 	}
 	return protocol.ActionRefused{Action: action, Reason: reason}
+}
+
+// blockRefusal names the action a block press refusal is answered under. The only one a
+// press carries is NotEnoughEnergy, and it goes under `Energy` for attackRefusal's reason:
+// the energy display is the surface that explains it. The reason travels unchanged.
+func blockRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
+	return protocol.ActionRefused{Action: vnet.RefusedActionEnergy, Reason: reason}
 }

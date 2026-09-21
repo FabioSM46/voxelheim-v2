@@ -124,6 +124,52 @@ After an implementation wave returns, monitor all of its open PRs as a set. Befo
 PR, confirm it is still open. Pending CI or an in-progress first DeepSeek review is a wait state,
 not a reason to invoke `$process-pr`.
 
+**Watch the set with one persistent watch built on `pr-status-json`.** Start it as soon as the
+first PR of the run exists — in Claude Code, the `Monitor` tool with `persistent: true`; in another
+runtime, the equivalent background loop — and act on every line it emits: `ready:true` goes to
+step 5, threads, unread findings, failing CI or `CONFLICTING` go to the owning agent's
+`$process-pr`, and only a pending state waits. Set `ISSUES` to the iteration's issue numbers, which
+every `$dev-issue` branch name carries:
+
+```bash
+cd <repo-root>
+ISSUES='<issue>|<issue>|<issue>'
+declare -A last
+while true; do
+  if ! all=$(gh pr list --state open --limit 100 --json number,headRefName,headRefOid \
+      --jq '.[] | "\(.number) \(.headRefOid[:7]) \(.headRefName)"'); then
+    echo "watch: gh pr list failed"; sleep 60; continue
+  fi
+  prs=$(printf '%s\n' "$all" | grep -E "/(${ISSUES})-" || true)
+  while read -r n sha _; do
+    [ -n "$n" ] || continue
+    s=$(bash scripts/gh-automation.sh pr-status-json "$n" 2>/dev/null | jq -c '{ready:.ready_to_merge,
+      pending:.ci_pending, failing:.ci_failing, gate:.required_check_state,
+      threads:.unresolved_threads, unread:.deepseek_unread_findings,
+      ds_done:(.deepseek_review_complete or .deepseek_rounds_exhausted), mergeable:.mergeable}' 2>/dev/null) || s=""
+    [ -n "$s" ] || s="status-unreadable"
+    if [ "${last[$n]:-}" != "$sha $s" ]; then last[$n]="$sha $s"; echo "PR #$n @$sha $s"; fi
+  done <<<"$prs"
+  sleep 60
+done
+```
+
+It emits every matching PR once on its first pass and again whenever the head or the state
+changes, and a status it cannot read comes out as `status-unreadable`, never as silence. Every
+read that can fail is guarded (`|| continue`, `|| true`, `|| s=""`, `${last[$n]:-}`), so the loop
+keeps that promise when a runtime runs it under `set -euo pipefail`; an unguarded failing
+assignment there would end the loop without a line, which is the silence this watch exists to
+prevent. The branch filter anchors on `/<issue>-` and deliberately says nothing about the prefix. **See the
+first pass before trusting it:** a watch that has printed nothing for a PR that exists is broken,
+not quiet — until it has printed, read `pr-status-json` by hand after every wave returns.
+
+**Never build the watch on `gh pr checks --json`.** The pinned `gh` has no `--json` on
+`pr checks`; the call exits with `unknown flag: --json`, and a loop that discards stderr reads the
+empty output as "no checks yet" and skips the PR on every pass. In Iteration 60 exactly that loop
+stayed silent for hours while #1248 and #1249 were `ready_to_merge`, and the orchestrator waited on
+it. `pr-status-json` reads the same rollup the frozen rule reads, so the watch and the merge
+decision cannot disagree.
+
 When a PR has actionable CI failures, unresolved DeepSeek threads, unread DeepSeek body findings,
 or `mergeable == CONFLICTING`, send its owning agent a follow-up task to invoke
 `$process-pr <pr>`. A missing `ci-gate` together with `CONFLICTING` is conflict remediation, not a

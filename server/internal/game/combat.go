@@ -45,8 +45,8 @@ type pendingSwing struct {
 // network scheduling from choosing an in-between position to be judged at.
 //
 // Every refusal is an error the session logs at debug. Missing launcher ammunition also
-// carries the actionable NoAmmunition answer; stale ticks, invalid slots and cooldown
-// refusals retain silence. None is a protocol failure.
+// carries the actionable NoAmmunition answer; stale ticks, a slot that is not the main
+// hand and cooldown refusals retain silence. None is a protocol failure.
 func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
@@ -61,6 +61,10 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 		// A shield up silently drops every swing before it creates pending state.
 		return vnet.RefusalReasonUnknown, nil
 	}
+	if p.draw != nil {
+		// A drawn bow is held, not swung: the draw's own release is what looses it.
+		return vnet.RefusalReasonUnknown, errors.New("the bow is drawn")
+	}
 
 	// Its own ordering guard, beside movement's and mining's rather than shared with
 	// them: the three arrive on different messages at different cadences, and one
@@ -70,8 +74,16 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	}
 	p.haveAttackTick, p.lastAttackTick = true, req.ClientTick
 
-	if req.Slot >= protocol.InventorySlots {
-		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is outside %d slots", req.Slot, protocol.InventorySlots)
+	// The attack spends the main hand and nothing else. Since V44 the slot names the
+	// main-hand equipment slot; a hotbar slot, a pack slot, another worn slot or an index
+	// past the table is dropped here, before any pending swing, cooldown or energy exists —
+	// the same silence as a slot holding nothing that attacks.
+	//
+	// Its tick is already recorded above, deliberately, like every admission refusal below:
+	// the guard orders requests by arrival, not by whether one was admitted. A second request
+	// on the same client tick is stale whatever the first one named.
+	if int(req.Slot) != equipmentMainHand {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is not the main hand %d", req.Slot, equipmentMainHand)
 	}
 	if p.pendingSwing != nil {
 		// Two clicks inside one tick. The first is already waiting to be judged and the
@@ -95,10 +107,17 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	// because the inventory can change between this admission and that judgement.
 	p.inventory.mu.Lock()
 	weapon := p.slotHoldsAWeaponLocked(req.Slot)
-	missingAmmunition := weapon && !p.launcherHasAmmunitionLocked(req.Slot)
+	drawn := weapon && p.slotHoldsADrawnLauncherLocked(req.Slot)
+	missingAmmunition := weapon && !drawn && !p.launcherHasAmmunitionLocked(req.Slot)
 	p.inventory.mu.Unlock()
 	if !weapon {
 		return vnet.RefusalReasonUnknown, fmt.Errorf("slot %d holds nothing that attacks", req.Slot)
+	}
+	if drawn {
+		// A bow is drawn with DrawRequest and loosed by its release; the draw is the bow's
+		// only way to shoot. An attack naming one is dropped here in silence, before any
+		// pending swing, cooldown or energy exists, worn through or not.
+		return vnet.RefusalReasonUnknown, errors.New("a bow is drawn, not swung")
 	}
 	if missingAmmunition {
 		return vnet.RefusalReasonNoAmmunition, errors.New("the launcher has no ammunition")
@@ -119,16 +138,76 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	return vnet.RefusalReasonUnknown, nil
 }
 
-// Block silently accepts only a live player's usable off-hand shield.
-func (p *Player) Block(active bool) {
+// Block records the block button's edge and settles the shield against it.
+//
+// **The request is intent, and the intent outlives the press.** `active: true` is held
+// as wantsBlock until `active: false` arrives or the server takes it away, and the shield
+// itself is re-derived from that intent every tick (settleShieldLocked). That is what lets
+// a press made on an empty reserve raise the shield on the tick regeneration reaches
+// ParryEnergyCost, with no second press, and what lets a shield lowered by a parry that
+// spent the reserve come back up while the button is still down.
+//
+// Only energy is remembered past a refusal. A press from a dead, leaving or mounted player,
+// or with no usable shield in the off hand, is dropped in silence as it always was and
+// leaves no intent behind — so equipping a shield while holding the button raises nothing.
+//
+// A press refused for energy answers NotEnoughEnergy **once per press**: the edge from
+// released to held is what is answered, never a repeated `active: true` without a release
+// and never a tick, so the energy bar flashes for the press and not twenty times a second.
+// Every other outcome answers RefusalReasonUnknown.
+func (p *Player) Block(active bool) vnet.RefusalReason {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	p.blocking = active && p.alive() && !p.leaving &&
-		p.mounted == vnet.MountKindUnknown && p.wornShield.fraction > 0
-	if p.blocking {
-		p.pendingSwing = nil
+	pressed := active && !p.wantsBlock
+	p.wantsBlock = active && p.mayRaiseShieldLocked()
+	p.settleShieldLocked()
+	if pressed && p.wantsBlock && !p.blocking {
+		return vnet.RefusalReasonNotEnoughEnergy
 	}
+	return vnet.RefusalReasonUnknown
+}
+
+// mayRaiseShieldLocked is every condition on a raised shield except energy: a live player,
+// not leaving, not mounted, with a usable shield in the off hand. The caller holds sim.mu.
+func (p *Player) mayRaiseShieldLocked() bool {
+	return p.alive() && !p.leaving && p.mounted == vnet.MountKindUnknown && p.wornShield.fraction > 0
+}
+
+// settleShieldLocked re-derives blocking from the held intent, the shield and the reserve.
+//
+// **A raised shield needs at least ParryEnergyCost**, so a raised shield always promises a
+// parry it can pay for. Holding it still costs nothing: the cost is spent only when a blow
+// is absorbed (landMobBlowLocked), and that spend is followed by this settle, so a parry
+// that leaves the reserve short lowers the shield on the same tick rather than the next.
+//
+// An intent that can no longer raise the shield for any reason but energy is dropped here
+// too. Every authoritative removal already clears it through lowerShieldLocked; this is
+// the same answer for a condition that changed without passing through one of them.
+//
+// Called by Block, by every tick after energy regenerates (advanceVitalsLocked) and after a
+// parry spends. The caller holds sim.mu.
+func (p *Player) settleShieldLocked() {
+	if !p.mayRaiseShieldLocked() {
+		p.wantsBlock = false
+	}
+	p.blocking = p.wantsBlock && p.energy >= uint32(ParryEnergyCost)*energyScale
+	if p.blocking {
+		// A shield up silently drops every swing, including one admitted before it rose, and
+		// ends a draw. A bow in the main hand forbids a shield, so the second is the
+		// invariant rather than a live case: drawing and blocking are never both true.
+		p.pendingSwing = nil
+		p.cancelDrawLocked()
+	}
+}
+
+// lowerShieldLocked is every authoritative removal of the shield: teleport, mounting,
+// leaving, death, world transfer, and a shield that wears out or leaves the off hand. It
+// lowers the shield **and forgets the intent**, so none of them is undone by regeneration
+// raising the shield again while a stale press is still on record. The caller holds sim.mu.
+func (p *Player) lowerShieldLocked() {
+	p.wantsBlock = false
+	p.blocking = false
 }
 
 // slotHoldsAWeaponLocked reports whether the slot holds a kind of item that swings or
@@ -325,16 +404,13 @@ type armedAttack struct {
 }
 
 // launchParameters is the authoritative cadence and initial speed for each projectile
-// kind a registry row may launch. Unknown kinds fail closed.
+// kind an attack may launch. Unknown kinds fail closed, and so does an arrow: a bow is
+// drawn, and resolveDrawLocked looses it at a speed that follows the charge (arrowLaunch).
 func (s *Sim) launchParameters(kind vnet.ProjectileKind) (uint32, float64) {
-	switch kind {
-	case vnet.ProjectileKindArrow:
-		return s.bowCooldownTicks, ArrowSpeed
-	case vnet.ProjectileKindEnergyOrb:
+	if kind == vnet.ProjectileKindEnergyOrb {
 		return s.sceptreCooldownTicks, OrbSpeed
-	default:
-		return 0, 0
 	}
+	return 0, 0
 }
 
 // armedForAttackLocked is what the named slot's contents do, and whether the inventory
@@ -377,42 +453,59 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 		return armedAttack{}, true
 	}
 
+	if drawnLauncher(definition) {
+		// A bow put in the hand between an admitted swing and this tick. It is drawn, never
+		// swung, so the swing ends here and spends neither an arrow nor the bow's wear.
+		return armedAttack{}, true
+	}
 	if definition.launches != vnet.ProjectileKindUnknown {
-		// A launch spends ammunition and wear, so a pending boss reward postpones it
-		// exactly as a contended inventory does. A melee swing spends nothing and is
-		// judged as usual.
-		if p.rewardInventoryBusyLocked() {
-			return armedAttack{}, false
+		launched, sampled := p.spendLaunchLocked(slot, definition)
+		if !launched {
+			return armedAttack{}, sampled
 		}
-		if definition.ammunition != ItemNone {
-			ammunitionSlot := -1
-			for candidate := range p.inventory.slots[:equipmentFirst] {
-				stack := p.inventory.slots[candidate]
-				if stack.item == definition.ammunition && stack.count > 0 {
-					ammunitionSlot = candidate
-					break
-				}
-			}
-			if ammunitionSlot < 0 {
-				// The session-side check already explained the ordinary case. This is the
-				// race where the last arrow moved before the tick, so the queued launch simply
-				// disappears and spends nothing.
-				return armedAttack{}, true
-			}
-			ammunition := &p.inventory.slots[ammunitionSlot]
-			ammunition.count--
-			if ammunition.count == 0 {
-				*ammunition = inventoryStack{}
-			}
-		}
-		launcher := &p.inventory.slots[slot]
-		if launcher.durable() {
-			launcher.durability--
-		}
-		p.inventoryDirty = true
 		return armedAttack{launches: definition.launches}, true
 	}
 	return armedAttack{meleeDamage: definition.meleeDamage}, true
+}
+
+// spendLaunchLocked spends what one launch from slot costs: its first hotbar or pack
+// ammunition, when the row declares one, and one point of the launcher's durability. It
+// reports whether it spent and whether the inventory could be spent from at all. The
+// caller holds inventory.mu and has already found a usable launcher in slot; the swing and
+// the bow's draw both launch through it, so the two cannot charge differently.
+func (p *Player) spendLaunchLocked(slot uint8, definition itemDefinition) (launched, sampled bool) {
+	// A launch spends ammunition and wear, so a pending boss reward postpones it exactly as
+	// a contended inventory does. A melee swing spends nothing and is judged as usual.
+	if p.rewardInventoryBusyLocked() {
+		return false, false
+	}
+	if definition.ammunition != ItemNone {
+		ammunitionSlot := -1
+		for candidate := range p.inventory.slots[:equipmentFirst] {
+			stack := p.inventory.slots[candidate]
+			if stack.item == definition.ammunition && stack.count > 0 {
+				ammunitionSlot = candidate
+				break
+			}
+		}
+		if ammunitionSlot < 0 {
+			// The session-side check already explained the ordinary case. This is the race
+			// where the last arrow moved before the tick, so the launch simply disappears and
+			// spends nothing.
+			return false, true
+		}
+		ammunition := &p.inventory.slots[ammunitionSlot]
+		ammunition.count--
+		if ammunition.count == 0 {
+			*ammunition = inventoryStack{}
+		}
+	}
+	launcher := &p.inventory.slots[slot]
+	if launcher.durable() {
+		launcher.durability--
+	}
+	p.inventoryDirty = true
+	return true, true
 }
 
 // swingTargetLocked is the mob a swing lands on, or nil.

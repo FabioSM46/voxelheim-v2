@@ -206,7 +206,7 @@ func TestInventoryMoveSplitsMergesAndSwaps(t *testing.T) {
 			t.Parallel()
 			inventory := newInventory()
 			inventory.slots[4], inventory.slots[11] = tc.source, tc.target
-			if changed := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: 11, Count: tc.count}); !changed {
+			if changed := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: 11, Count: tc.count}) == nil; !changed {
 				t.Fatal("move was refused")
 			}
 			if got := inventory.slots[4]; got != tc.wantSrc {
@@ -238,7 +238,7 @@ func TestRefusedInventoryMovesLeaveTheStateByteIdentical(t *testing.T) {
 			inventory.slots[0] = inventoryStack{item: ItemStone, count: 5}
 			inventory.slots[2] = inventoryStack{item: ItemDirt, count: 3}
 			before := protocol.EncodeInventoryState(inventory.stateLocked())
-			if changed := inventory.moveLocked(req); changed {
+			if changed := inventory.moveLocked(req) == nil; changed {
 				t.Fatal("refused move reported a state change")
 			}
 			after := protocol.EncodeInventoryState(inventory.stateLocked())
@@ -257,6 +257,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		testLegs
 		testOffHand
 		testStackableHead
+		testMainHand
 	)
 	itemRegistry[testHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testOtherHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
@@ -264,6 +265,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 	itemRegistry[testLegs] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornLegs}
 	itemRegistry[testOffHand] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornOffHand}
 	itemRegistry[testStackableHead] = itemDefinition{places: world.Air, maxStack: 4, wornAt: wornHead}
+	itemRegistry[testMainHand] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornMainHand}
 	t.Cleanup(func() {
 		delete(itemRegistry, testHead)
 		delete(itemRegistry, testOtherHead)
@@ -271,12 +273,13 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		delete(itemRegistry, testLegs)
 		delete(itemRegistry, testOffHand)
 		delete(itemRegistry, testStackableHead)
+		delete(itemRegistry, testMainHand)
 	})
 
 	refusedByteIdentical := func(t *testing.T, inventory *inventory, request protocol.InventoryMoveRequest) {
 		t.Helper()
 		before := protocol.EncodeInventoryState(inventory.stateLocked())
-		if inventory.moveLocked(request) {
+		if inventory.moveLocked(request) == nil {
 			t.Fatal("the wrong-location move was accepted")
 		}
 		after := protocol.EncodeInventoryState(inventory.stateLocked())
@@ -295,13 +298,14 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		{name: "chest", slot: equipmentChest, matching: testChest, mismatched: testLegs},
 		{name: "legs", slot: equipmentLegs, matching: testLegs, mismatched: testHead},
 		{name: "off-hand", slot: equipmentOffHand, matching: testOffHand, mismatched: testLegs},
+		{name: "main hand", slot: equipmentMainHand, matching: testMainHand, mismatched: testOffHand},
 	}
 	for _, location := range locations {
 		t.Run(location.name, func(t *testing.T) {
 			t.Run("matching item enters", func(t *testing.T) {
 				inventory := newInventory()
 				inventory.slots[4] = stackOf(location.matching, 1)
-				if !inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1}) {
+				if inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1}) != nil {
 					t.Fatalf("matching item %d was refused", location.matching)
 				}
 				if got := inventory.slots[location.slot].item; got != location.matching {
@@ -333,7 +337,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		inventory := newInventory()
 		inventory.slots[equipmentHead] = stackOf(testHead, 1)
 		inventory.slots[4] = stackOf(testOtherHead, 1)
-		if !inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1}) {
+		if inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1}) != nil {
 			t.Fatal("the two matching head items were refused")
 		}
 		if inventory.slots[equipmentHead].item != testOtherHead || inventory.slots[4].item != testHead {
@@ -360,6 +364,86 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		inventory.slots[4] = stackOf(testStackableHead, 2)
 		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1})
 	})
+}
+
+// The fifth worn slot is appended: the four before it keep the indices a stored record
+// and the wire already use, and the main hand is the last slot of the table.
+func TestTheMainHandIsAppendedAfterTheFourWornSlots(t *testing.T) {
+	t.Parallel()
+
+	if protocol.InventorySlots != 41 || protocol.EquipmentSlots != 5 {
+		t.Fatalf("layout is %d slots with %d worn, want 41 with 5", protocol.InventorySlots, protocol.EquipmentSlots)
+	}
+	for name, got := range map[string]int{"head": equipmentHead, "chest": equipmentChest, "legs": equipmentLegs, "off-hand": equipmentOffHand} {
+		if want := map[string]int{"head": 36, "chest": 37, "legs": 38, "off-hand": 39}[name]; got != want {
+			t.Errorf("the %s slot is %d, want %d", name, got, want)
+		}
+	}
+	if equipmentMainHand != 40 {
+		t.Errorf("the main hand is slot %d, want 40", equipmentMainHand)
+	}
+	if last := int(protocol.InventorySlots) - 1; equipmentMainHand != last {
+		t.Errorf("the main hand is slot %d, want the last slot %d", equipmentMainHand, last)
+	}
+	if place, worn := wornAtForSlot(uint8(equipmentMainHand)); !worn || place != wornMainHand {
+		t.Errorf("wornAtForSlot(%d) = %d, %v; want the main hand", equipmentMainHand, place, worn)
+	}
+	if _, worn := wornAtForSlot(uint8(equipmentFirst - 1)); worn {
+		t.Errorf("the last pack slot %d is treated as worn", equipmentFirst-1)
+	}
+}
+
+// Every registered weapon can be taken into the main hand and every other registered
+// item is refused there, whole rows at a time rather than one synthetic item.
+func TestEveryRegisteredWeaponEntersTheMainHandAndNoOtherItemDoes(t *testing.T) {
+	t.Parallel()
+
+	for id, definition := range itemRegistry {
+		inventory := newInventory()
+		inventory.slots[4] = inventoryStack{item: id, count: 1, durability: definition.maxDurability, maxDurability: definition.maxDurability}
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentMainHand), Count: 1}) == nil
+		weapon := definition.meleeDamage != 0 || definition.launches != 0
+		if moved != weapon {
+			t.Errorf("moving item %d (weapon %v) into the main hand: accepted %v", id, weapon, moved)
+		}
+		if moved && inventory.slots[equipmentMainHand].item != id {
+			t.Errorf("the main hand holds %d after moving %d", inventory.slots[equipmentMainHand].item, id)
+		}
+	}
+}
+
+// A swap out of the main hand is checked in the direction back into it too: a weapon
+// can trade places with a weapon, and never with a stack of stone or a shield.
+func TestASwapOutOfTheMainHandMustLeaveAWeaponInIt(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		pack   inventoryStack
+		accept bool
+	}{
+		"another blade":  {pack: stackOf(ItemIronSword, 1), accept: true},
+		"a bow":          {pack: stackOf(ItemBow, 1), accept: true},
+		"a stone":        {pack: stackOf(ItemStone, 1)},
+		"a shield":       {pack: stackOf(ItemWoodenShield, 1)},
+		"a leather cap":  {pack: stackOf(ItemLeatherCap, 1)},
+		"a stack of two": {pack: stackOf(ItemArrow, 2)},
+	} {
+		inventory := newInventory()
+		inventory.slots[equipmentMainHand] = stackOf(ItemRustySword, 1)
+		inventory.slots[4] = tc.pack
+		before := inventory.slots
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentMainHand), To: 4, Count: 1}) == nil
+		if moved != tc.accept {
+			t.Errorf("%s: swap accepted %v, want %v", name, moved, tc.accept)
+			continue
+		}
+		if !moved && inventory.slots != before {
+			t.Errorf("%s: a refused swap changed the slots", name)
+		}
+		if moved && (inventory.slots[equipmentMainHand].item != tc.pack.item || inventory.slots[4].item != ItemRustySword) {
+			t.Errorf("%s: swap left main hand %d and pack %d", name, inventory.slots[equipmentMainHand].item, inventory.slots[4].item)
+		}
+	}
 }
 
 func TestAnOffHandMoveResendsTheAppearanceWithTheSyntheticItem(t *testing.T) {
@@ -401,7 +485,86 @@ func TestAnOffHandMoveResendsTheAppearanceWithTheSyntheticItem(t *testing.T) {
 	}
 }
 
+// The main hand is announced like every other worn slot: a move into it re-sends the
+// appearance carrying the weapon, and a move out of it re-sends one carrying nothing.
+// A real weapon row, because what reaches the wire is the slot's item id and nothing else.
+func TestAMainHandMoveResendsTheAppearanceWithTheWeapon(t *testing.T) {
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	// A new character joins with the rusty sword in the main hand. Empty it first, so the
+	// move below is into a hand that holds nothing, which is what this test is about.
+	subject.inventory.mu.Lock()
+	subject.inventory.slots[4] = stackOf(ItemIronSword, 1)
+	subject.inventory.slots[equipmentMainHand] = inventoryStack{}
+	subject.refreshWornLocked()
+	subject.inventory.mu.Unlock()
+	h.step()
+
+	frames := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 1 {
+		t.Fatalf("the watcher began with %d subject appearances, want one", len(frames))
+	}
+	if got := playerAppearance(t, frames[0]).WornMainhand(); got != 0 {
+		t.Fatalf("the initial appearance holds item %d, want nothing", got)
+	}
+
+	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
+		From: 4, To: uint8(equipmentMainHand), Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the iron sword into the main hand: %v", err)
+	}
+	h.step()
+	frames = appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 2 {
+		t.Fatalf("equipping produced %d subject appearances, want two total", len(frames))
+	}
+	equipped := playerAppearance(t, frames[1])
+	if got := equipped.WornMainhand(); got != uint16(ItemIronSword) {
+		t.Errorf("resent appearance holds main-hand item %d, want %d", got, ItemIronSword)
+	}
+	if got := equipped.WornOffhand(); got != 0 {
+		t.Errorf("the main hand leaked into the off-hand as item %d", got)
+	}
+
+	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
+		From: uint8(equipmentMainHand), To: 4, Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the iron sword out of the main hand: %v", err)
+	}
+	h.step()
+	frames = appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 3 {
+		t.Fatalf("unequipping produced %d subject appearances, want three total", len(frames))
+	}
+	if got := playerAppearance(t, frames[2]).WornMainhand(); got != 0 {
+		t.Errorf("the appearance after unequipping holds item %d, want nothing", got)
+	}
+}
+
+// A new character is seen holding the blade they joined with: the first appearance a
+// watcher receives already names the rusty sword in the main hand, with no move behind it.
+func TestANewCharactersFirstAppearanceCarriesTheStarterBlade(t *testing.T) {
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	h.step()
+
+	frames := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 1 {
+		t.Fatalf("the watcher began with %d subject appearances, want one", len(frames))
+	}
+	if got := playerAppearance(t, frames[0]).WornMainhand(); got != uint16(ItemRustySword) {
+		t.Errorf("the first appearance holds main-hand item %d, want the starter blade %d", got, ItemRustySword)
+	}
+}
+
 func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
+	t.Helper()
+	return playerAppearance(t, frame).WornOffhand()
+}
+
+func playerAppearance(t *testing.T, frame []byte) *vnet.PlayerAppearance {
 	t.Helper()
 	envelope := vnet.GetRootAsEnvelope(frame, 0)
 	var table flatbuffers.Table
@@ -410,10 +573,11 @@ func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
 	}
 	var appearance vnet.PlayerAppearance
 	appearance.Init(table.Bytes, table.Pos)
-	return appearance.WornOffhand()
+	return &appearance
 }
 
-// starterSword is the slot every player joins with, as InventoryState carries it. A
+// starterSword is the main-hand slot every new character joins with, as InventoryState
+// carries it. A
 // function rather than a var so no test can mutate what the others compare against.
 func starterSword() protocol.InventoryStack {
 	return protocol.InventoryStack{
@@ -548,11 +712,11 @@ func TestAMiningCompletionHoldsNoInventoryLock(t *testing.T) {
 	if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
 		t.Errorf("the break put %d Stone in the pack; the yield belongs on the ground", got)
 	}
-	// Slot 0 is no longer the empty slot it was when this test was written — every
-	// player joins holding a blade — so the assertion is that the break left the
-	// starter loadout alone rather than that it left nothing anywhere.
-	if got := player.InventoryState().Stacks[0]; got != starterSword() {
-		t.Errorf("the break disturbed slot 0: %+v, want the starter sword", got)
+	// Every new character joins holding a blade, in the main hand, so the assertion is
+	// that the break left the starter loadout alone rather than that it left nothing
+	// anywhere.
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("the break disturbed the main hand: %+v, want the starter sword", got)
 	}
 	if got := len(sim.drops); got != 1 {
 		t.Errorf("the break left %d drops in the world, want 1", got)

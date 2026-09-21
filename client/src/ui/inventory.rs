@@ -32,7 +32,6 @@ use super::{
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
 use crate::net::{InventoryStack, MountKind, Session, StructureKind};
-#[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
     ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
@@ -272,9 +271,26 @@ const PACK_EQUIPMENT_GAP: f32 = 18.0;
 /// Enough room for the column heading while the cells themselves remain the shared size.
 const EQUIPMENT_COLUMN_WIDTH: f32 = 126.0;
 
-/// The current wire order, as `schemas/handshake.fbs` states it. A newer server may announce
-/// more equipment cells; those still get drawn and use the neutral fallback below.
-const EQUIPMENT_CAPTIONS: [&str; 4] = ["HEAD", "CHEST", "LEGS", "OFF-HAND"];
+/// The current wire order, as `schemas/handshake.fbs` states it: one caption per route in
+/// [`EQUIPMENT_ROUTES`], and sized by it, so a routed slot cannot be left captioned "WORN".
+/// A newer server may announce more equipment cells; those still get drawn and use the
+/// neutral fallback below.
+///
+/// **The main hand is captioned by what goes in it, "WEAPON", not "MAIN-HAND".** Measured,
+/// not guessed: the embedded font advances 0.6 of its size per glyph, and a caption has
+/// 46px inside a 52px cell's two 3px borders. "MAIN-HAND" is nine glyphs — 48.6px even at
+/// [`EQUIPMENT_CAPTION_FONT_SIZE`] — so it would run into the border; "WEAPON" is 32.4px.
+/// `every_equipment_cell_and_its_caption_lie_inside_the_window` runs the real layout and
+/// holds every entry here to that room.
+const EQUIPMENT_CAPTIONS: [&str; EQUIPMENT_ROUTES.len()] =
+    ["HEAD", "CHEST", "LEGS", "OFF-HAND", "WEAPON"];
+
+/// The equipment captions' size, in logical pixels.
+///
+/// **Nine, and it was ten**, which laid "OFF-HAND" out 48px wide in the 46px inside a cell's
+/// border: two pixels of the word drawn over the frame, on every build since the off-hand cell
+/// existed, and invisible to every test until one ran the real layout. At nine it is 43.2px.
+const EQUIPMENT_CAPTION_FONT_SIZE: f32 = 9.0;
 
 /// Space between the frame edge and the grab bar. The clamp accounts for it rather than
 /// mistaking visible frame padding for visible grab area.
@@ -889,14 +905,20 @@ fn equipment_caption(offset: u8) -> &'static str {
 ///
 /// `FocusPolicy::Pass` is load-bearing: without it only an empty equipment cell would stop
 /// answering the pointer, because a full cell hides this child.
+///
+/// **One line, never wrapped.** A caption is a word in a cell, and a word broken across two
+/// lines in a 52px cell is not legible as one. Its natural width must therefore fit inside the
+/// cell's border, which `every_equipment_cell_and_its_caption_lie_inside_the_window` measures
+/// with the real layout — see [`EQUIPMENT_CAPTION_FONT_SIZE`] for what that found.
 fn equipment_caption_bundle(label: &'static str) -> impl Bundle {
     (
         EquipmentCaption(label),
         Text::new(label),
         TextFont {
-            font_size: FontSize::Px(10.0),
+            font_size: FontSize::Px(EQUIPMENT_CAPTION_FONT_SIZE),
             ..default()
         },
+        TextLayout::no_wrap(),
         TextColor(Color::srgb(0.62, 0.66, 0.74)),
         FocusPolicy::Pass,
     )
@@ -2501,6 +2523,157 @@ mod tests {
         assert_eq!(captions(&mut app)[0].2, Visibility::Hidden);
         assert_eq!(drawn(&mut app, 3).count, "1");
         assert!(!drawn(&mut app, 3).rectangles.is_empty());
+    }
+
+    /// The server's own welcome: 41 slots, 9 on the hotbar and 5 worn, the last the main hand.
+    fn server_session() -> Session {
+        Session(SessionParams {
+            inventory_slots: 41,
+            hotbar_slots: 9,
+            equipment_slots: 5,
+            ..session().0
+        })
+    }
+
+    #[test]
+    fn the_fifth_equipment_cell_is_the_main_hand() {
+        assert_eq!(equipment_caption(crate::player::MAIN_HAND_OFFSET), "WEAPON");
+        assert_eq!(
+            equipment_caption(crate::player::MAIN_HAND_OFFSET + 1),
+            "WORN",
+            "a slot appended after the main hand keeps the neutral caption"
+        );
+
+        let mut app = app();
+        app.insert_resource(server_session());
+        app.update();
+        let world = app.world_mut();
+        let mut query = world.query::<(&InventoryCell, &Children)>();
+        let mut worn: Vec<(u8, String)> = query
+            .iter(world)
+            .filter(|(cell, _)| cell.grid == InventoryGrid::Equipment)
+            .map(|(cell, children)| {
+                let caption = children
+                    .iter()
+                    .find_map(|child| world.get::<EquipmentCaption>(child))
+                    .expect("an equipment cell has one caption");
+                (cell.slot, caption.0.to_owned())
+            })
+            .collect();
+        worn.sort();
+        assert_eq!(
+            worn,
+            vec![
+                (36, "HEAD".to_owned()),
+                (37, "CHEST".to_owned()),
+                (38, "LEGS".to_owned()),
+                (39, "OFF-HAND".to_owned()),
+                (40, "WEAPON".to_owned()),
+            ]
+        );
+    }
+
+    /// **Five worn cells fit inside the fixed window, laid out by `bevy_ui` itself.**
+    ///
+    /// The window is a fixed 760x720 and the column grew a cell without growing the frame, so
+    /// this runs the real layout — taffy, and the embedded font measuring every caption —
+    /// rather than inserting a `ComputedNode` by hand: what is under test is the geometry, and
+    /// a geometry supplied by the test could not fail. Each cell must lie within the window's
+    /// padded frame, and each caption must fit on one line inside its cell's border, which is
+    /// what keeps every caption, "WEAPON" included, legible rather than wrapped or clipped.
+    #[test]
+    fn every_equipment_cell_and_its_caption_lie_inside_the_window() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::input::InputPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::image::ImagePlugin::default(),
+            bevy::image::TextureAtlasPlugin,
+            bevy::a11y::AccessibilityPlugin,
+            bevy::text::TextPlugin,
+            bevy::ui::UiPlugin,
+        ))
+        .add_message::<InventoryClick>()
+        .insert_resource(server_session())
+        .insert_resource(Inventory::from_stacks(vec![InventoryStack::default(); 41]))
+        .insert_resource(SelectedSlot::default())
+        .init_resource::<PickedStack>()
+        .insert_resource(InputMode::Inventory)
+        .add_plugins(InventoryUiPlugin);
+        for _ in 0..4 {
+            app.update();
+        }
+
+        let world = app.world_mut();
+        let rect = |world: &World, entity: Entity| {
+            let size = world
+                .get::<ComputedNode>(entity)
+                .expect("a laid-out node")
+                .size;
+            let centre = world
+                .get::<UiGlobalTransform>(entity)
+                .expect("a laid-out node")
+                .translation;
+            Rect::from_center_size(centre, size)
+        };
+        let window = world
+            .query_filtered::<Entity, With<InventoryWindow>>()
+            .single(world)
+            .expect("one inventory window");
+        let frame = rect(world, window);
+        assert_eq!(
+            frame.size(),
+            INVENTORY_WINDOW_SIZE,
+            "the window was resized"
+        );
+        let inner = frame.inflate(-INVENTORY_WINDOW_PADDING);
+
+        let cells: Vec<(u8, Entity, Vec<Entity>)> = world
+            .query::<(Entity, &InventoryCell, &Children)>()
+            .iter(world)
+            .filter(|(_, cell, _)| cell.grid == InventoryGrid::Equipment)
+            .map(|(entity, cell, children)| (cell.slot, entity, children.to_vec()))
+            .collect();
+        assert_eq!(cells.len(), 5, "five equipment cells");
+
+        // Every caption is measured before any is judged, so a failure names all five rather
+        // than whichever cell the query happened to reach first.
+        let room = crate::ui::CELL_SIZE - 2.0 * crate::ui::CELL_BORDER;
+        let mut captions: Vec<(u8, &'static str, f32, f32)> = Vec::new();
+        for (slot, cell, children) in cells {
+            let bounds = rect(world, cell);
+            assert_eq!(
+                bounds.size(),
+                Vec2::splat(crate::ui::CELL_SIZE),
+                "slot {slot}"
+            );
+            assert!(
+                inner.contains(bounds.min) && inner.contains(bounds.max),
+                "slot {slot} at {bounds:?} lies outside the window's frame {inner:?}"
+            );
+            let caption = children
+                .into_iter()
+                .find(|child| world.get::<EquipmentCaption>(*child).is_some())
+                .expect("an equipment cell has one caption");
+            let label = rect(world, caption);
+            let text = world
+                .get::<EquipmentCaption>(caption)
+                .expect("the caption names itself")
+                .0;
+            captions.push((slot, text, label.width(), label.height()));
+        }
+        captions.sort_by_key(|row| row.0);
+        assert!(
+            captions.iter().all(|&(_, _, width, height)| {
+                width > 0.0
+                    && width <= room
+                    && height > 0.0
+                    && height < 2.0 * EQUIPMENT_CAPTION_FONT_SIZE
+            }),
+            "every caption must fit on one line in the {room}px inside a cell's border; \
+             measured (slot, caption, width, height): {captions:?}"
+        );
     }
 
     #[test]

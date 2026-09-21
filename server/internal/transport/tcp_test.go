@@ -158,18 +158,27 @@ func TestTCPConnReadDeadline(t *testing.T) {
 
 	// A client that connects and says nothing, which is the whole point of the flag.
 	const window = 50 * time.Millisecond
-	if err := server.SetReadDeadline(time.Now().Add(window)); err != nil {
+	// One instant for both the deadline and the measurement. They used to be two
+	// time.Now calls, and any delay between them — a preemption, a GC, a loaded runner —
+	// let the read end exactly on time while the elapsed time, counted from the later
+	// call, came out short of the window (46.8 ms on one Integration run).
+	//
+	// Measured from here the lower bound is safe rather than lucky: the runtime turns the
+	// deadline into time.Until(armed.Add(window)) and adds nanotime() read *after* that
+	// subtraction, so the poller's deadline is never earlier than armed+window on the
+	// monotonic clock time.Since reads, and a timer never fires before its deadline.
+	armed := time.Now()
+	if err := server.SetReadDeadline(armed.Add(window)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
 
-	start := time.Now()
 	if _, err := server.ReadFrame(); !IsTimeout(err) {
 		t.Fatalf("ReadFrame err = %v, want an expired deadline", err)
 	}
 	// Only the lower bound is asserted. A loaded machine may notice late and that is
 	// not a defect; returning *early* would mean the deadline was not what ended the
 	// read, and the test would be passing on the wrong error.
-	if waited := time.Since(start); waited < window {
+	if waited := time.Since(armed); waited < window {
 		t.Errorf("ReadFrame returned after %s, before the %s deadline", waited, window)
 	}
 

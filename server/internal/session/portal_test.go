@@ -311,7 +311,7 @@ func TestInstanceMarkerRequestsCannotReadOrMutateTheOpenWorldLedger(t *testing.T
 	moved := len(frames.inventoryStates())
 	conn.in <- protocol.EncodeMarkerPlaceRequest(protocol.MarkerPlaceRequest{X: 0, Z: 0, Kind: vnet.MarkerKindNote, Note: "instance", ClientTick: 1})
 	conn.in <- protocol.EncodeMarkerRemoveRequest(protocol.MarkerRemoveRequest{MarkerID: original[0].MarkerID})
-	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: 1, Count: 1})
+	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: protocol.InventorySlots - 1, To: 1, Count: 1})
 	waitUntil(t, "marker requests consumed", func() bool { return len(frames.inventoryStates()) == moved+1 })
 	if len(frames.markerListsSeen()) != 2 {
 		t.Fatal("instance request exposed open-world marker list")
