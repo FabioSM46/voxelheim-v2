@@ -865,6 +865,22 @@ mod tests {
     }
 
     #[test]
+    fn a_v45_server_refusal_prevents_a_v44_peer_entering_a_furnished_world() {
+        // The version decision belongs to the server's ClientHello boundary. The
+        // client preserves that refusal rather than entering a world with invisible solid furniture.
+        let mut handshake = Handshake::new();
+        let refusal = Reject {
+            code: "PROTOCOL_MISMATCH",
+            detail: "server speaks protocol 45, client speaks 44".to_owned(),
+        };
+        assert_eq!(
+            handshake.apply(Message::Reject(refusal.clone())),
+            Ok(Transition::Refused(refusal))
+        );
+        assert!(!handshake.established());
+    }
+
+    #[test]
     fn a_reject_refuses_the_session_and_preserves_the_reason() {
         let mut handshake = Handshake::new();
 
