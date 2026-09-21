@@ -330,9 +330,11 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	// member inside StructureState.kind whose decoder refuses what it cannot name.
 	// V44 appends DrawRequest, which a V43 server cannot name, and changes
 	// AttackRequest.slot to mean the main hand: a V43 client naming its hotbar slot would
-	// have every swing dropped after a clean handshake.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 44 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 44", got)
+	// have every swing dropped if that version bump were omitted.
+	// V45 activates solid castle furnishings: refuse V44 peers that could decode
+	// their descriptors without rendering these authoritative obstacles.
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 45 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 45", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,

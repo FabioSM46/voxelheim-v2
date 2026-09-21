@@ -10823,8 +10823,10 @@ mod tests {
         // go without, where a V40 server's snapshot carries only padding.
         // V44 appends `DrawRequest`, which a V43 server cannot name, and changes
         // `AttackRequest.slot` to mean the main hand: a V43 client naming its hotbar slot
-        // would have every swing dropped after a clean handshake.
-        assert_eq!(fb::ProtocolVersion::Current.0, 44);
+        // would have every swing dropped if that version bump were omitted.
+        // V45 activates solid castle furnishings; V44 peers must be refused because
+        // they can decode descriptors without rendering the authoritative obstacles.
+        assert_eq!(fb::ProtocolVersion::Current.0, 45);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),

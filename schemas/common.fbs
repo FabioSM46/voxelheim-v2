@@ -344,7 +344,10 @@ enum ProtocolVersion : ushort {
   /// server, and `RefusedAction.MoveInventory` and `RefusalReason.HandsOccupied` ride inside
   /// an `ActionRefused`, whose decoders are total. The fifth equipment slot is a layout
   /// the welcome announces, and the consumers adopt it separately, as they did at V22.
-  Current = 44
+  /// V45: the capital now activates solid furnishings. V42-V44 decoded their
+  /// descriptors before the renderer existed; reject those peers rather than
+  /// exposing invisible authoritative obstacles.
+  Current = 45
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

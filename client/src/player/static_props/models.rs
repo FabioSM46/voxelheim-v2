@@ -93,8 +93,23 @@ impl PropModels {
                     .enumerate()
                     .filter_map(|(role, mesh)| mesh.map(|mesh| (role, meshes.add(mesh))))
                     .collect();
+                let pantry_handles: Vec<_> = if kind == StaticPropKind::Bookcase {
+                    geometry_with_pantry(kind, true)
+                        .meshes
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(role, mesh)| mesh.map(|mesh| (role, meshes.add(mesh))))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let variants = std::array::from_fn(|variant| {
-                    handles
+                    let selected = if variant == 3 && kind == StaticPropKind::Bookcase {
+                        &pantry_handles
+                    } else {
+                        &handles
+                    };
+                    selected
                         .iter()
                         .map(|(role, mesh)| PropPart {
                             mesh: mesh.clone(),
@@ -159,6 +174,10 @@ impl Assembly {
 }
 
 fn geometry(kind: StaticPropKind) -> Assembly {
+    geometry_with_pantry(kind, false)
+}
+
+fn geometry_with_pantry(kind: StaticPropKind, pantry: bool) -> Assembly {
     use StaticPropKind::*;
     let mut a = Assembly::default();
     // Major visible members use the same extents as the authoritative solid catalogue.
@@ -219,29 +238,33 @@ fn geometry(kind: StaticPropKind) -> Assembly {
             for y in [0.0, 0.55, 1.1, 1.65, 2.22] {
                 a.block(WOOD, [-0.8, y, -0.28], [0.8, y + 0.08, 0.2]);
             }
-            for row in 0..4 {
-                for col in 0..11 {
-                    let x = -0.76 + col as f32 * 0.139;
-                    let y = row as f32 * 0.55 + 0.08;
-                    let h = 0.32 + ((row * 7 + col * 3) % 4) as f32 * 0.035;
-                    let colors = [
-                        [0.45, 0.08, 0.055, 1.0],
-                        [0.06, 0.19, 0.23, 1.0],
-                        [0.39, 0.29, 0.12, 1.0],
-                        [0.15, 0.23, 0.11, 1.0],
-                    ];
-                    a.tint_box(
-                        DETAIL,
-                        [x, y, -0.24],
-                        [x + 0.116, y + h, 0.17],
-                        colors[(row + col) % 4],
-                    );
-                    for dy in [0.06, h - 0.05] {
-                        a.block(
-                            BRASS,
-                            [x + 0.006, y + dy, -0.249],
-                            [x + 0.110, y + dy + 0.012, -0.241],
+            if pantry {
+                pantry_contents(&mut a);
+            } else {
+                for row in 0..4 {
+                    for col in 0..11 {
+                        let x = -0.76 + col as f32 * 0.139;
+                        let y = row as f32 * 0.55 + 0.08;
+                        let h = 0.32 + ((row * 7 + col * 3) % 4) as f32 * 0.035;
+                        let colors = [
+                            [0.45, 0.08, 0.055, 1.0],
+                            [0.06, 0.19, 0.23, 1.0],
+                            [0.39, 0.29, 0.12, 1.0],
+                            [0.15, 0.23, 0.11, 1.0],
+                        ];
+                        a.tint_box(
+                            DETAIL,
+                            [x, y, -0.24],
+                            [x + 0.116, y + h, 0.17],
+                            colors[(row + col) % 4],
                         );
+                        for dy in [0.06, h - 0.05] {
+                            a.block(
+                                BRASS,
+                                [x + 0.006, y + dy, -0.249],
+                                [x + 0.110, y + dy + 0.012, -0.241],
+                            );
+                        }
                     }
                 }
             }
@@ -325,6 +348,15 @@ fn geometry(kind: StaticPropKind) -> Assembly {
         }
         FeastSetting => setting(&mut a, 0.0, 0.0, 0.0),
         WallSconce | FloorCandelabrum | TableCandelabrum => {}
+    }
+    let wall_offset = match kind {
+        Banner => 0.473,
+        Shield => 0.46,
+        Trophy => 0.28,
+        _ => 0.0,
+    };
+    for mesh in a.meshes.iter_mut().flatten() {
+        mesh.translate_by(Vec3::Z * wall_offset);
     }
     a
 }
@@ -506,6 +538,81 @@ fn parchment(a: &mut Assembly, x: f32, y: f32, z: f32, hx: f32, hz: f32) {
         );
     }
 }
+
+// Pantry dressing remains inside the same filled shelving envelope as books.
+fn pantry_contents(a: &mut Assembly) {
+    let clay = [0.48, 0.24, 0.12, 1.0];
+    let sack = [0.66, 0.55, 0.32, 1.0];
+    let bread = [0.63, 0.32, 0.10, 1.0];
+    for row in 0..4 {
+        let y = row as f32 * 0.55 + 0.08;
+        for (column, x) in [-0.56, -0.18, 0.20, 0.57].into_iter().enumerate() {
+            match (row + column) % 3 {
+                0 => {
+                    // Squared earthen jar, narrower shoulder, neck and lid.
+                    a.tint_box(
+                        DETAIL,
+                        [x - 0.13, y, -0.19],
+                        [x + 0.13, y + 0.23, 0.12],
+                        clay,
+                    );
+                    a.tint_box(
+                        DETAIL,
+                        [x - 0.10, y + 0.23, -0.15],
+                        [x + 0.10, y + 0.29, 0.08],
+                        clay,
+                    );
+                    a.block(
+                        BRASS,
+                        [x - 0.075, y + 0.29, -0.13],
+                        [x + 0.075, y + 0.32, 0.06],
+                    );
+                }
+                1 => {
+                    // Flour sack, folded neck and dark tied cord.
+                    a.tint_box(
+                        DETAIL,
+                        [x - 0.13, y, -0.20],
+                        [x + 0.13, y + 0.25, 0.12],
+                        sack,
+                    );
+                    a.tint_box(
+                        DETAIL,
+                        [x - 0.075, y + 0.25, -0.12],
+                        [x + 0.075, y + 0.31, 0.07],
+                        sack,
+                    );
+                    a.block(
+                        IRON,
+                        [x - 0.08, y + 0.255, -0.125],
+                        [x + 0.08, y + 0.27, -0.11],
+                    );
+                }
+                _ => {
+                    // A wooden serving board with two scored loaves.
+                    a.block(WOOD, [x - 0.15, y, -0.23], [x + 0.15, y + 0.035, 0.14]);
+                    for z in [-0.12, 0.05] {
+                        a.tint_box(
+                            DETAIL,
+                            [x - 0.12, y + 0.035, z - 0.06],
+                            [x + 0.12, y + 0.13, z + 0.06],
+                            bread,
+                        );
+                        for dx in [-0.06, 0.03] {
+                            a.tint_box(
+                                DETAIL,
+                                [x + dx, y + 0.131, z - 0.045],
+                                [x + dx + 0.022, y + 0.135, z + 0.045],
+                                sack,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn shield(a: &mut Assembly, x: f32, y: f32, z: f32, r: f32) {
     // Crossed boards form the stepped silhouette of a ceremonial shield.
     a.block(
@@ -616,6 +723,13 @@ mod tests {
             }
             for variant in 1..4 {
                 let parts = models.parts(kind, variant);
+                if kind == StaticPropKind::Bookcase && variant == 3 {
+                    for part in parts {
+                        unique.insert(part.mesh.id());
+                    }
+                    assert_ne!(parts[0].mesh.id(), canonical[0].mesh.id());
+                    continue;
+                }
                 assert_eq!(parts.len(), canonical.len());
                 for (part, base) in parts.iter().zip(canonical) {
                     assert_eq!(
@@ -744,5 +858,63 @@ mod tests {
             }
         }
         assert_eq!(checked, 39);
+    }
+}
+
+#[cfg(test)]
+mod placed_dressing_tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    #[test]
+    fn wall_details_touch_the_support_plane_without_entering_the_wall() {
+        for kind in [
+            StaticPropKind::Banner,
+            StaticPropKind::Shield,
+            StaticPropKind::Trophy,
+        ] {
+            let assembly = geometry(kind);
+            let mut back = f32::NEG_INFINITY;
+            for mesh in assembly.meshes.iter().flatten() {
+                let Some(VertexAttributeValues::Float32x3(points)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("positions")
+                };
+                for p in points {
+                    assert!(
+                        p[2] >= 0.1 && p[2] <= 0.50001,
+                        "{kind:?} leaves wall envelope: {p:?}"
+                    );
+                    back = back.max(p[2]);
+                }
+            }
+            assert!(
+                (back - 0.5).abs() < 1e-5,
+                "{kind:?} floats away from support"
+            );
+        }
+    }
+
+    #[test]
+    fn pantry_food_stays_inside_the_authoritative_shelving_envelope() {
+        let pantry = geometry_with_pantry(StaticPropKind::Bookcase, true);
+        let library = geometry(StaticPropKind::Bookcase);
+        let positions = |mesh: &Mesh| {
+            let Some(VertexAttributeValues::Float32x3(p)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("positions")
+            };
+            p.clone()
+        };
+        let food = positions(pantry.meshes[DETAIL].as_ref().unwrap());
+        assert_ne!(food, positions(library.meshes[DETAIL].as_ref().unwrap()));
+        let (lo, hi) = solid_members(StaticPropKind::Bookcase)[0];
+        for p in food {
+            for axis in 0..3 {
+                assert!(p[axis] >= lo[axis] && p[axis] <= hi[axis]);
+            }
+        }
     }
 }

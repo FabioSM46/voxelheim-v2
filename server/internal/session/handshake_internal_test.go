@@ -47,6 +47,14 @@ func TestUnspeakableRefusesWhatCannotBeAHello(t *testing.T) {
 			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(27), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
+		"V44 cannot enter a furnished V45 world": {
+			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(44), "Eivor"),
+			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
+		},
+		"immediately previous protocol": {
+			frame:  protocol.EncodeClientHello(vnet.ProtocolVersionCurrent-1, "Eivor"),
+			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
+		},
 		"first message is not a hello": {
 			frame:  protocol.EncodeServerWelcome(protocol.Welcome{TickRate: 20, ChunkSize: 32}),
 			reason: vnet.RejectReasonBAD_REQUEST,

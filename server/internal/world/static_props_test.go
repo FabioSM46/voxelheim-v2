@@ -195,3 +195,45 @@ func TestStaticPropCornersComposeKeepAndAuthoredTurns(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthoredFurnitureInventoryAndWardCoverage(t *testing.T) {
+	counts := map[StaticPropKind]int{}
+	for _, pose := range keepFurnitureProps {
+		counts[pose.Kind]++
+	}
+	for _, kind := range []StaticPropKind{PropChair, PropBench, PropThrone, PropBookcase, PropDesk, PropCounter, PropBarrel, PropEquipmentRack, PropCouncilTable, PropRug, PropRunner, PropBanner, PropShield, PropTrophy} {
+		if counts[kind] == 0 {
+			t.Errorf("missing furnishing family %d", kind)
+		}
+	}
+	if counts[PropBanquetTable] != 2 || len(keepFurnitureProps)+96 > MaxCapitalProps {
+		t.Fatal("banquet inventory or fixture headroom changed")
+	}
+	for _, seed := range []int64{0, 1, -42, 123, 8675309} {
+		for _, building := range CapitalAt(seed).Buildings {
+			if building.Kind != BuildingKeep {
+				continue
+			}
+			for turn := Facing(0); turn < 4; turn++ {
+				building.Facing = turn
+				props, err := placeStaticProps(seed, building, keepFurnitureProps)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, p := range props {
+					extent := p.Bounds(PropVisualBounds(p.Kind))
+					lo := ChunkOf(int64(math.Floor(extent.Min[0])), int64(math.Floor(extent.Min[1])), int64(math.Floor(extent.Min[2])))
+					hi := ChunkOf(int64(math.Floor(extent.Max[0])), int64(math.Floor(extent.Max[1])), int64(math.Floor(extent.Max[2])))
+					for x := lo.X; x <= hi.X; x++ {
+						for z := lo.Z; z <= hi.Z; z++ {
+							ward, ok := SettlementWarding(seed, Column{CX: x, CZ: z})
+							if !ok || ward.Kind != SettlementCapital {
+								t.Fatalf("slot %d visual envelope escapes capital ward", p.ID&511)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
