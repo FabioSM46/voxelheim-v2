@@ -1500,3 +1500,11 @@ mod tests {
         println!("{PRECIP_QUADS} quads rewritten in {each:.4} ms per frame");
     }
 }
+
+/// Test-only seam: castle captures exercise the production roof-column probe.
+#[cfg(test)]
+pub(super) fn castle_capture_sheltered(store: &ChunkStore, eye: Vec3) -> bool {
+    let mut shelter = PrecipitationShelter::default();
+    shelter.prepare(eye, 32, 8);
+    shelter.is_sheltered(store, eye)
+}

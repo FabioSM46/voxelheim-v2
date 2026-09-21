@@ -93,4 +93,5 @@ var keepFixtureProps = []StaticPropPose{
 	{Slot: 249, Kind: PropFloorCandelabrum, X: 12, Y: 21, Z: 27, Facing: 1},
 	{Slot: 250, Kind: PropFloorCandelabrum, X: 48, Y: 21, Z: 27, Facing: 1},
 	{Slot: 251, Kind: PropFloorCandelabrum, X: 48, Y: 28, Z: 27, Facing: 1},
+	{Slot: 252, Kind: PropTableCandelabrum, X: 20, Y: 15, Z: 21, Facing: 2}, // Council table
 }

@@ -127,8 +127,8 @@ fn castle_app(
     }
     if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
         let bytes = std::fs::read(path).expect("server snapshot export");
-        let crate::net::codec::Message::Snapshot(mut snapshot) =
-            crate::net::codec::decode(&bytes).expect("production snapshot decoder")
+        let crate::net::CaptureMessage::Snapshot(mut snapshot) =
+            crate::net::decode_for_capture(&bytes).expect("production snapshot decoder")
         else {
             panic!("expected snapshot envelope")
         };
@@ -191,6 +191,15 @@ fn castle_app(
         ))
         .id();
     let chunks = fixture.place_chunks(&mut app.world_mut().resource_mut::<ChunkStore>());
+    for (x, floors) in [(12.5, 4), (48.5, 5)] {
+        for floor in 0..floors {
+            let eye = fixture.canonical_point([x, floor as f32 * 7.0 + EYE_HEIGHT, 21.5]);
+            assert!(
+                precipitation::castle_capture_sheltered(app.world().resource::<ChunkStore>(), eye),
+                "barred room lost precipitation shelter"
+            );
+        }
+    }
     (app, camera, target, chunks)
 }
 

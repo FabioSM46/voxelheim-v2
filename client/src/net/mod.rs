@@ -55,6 +55,10 @@ use std::time::{Duration, Instant};
 
 pub use codec::WorldChange;
 
+// Test-only production decoder seam for server-authored castle capture fixtures.
+#[cfg(test)]
+pub(crate) use codec::{Message as CaptureMessage, decode as decode_for_capture};
+
 use bevy::prelude::*;
 
 #[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
