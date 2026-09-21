@@ -1,5 +1,8 @@
 # Capital castle circulation and room plan
 
+This records the architecture reservations. The delivered worldgen-37 windows,
+furnishings and lights are documented in [combined acceptance](reviews/castle-lighting-acceptance.md).
+
 Local coordinates are block cells, X increasing east, Z increasing towards the
 southern gate. Standing Y is the player's feet, relative to the building origin.
 All coordinate ranges below are inclusive. The envelope remains **63 × 63 × 68**;

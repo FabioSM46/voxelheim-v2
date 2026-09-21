@@ -115,11 +115,42 @@ fn castle_app(
     }))
     .insert_resource(InputMode::Playing)
     .init_resource::<CaptureReceipt>()
+    .init_resource::<SnapshotBuffer>()
     .init_resource::<Weather>()
     .init_resource::<sky::SkyClock>()
     .add_plugins(WorldPlugin)
     .add_systems(Startup, (sky::spawn_sun, sky::spawn_sky))
     .add_systems(Update, (sky::drive_the_sky, sky::follow_the_eye).chain());
+    static_props::register(&mut app);
+    if std::env::var("CASTLE_CAPTURE_LIGHTING").as_deref() != Ok("off") {
+        castle_lighting::register(&mut app);
+    }
+    if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
+        let bytes = std::fs::read(path).expect("server snapshot export");
+        let crate::net::CaptureMessage::Snapshot(mut snapshot) =
+            crate::net::decode_for_capture(&bytes).expect("production snapshot decoder")
+        else {
+            panic!("expected snapshot envelope")
+        };
+        if std::env::var("CASTLE_CAPTURE_CANDLES").as_deref() == Ok("off") {
+            snapshot.static_props.retain(|p| {
+                !matches!(
+                    p.kind,
+                    crate::net::StaticPropKind::WallSconce
+                        | crate::net::StaticPropKind::FloorCandelabrum
+                        | crate::net::StaticPropKind::TableCandelabrum
+                )
+            });
+        }
+        if std::env::var("CASTLE_CAPTURE_FURNITURE").as_deref() == Ok("off") {
+            snapshot.static_props.clear();
+        }
+        assert!(
+            app.world_mut()
+                .resource_mut::<SnapshotBuffer>()
+                .accept(snapshot, std::time::Instant::now())
+        );
+    }
     while app.plugins_state() != bevy::app::PluginsState::Ready {
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -150,6 +181,8 @@ fn castle_app(
         .world_mut()
         .spawn((
             WorldCamera,
+            bevy::camera::ShadowLodOrigin,
+            bevy::camera::Exposure::default(),
             Camera3d::default(),
             Camera {
                 clear_color: fixed.sky.into(),
@@ -170,6 +203,15 @@ fn castle_app(
         ))
         .id();
     let chunks = fixture.place_chunks(&mut app.world_mut().resource_mut::<ChunkStore>());
+    for (x, floors) in [(12.5, 4), (48.5, 5)] {
+        for floor in 0..floors {
+            let eye = fixture.canonical_point([x, floor as f32 * 7.0 + EYE_HEIGHT, 21.5]);
+            assert!(
+                precipitation::castle_capture_sheltered(app.world().resource::<ChunkStore>(), eye),
+                "barred room lost precipitation shelter"
+            );
+        }
+    }
     (app, camera, target, chunks)
 }
 
@@ -179,11 +221,18 @@ fn capture_castle_production_scene() {
     let _capture = draw_counts::acquire();
     let data =
         std::fs::read(std::env::var("CASTLE_CAPTURE_FIXTURE").expect("fixture path")).unwrap();
-    let fixture = CastleFixture::parse(
+    let mut fixture = CastleFixture::parse(
         &data,
         &[&[palette::AIR][..], &palette::PALETTE[..]].concat(),
     )
     .expect("validated server-authored fixture");
+    if std::env::var("CASTLE_CAPTURE_WINDOWS").as_deref() == Ok("blocked") {
+        for block in &mut fixture.blocks {
+            if matches!(*block, palette::IRON_GRILLE_X | palette::IRON_GRILLE_Z) {
+                *block = palette::STONE;
+            }
+        }
+    }
     let view = std::env::var("CASTLE_CAPTURE_VIEW").unwrap_or_else(|_| "exterior_gate".into());
     let (eye, target) = match view.as_str() {
         "exterior_gate" => ([31.5, 35.0, 130.0], [31.5, 26.0, 28.0]),
@@ -191,10 +240,17 @@ fn capture_castle_production_scene() {
         "west_stair" => ([8.5, EYE_HEIGHT, 37.5], [8.5, 7.0, 29.5]),
         "east_stair" => ([53.5, EYE_HEIGHT, 37.5], [53.5, 7.0, 29.5]),
         "bridge" => ([31.5, 21.0 + EYE_HEIGHT, 24.5], [46.5, 23.0, 24.5]),
-        "nw_lookout" => ([10.5, 35.0 + EYE_HEIGHT, 14.5], [8.0, 35.0, 10.5]),
+        "nw_lookout" => ([8.5, 35.0 + EYE_HEIGHT, 14.5], [10.5, 36.0, 18.5]),
         "sw_lookout" => ([20.5, 29.0 + EYE_HEIGHT, 34.5], [18.0, 29.0, 30.5]),
         "ne_lookout" => ([50.5, 41.0 + EYE_HEIGHT, 14.5], [48.0, 41.0, 10.5]),
         "se_lookout" => ([42.5, 35.0 + EYE_HEIGHT, 34.5], [40.0, 35.0, 30.5]),
+        "corridor" => ([16.5, EYE_HEIGHT, 28.5], [16.5, 1.5, 10.0]),
+        "landing" => ([11.5, 7.0 + EYE_HEIGHT, 28.5], [11.5, 11.0, 34.5]),
+        "window_patch" => ([12.5, 21.0 + EYE_HEIGHT, 24.5], [6.5, 22.0, 21.5]),
+        "window_east" => ([50.5, 21.0 + EYE_HEIGHT, 24.5], [56.5, 22.0, 21.5]),
+        "tower_study" => ([12.5, 35.0 + EYE_HEIGHT, 14.5], [10.5, 36.0, 12.5]),
+        "banquet" => ([54.5, EYE_HEIGHT, 29.5], [44.0, 1.2, 20.5]),
+        "study" => ([18.5, 7.0 + EYE_HEIGHT, 24.5], [22.5, 8.2, 14.5]),
         "throne" => ([46.5, 7.0 + EYE_HEIGHT, 21.5], [40.0, 9.0, 21.5]),
         _ => panic!("unknown fixed camera id"),
     };
@@ -225,6 +281,12 @@ fn capture_castle_production_scene() {
     let mut drained_frames = 0;
     for frame in 0..2000 {
         app.update();
+        if frame == 0 && std::env::var("CASTLE_CAPTURE_LIGHTING").as_deref() == Ok("off") {
+            let world = app.world_mut();
+            for mut light in world.query::<&mut DirectionalLight>().iter_mut(world) {
+                light.shadow_maps_enabled = false;
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
         let stats = *app.world().resource::<MeshStats>();
         if frame >= 200
@@ -258,6 +320,32 @@ fn capture_castle_production_scene() {
     let counts = draw_counts::take();
     assert!(counts[0] > 0, "production scene issued no main mesh draws");
     let mut manifest = capture_manifest(&app, &fixture, &config, counts);
+    let limits = app
+        .world()
+        .resource::<bevy::render::renderer::RenderDevice>()
+        .limits();
+    manifest.push_str(&format!("max_texture_array_layers={}\npoint_shadow_map_size={}\ndirectional_shadow_map_size={}\nexposure_ev100={}\ntonemapping=AcesFitted\ncamera_eye_local={:?}\ncamera_target_local={:?}\n", limits.max_texture_array_layers, app.world().resource::<bevy::light::PointLightShadowMap>().size, app.world().resource::<bevy::light::DirectionalLightShadowMap>().size, bevy::camera::Exposure::default().ev100, config.eye, config.target));
+    manifest.push_str(&capture_costs(&mut app));
+    manifest.push_str(&format!(
+        "lighting={}\nwindows={}\n",
+        std::env::var("CASTLE_CAPTURE_LIGHTING").unwrap_or_else(|_| "on".into()),
+        std::env::var("CASTLE_CAPTURE_WINDOWS").unwrap_or_else(|_| "open".into())
+    ));
+    if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        manifest.push_str(&format!(
+            "snapshot_file={name}\nfurniture={}\n",
+            if std::env::var("CASTLE_CAPTURE_FURNITURE").as_deref() == Ok("off") {
+                "off"
+            } else {
+                "on"
+            }
+        ));
+    }
     if let Ok(path) = std::env::var("CASTLE_CAPTURE_TRACE") {
         let name = std::path::Path::new(&path)
             .file_name()
@@ -544,4 +632,90 @@ fn capture_manifest(
         adapter.driver_info.replace(['\n', '\r'], " "),
         adapter.backend
     )
+}
+
+// Synchronized CPU+GPU frame latency after meshing and pipeline warmup; not GPU-only timing.
+fn capture_costs(app: &mut App) -> String {
+    let mut millis = Vec::with_capacity(120);
+    for _ in 0..120 {
+        let started = std::time::Instant::now();
+        app.update();
+        app.sub_app(bevy::render::RenderApp)
+            .world()
+            .resource::<bevy::render::renderer::RenderDevice>()
+            .poll(bevy::render::render_resource::PollType::wait_indefinitely())
+            .unwrap();
+        millis.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    millis.sort_by(f64::total_cmp);
+    let world = app.world_mut();
+    let (entities, props, candles) = capture_scene_counts(world);
+    let lights = world
+        .query::<&PointLight>()
+        .iter(world)
+        .filter(|l| l.intensity > 0.0)
+        .count();
+    let shadowed = world
+        .query::<&PointLight>()
+        .iter(world)
+        .filter(|l| l.intensity > 0.0 && l.shadow_maps_enabled)
+        .count();
+    format!(
+        "frame_samples=120\nframe_metric=synchronized_cpu_gpu_ms\nframe_p50_ms={:.3}\nframe_p95_ms={:.3}\nentities={}\nstatic_prop_roots={}\nactive_point_lights={}\nshadowed_point_lights={}\ncandles={}\ncandle_fixture_roots={}\n",
+        millis[59],
+        millis[113],
+        entities,
+        props,
+        lights,
+        shadowed,
+        if candles == 0 { "off" } else { "on" },
+        candles
+    )
+}
+
+fn capture_scene_counts(world: &mut World) -> (u32, usize, usize) {
+    // Bevy 0.19.1 forwards entity_count to count_spawned, not allocator len.
+    let entities = world.entity_count();
+    let (props, candles) = world
+        .query::<&static_props::StaticPropRoot>()
+        .iter(world)
+        .fold((0, 0), |(props, candles), root| {
+            use crate::net::StaticPropKind::{FloorCandelabrum, TableCandelabrum, WallSconce};
+            (
+                props + 1,
+                candles
+                    + usize::from(matches!(
+                        root.0.kind,
+                        WallSconce | FloorCandelabrum | TableCandelabrum
+                    )),
+            )
+        });
+    (entities, props, candles)
+}
+
+#[test]
+fn capture_counts_live_entities_and_retained_candles_not_allocator_slots() {
+    use crate::net::{BlockCoord, Facing, StaticPropKind, StaticPropState};
+    let mut world = World::new();
+    // Bevy 0.19 stores resources as live entities, including its bootstrap filter.
+    let baseline = world.entity_count();
+    let root = |prop_id, kind| {
+        static_props::StaticPropRoot(StaticPropState {
+            prop_id,
+            kind,
+            origin: BlockCoord { x: 0, y: 0, z: 0 },
+            facing: Facing::North,
+            variant: 0,
+        })
+    };
+    let furniture = world.spawn(root(1, StaticPropKind::Bookcase)).id();
+    let candle = world.spawn(root(2, StaticPropKind::WallSconce)).id();
+    let vacant = world.spawn_empty().id();
+    world.despawn(vacant);
+    assert!(world.entities().len() > world.entity_count());
+    assert_eq!(capture_scene_counts(&mut world), (baseline + 2, 2, 1));
+    world.despawn(candle);
+    assert_eq!(capture_scene_counts(&mut world), (baseline + 1, 1, 0));
+    world.despawn(furniture);
+    assert_eq!(capture_scene_counts(&mut world), (baseline, 0, 0));
 }

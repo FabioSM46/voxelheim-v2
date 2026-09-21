@@ -1,7 +1,8 @@
 //! Bounded candle selection. Geometry and emission remain visible when a light is not selected.
 
-/// Candle shadow maps have six faces each. Eight is an upper limit, not a device promise.
-pub(super) const MAX_LIGHTS: usize = 8;
+/// Profiling chose four shadowed fixtures, below the eight-light design ceiling.
+/// Each uses six texture layers; device capacity may lower this further.
+pub(super) const MAX_LIGHTS: usize = 4;
 pub(super) const RANGE: f32 = 24.0;
 const INTERVAL: f64 = 0.2;
 const MAX_VISIBILITY_RAYS: usize = 32;
@@ -122,7 +123,7 @@ mod tests {
         );
         assert_eq!(seen, (1..=32).collect::<Vec<_>>());
         state.update(0.0, 48, &candidates);
-        assert_eq!(state.ids, (25..=32).collect::<Vec<_>>());
+        assert_eq!(state.ids, (25..25 + MAX_LIGHTS as u64).collect::<Vec<_>>());
         assert_eq!(
             state.refine_visibility(0.1, &mut candidates, |_| panic!("not due")),
             0
@@ -156,7 +157,7 @@ mod tests {
             candidate(22, -1.0),
         ]);
         assert!(state.update(0.0, 256, &candidates));
-        assert_eq!(state.ids, (1..=8).collect::<Vec<_>>());
+        assert_eq!(state.ids, (1..=MAX_LIGHTS as u64).collect::<Vec<_>>());
         assert!(state.update(0.2, 12, &candidates));
         assert_eq!(state.ids, vec![1, 2]);
         assert!(state.update(0.4, 5, &candidates));

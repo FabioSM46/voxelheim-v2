@@ -51,6 +51,26 @@ class CaptureManifestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 capture.manifest(self.directory)
 
+    def test_snapshot_is_bound_to_the_same_source_and_fixture(self):
+        snapshot = self.directory / "capital.vhc.snapshot"
+        snapshot.write_bytes(b"synthetic snapshot")
+        metadata = {"source_commit": self.commit, "sha256": capture.sha256(snapshot),
+                    "fixture_sha256": capture.sha256(self.fixture)}
+        sidecar = Path(str(snapshot) + ".json")
+        sidecar.write_text(json.dumps(metadata))
+        self.report.write_text(self.report.read_text() + "snapshot_file=capital.vhc.snapshot\n")
+        self.assertEqual(capture.manifest(self.directory)["captures"][0]["snapshot"]["name"], snapshot.name)
+        for field in metadata:
+            changed = dict(metadata)
+            changed[field] = "b" * len(changed[field])
+            sidecar.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "snapshot source or digest"):
+                capture.manifest(self.directory)
+        sidecar.write_text(json.dumps(metadata))
+        snapshot.write_bytes(b"changed snapshot")
+        with self.assertRaisesRegex(ValueError, "snapshot source or digest"):
+            capture.manifest(self.directory)
+
     def test_rejects_trace_holes_and_nonfinite_positions(self):
         path = self.directory / "route.tsv"
         header = "tick\tlocal_feet_x\tlocal_feet_y\tlocal_feet_z\n"

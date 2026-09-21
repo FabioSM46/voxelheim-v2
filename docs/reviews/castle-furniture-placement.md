@@ -56,11 +56,7 @@ The earlier solid-provider tests continue to cover saved arrival/welcome parity,
 respawn obstruction, complete-set snapshot lifetime, NPC/trade visibility, and
 fast projectiles against thin chair legs while allowing actual gaps.
 
-## Remaining acceptance
+## Combined acceptance
 
-This is the placement and compatibility part, not the visual acceptance report.
-The follow-up uses the production castle capture harness to feed these actual
-server-authored descriptors through the client snapshot consumer, inspect the
-banquet/throne/study/tower views and record matched rendering costs. #1204 owns
-window openings, candle fixtures and combined day/night acceptance. No light
-fixture is activated by this catalogue.
+[Combined acceptance](castle-lighting-acceptance.md) records final room captures,
+night walks and rendering costs, including #1204's 92 fixtures (209 total roots).

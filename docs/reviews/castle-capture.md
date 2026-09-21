@@ -1,5 +1,8 @@
 # Castle architecture capture and acceptance — issue #1202
 
+For worldgen 37 furnishing/lighting results see [combined acceptance](castle-lighting-acceptance.md).
+This architecture baseline predates that dressing.
+
 The final architecture remains **63 × 63 × 68 blocks**, worldgen **36**. Its
 floor plan, furniture reservations and exact standing-height exception for the
 E7 audience dais are in [CASTLE_PLAN.md](../CASTLE_PLAN.md). The nine main floors,
@@ -183,3 +186,21 @@ so they report an observed cost smoke check, not an isolated architectural
 regression or speedup. The final acceptance delivery changes no generation rule,
 protocol or worldgen version; the geometry deliveries already moved worldgen
 31 through 36 and updated the applicable golden/version expectations.
+
+## Furnished snapshot and matched cost capture
+
+Export the real descriptor snapshot from the same fixture/source:
+
+```sh
+CASTLE_CAPTURE_FIXTURE=<output>/capital.vhc \
+CASTLE_CAPTURE_SOURCE_COMMIT=$(git rev-parse HEAD) \
+go -C server test ./internal/game -run '^TestExportCastleCaptureSnapshot$' -count=1
+```
+
+Pass `CASTLE_CAPTURE_SNAPSHOT=<output>/capital.vhc.snapshot` to the client.
+The production decoder/buffer consumes the server catalogue; review turns rotate
+origins and facing together. `CASTLE_CAPTURE_FURNITURE=off` clears all descriptors.
+Manifests bind snapshot source/digest to the fixture. Costs use 120 warmed,
+GPU-synchronized updates and actual main/shadow/prepass mesh submissions.
+`candles` and `candle_fixture_roots` report retained fixture roots after filtering;
+`lighting` separately controls their renderer and directional shadows.

@@ -63,14 +63,15 @@ func TestEverySchematicHoldsOnlyTheThingsADrawingCanMean(t *testing.T) {
 		Thatch:      true,
 
 		// #680's eight, spent by the keep and by nothing else yet.
-		Basalt:                true,
-		BlackBrick:            true,
-		BlackBrickWorn:        true,
-		SmoothBlackStone:      true,
-		SlateTile:             true,
-		DarkTimber:            true,
-		PaleTimber:            true,
-		DarkGlass:             true,
+		Basalt:           true,
+		BlackBrick:       true,
+		BlackBrickWorn:   true,
+		SmoothBlackStone: true,
+		SlateTile:        true,
+		DarkTimber:       true,
+		PaleTimber:       true,
+		DarkGlass:        true,
+		IronGrilleX:      true, IronGrilleZ: true,
 		SlateStairNorthBottom: true,
 		SlateStairEastBottom:  true,
 		SlateStairSouthBottom: true,
@@ -127,7 +128,7 @@ func TestMustSchematicRefusesADrawingThatIsNotABox(t *testing.T) {
 		},
 		{
 			name:   "a rune outside the legend",
-			layers: [][]string{{"#X", "##"}},
+			layers: [][]string{{"#?", "##"}},
 		},
 		{
 			name:    "an anchor outside the drawing",
@@ -861,6 +862,9 @@ func TestEveryRoomADrawingHasIsReachableFromItsDoorway(t *testing.T) {
 					if !roofed {
 						continue
 					}
+					if drawing.kind == BuildingKeep && castleTowerWindowReveal(s, x, y, z) {
+						continue
+					}
 					if sealed++; sealed <= 3 {
 						t.Errorf("%v has a roofed floor cell at (%d, %d, %d) that nothing can walk to",
 							drawing.kind, x, y, z)
@@ -998,6 +1002,7 @@ func TestTheCastleRunesNameTheCastleMaterials(t *testing.T) {
 		'D': DarkTimber,
 		'W': PaleTimber,
 		'G': DarkGlass,
+		'X': IronGrilleX, 'Z': IronGrilleZ,
 		'U': RuneStone, 'v': PortalVeil, 'O': PortalHeart,
 		'n': SlateStairNorthBottom, 'e': SlateStairEastBottom,
 		's': SlateStairSouthBottom, 'w': SlateStairWestBottom,

@@ -105,12 +105,12 @@ pub(super) fn animate_flames(time: Res<Time>, mut flames: Query<(&CandleFlame, &
     }
 }
 
-/// Initial tuning only; final production-geometry night captures decide the accepted values.
+/// Local illumination calibrated against the production camera exposure; ambient stays unchanged.
 pub(super) fn light_settings(kind: Fixture) -> (f32, f32) {
     match kind {
-        Fixture::Wall => (8000.0, 9.0),
-        Fixture::Floor => (16000.0, 11.0),
-        Fixture::Table => (12000.0, 9.0),
+        Fixture::Wall => (120_000.0, 9.0),
+        Fixture::Floor => (240_000.0, 11.0),
+        Fixture::Table => (160_000.0, 9.0),
     }
 }
 

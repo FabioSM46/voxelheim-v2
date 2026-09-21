@@ -257,6 +257,8 @@ var schematicLegend = map[rune]Block{
 	'D': DarkTimber,
 	'W': PaleTimber,
 	'G': DarkGlass,
+	'X': IronGrilleX,
+	'Z': IronGrilleZ,
 	'n': SlateStairNorthBottom,
 	'e': SlateStairEastBottom,
 	's': SlateStairSouthBottom,

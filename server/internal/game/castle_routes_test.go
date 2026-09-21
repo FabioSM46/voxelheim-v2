@@ -53,6 +53,14 @@ func (c castleTerrain) Block(x, y, z int64) (world.Block, bool) {
 			break
 		}
 	}
+	if c.turn%2 == 1 {
+		switch b {
+		case world.IronGrilleX:
+			b = world.IronGrilleZ
+		case world.IronGrilleZ:
+			b = world.IronGrilleX
+		}
+	}
 	return b, true
 }
 func (c castleTerrain) Solid(x, y, z int64) bool { b, _ := c.Block(x, y, z); return world.Solid(b) }
@@ -106,6 +114,14 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 			player.step(dt, c)
 			if capture {
 				trace = append(trace, player.pos)
+			}
+			for _, fixture := range c.props.props {
+				if fixture.state.Kind != vnet.StaticPropKindFloorCandelabrum {
+					continue
+				}
+				if propBoxesTouch(player.box(), castleFixtureBox(fixture)) {
+					t.Fatalf("walking body crosses floor candle %d at %v", fixture.state.PropID&511, player.pos)
+				}
 			}
 			if overlaps(c, player.box()) {
 				t.Fatalf("body overlaps actual castle at %v", player.pos)
@@ -185,13 +201,13 @@ func TestCastleMainFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
 				for i := len(route) - 2; i >= 0; i-- {
 					route = append(route, route[i])
 				}
-				walkCastle(t, c, route)
+				t.Run(fmt.Sprintf("west%t/lane0", west), func(t *testing.T) { walkCastle(t, c, route) })
 				for i := range route {
 					if route[i][0] == near || route[i][0] == far {
 						route[i][0]++
 					}
 				}
-				walkCastle(t, c, route)
+				t.Run(fmt.Sprintf("west%t/lane1", west), func(t *testing.T) { walkCastle(t, c, route) })
 			}
 		})
 	}
@@ -349,6 +365,20 @@ func TestCastleAudienceDaisIsReachedWithoutJumping(t *testing.T) {
 		}
 		for turn := range 4 {
 			t.Run(fmt.Sprintf("lane%.1f/rotation%d", z, turn), func(t *testing.T) { walkCastle(t, castleTerrain{turn: turn}, route) })
+		}
+	}
+}
+
+// The crossing must remain usable after both wings receive their final dressing.
+func TestCastleBridgeIsCrossedWithoutJumpingInEveryRotation(t *testing.T) {
+	for lane := range 2 {
+		z := 24.5 + float64(lane)
+		route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {14.5, 0, 43.5}, {14.5, 0, 37.5}, {7.5, 0, 37.5}, {7.5, 7, 29.5}, {11.5, 7, 29.5}, {11.5, 14, 37.5}, {7.5, 14, 37.5}, {7.5, 21, 29.5}, {14.5, 21, 29.5}, {14.5, 21, z}, {46.5, 21, z}}
+		for i := len(route) - 2; i >= 0; i-- {
+			route = append(route, route[i])
+		}
+		for turn := range 4 {
+			t.Run(fmt.Sprintf("lane%d/rotation%d", lane, turn), func(t *testing.T) { walkCastle(t, castleTerrain{turn: turn}, route) })
 		}
 	}
 }
