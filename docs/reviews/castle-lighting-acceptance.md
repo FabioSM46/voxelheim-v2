@@ -12,35 +12,28 @@ one grille layer. NW/SW/SE tower openings face south; NE faces north to avoid
 its wing roof. Exterior slate backing is cleared too. Sills, headers, roofs,
 piers and stair guards remain intact.
 
-Authoritative walking tests use the complete catalogue, both lanes and all four
-rotations across the main floors, bridge, curtain, dais and towers. They check
-movement and candle overlap at every tick, without jump or teleport corrections.
-Placement tests verify rotated mounts, support and separation from furniture and
-architecture. Existing arrival/respawn, ward, collision and lifecycle tests pass.
-Aperture tests check full wall depth and outward rays on every platform; only
-exact barred tower reveals are exempted from room connectivity. The production
-precipitation shelter probe passes in all nine main rooms in each review rotation.
+Tests cover actual furnished movement in four rotations and both lanes, fixture
+mount/support/overlap, full-depth apertures and unchanged authority/lifecycle.
+The production precipitation probe confirms shelter in all nine main rooms in
+every review rotation. Only exact barred tower reveals are excluded from room
+connectivity; they are window sills, not rooms.
 
 ## Sources and settings
 
-The 32 still captures and seven videos use `5706ab3`; extra west-wing and bridge
-videos use `0bdc373`, which changes only route tests. Client source is identical;
-fixture and encoded snapshot bytes were compared and are identical. The production
-client decodes the real server snapshot. `castle-capture-manifest.py` verifies
-clean source, fixture/snapshot hashes, complete traces, video frames and output
-hashes. Main views use the generated capital neighbourhood; window comparisons
-use explicitly labelled isolated rotations. Camera poses live in `castle_capture.rs`.
+32 stills and seven videos use `5706ab3`; extra west-wing/bridge videos use
+`0bdc373` (route tests only). Client source, generated fixture and encoded snapshot
+bytes match. The production decoder consumes that snapshot. Manifests verify clean
+source, hashes, traces and frames. Main views use generated surroundings; window
+pairs use labelled isolated rotations. Poses live in `castle_capture.rs`.
 
 1280 × 720; default FOV; EV100 9.7; AcesFitted; clear weather; day/night ticks
 6000/18000. Adapter: AMD Radeon RX 9070 XT (RADV GFX1201), Vulkan, Mesa 26.2.3;
 8192 texture-array layers. Directional shadows: two cascades, 64 blocks, 2048 map.
 Point shadows: 512 pixels per face.
 
-The [pool](castle-candle-pool.md) selects at most **four** shadowed lights within
-24 blocks, further limited by device capacity and other point shadows. Ranking
-uses at most 32 sight rays at 5 Hz; unselected flames remain visible.
-Wall/floor/table intensity is 120,000/240,000/160,000 in Bevy's lumen scale, tuned
-for production exposure. Existing campfires and portals still disable shadows.
+The [pool](castle-candle-pool.md) caps shadowed lights at four, with device/range
+limits and bounded visibility ranking. Unselected flames remain visible. Its
+intensity tuning and unchanged campfire/portal behavior are documented there.
 GPU comparison found that the sky dome occluded sunlight after shadows were
 enabled. `NotShadowCaster` on celestial meshes fixes this, with a regression test;
 solar motion, ambient curves and weather remain unchanged.
@@ -92,9 +85,7 @@ Eight lights were tried and reduced to four after profiling the shadow workload.
 
 Matched day/night views cover gate, banquet, throne, study, corridor, landing,
 NW lookout and tower study; eight cost views and eight window images complete
-32 stills. Nine night videos include the exact return to the gate. Export names
-now distinguish wings/lanes: the older main-floor filename contained the east
-second lane. Traces are never joined or edited.
+32 stills. Nine night videos include the exact return to the gate. Traces have distinct wing/lane names and are never joined or edited.
 
 | Route | Trace ticks | Video frames | Highest feet Y |
 | --- | --- | --- | --- |
@@ -115,15 +106,12 @@ and candle mounts are recognizable in the fixed player-height views.
 
 ## Reproduction
 
-Follow [the harness instructions](castle-capture.md), using committed source and
-a dedicated Cargo target directory per worktree to avoid stale binary reuse.
-Export traces with `CASTLE_CAPTURE_TRACE_DIR` and game-test filter
-`TestCastle(MainFloors|CourtStair|WesternSpire|EasternSpire|AudienceDais|Bridge)`.
-Use each complete TSV as `CASTLE_CAPTURE_TRACE`, tick 18000, then encode at 10 fps.
-
-For costs use views `banquet`/`exterior_gate`, tick 6000, and all off/on combinations
-of `CASTLE_CAPTURE_LIGHTING` and `CASTLE_CAPTURE_FURNITURE`. For windows export
-isolated fixtures with `CASTLE_CAPTURE_REVIEW_TURN`, use the table's view/tick,
-set `CASTLE_CAPTURE_CANDLES=off` and compare `CASTLE_CAPTURE_WINDOWS=open/blocked`.
-Use fresh output names and validate every directory with the manifest script.
-Large PNG/MP4/fixture outputs remain local review artifacts.
+Use [the harness instructions](castle-capture.md), committed source and a dedicated
+Cargo target per worktree. Export traces with `CASTLE_CAPTURE_TRACE_DIR` and filter
+`TestCastle(MainFloors|CourtStair|WesternSpire|EasternSpire|AudienceDais|Bridge)`;
+replay complete TSVs at tick 18000 and encode at 10 fps. Cost pairs use the table's
+views/settings and `CASTLE_CAPTURE_LIGHTING`/`CASTLE_CAPTURE_FURNITURE` switches.
+For windows, export isolated fixtures with `CASTLE_CAPTURE_REVIEW_TURN`, use the
+window table's view/tick, `CASTLE_CAPTURE_CANDLES=off` and
+`CASTLE_CAPTURE_WINDOWS=open/blocked`. Validate fresh output directories with the
+manifest script. Bulky images, videos and fixtures remain local review artifacts.
