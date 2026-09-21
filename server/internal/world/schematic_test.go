@@ -862,6 +862,9 @@ func TestEveryRoomADrawingHasIsReachableFromItsDoorway(t *testing.T) {
 					if !roofed {
 						continue
 					}
+					if drawing.kind == BuildingKeep && castleTowerWindowReveal(s, x, y, z) {
+						continue
+					}
 					if sealed++; sealed <= 3 {
 						t.Errorf("%v has a roofed floor cell at (%d, %d, %d) that nothing can walk to",
 							drawing.kind, x, y, z)

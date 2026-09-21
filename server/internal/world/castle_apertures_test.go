@@ -85,7 +85,7 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 		}
 	}
 
-	for facing := North; facing <= West; facing++ {
+	for facing := Facing(0); facing < 4; facing++ {
 		want := IronGrilleZ
 		if facing%2 == 1 {
 			want = IronGrilleX
@@ -94,4 +94,20 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 			t.Fatal("window grille does not rotate")
 		}
 	}
+}
+
+// These two-high, barred reveals are window sills, not rooms. The rectangular
+// drawing boundary is not the facade of an inset turret. Keep this exemption
+// exact and require the actual grille; the aperture test above independently
+// verifies every cell and the clear outward ray.
+func castleTowerWindowReveal(s *Schematic, x, y, z int) bool {
+	for _, w := range []struct{ cx, y, z0, z1, grille int }{
+		{10, 36, 19, 19, 18}, {20, 30, 38, 38, 37}, {42, 36, 39, 39, 38}, {50, 42, 4, 8, 5},
+	} {
+		if y == w.y && x >= w.cx-1 && x <= w.cx+1 && z >= w.z0 && z <= w.z1 &&
+			s.At(x, y, w.grille) == IronGrilleX && s.At(x, y+1, w.grille) == IronGrilleX {
+			return true
+		}
+	}
+	return false
 }
