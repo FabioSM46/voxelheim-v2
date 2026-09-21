@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -18,7 +17,7 @@ func TestInterruptedPlayerMigrationRefusesBeforeRecreatingPlayers(t *testing.T) 
 			s, dir := openStore(t)
 			c := newCharacter(t, s, testID(1), "Eivor")
 			rec, _, _ := s.Load(c.ID)
-			old := encodeRecordLayout(rec, 10, int(protocol.InventorySlots))
+			old := encodeRecordLayout(rec, 10, 40)
 			name := filepath.Base(s.recordPath(c.ID))
 			if err := os.WriteFile(s.recordPath(c.ID), old, 0600); err != nil {
 				t.Fatal(err)
@@ -71,7 +70,7 @@ func TestMigrationMarkerFailureDoesNotMoveSourceRecords(t *testing.T) {
 			s, dir := openStore(t)
 			c := newCharacter(t, s, testID(1), "Eivor")
 			rec, _, _ := s.Load(c.ID)
-			old := encodeRecordLayout(rec, 10, int(protocol.InventorySlots))
+			old := encodeRecordLayout(rec, 10, 40)
 			if err := os.WriteFile(s.recordPath(c.ID), old, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -104,7 +103,7 @@ func TestCompletedMigrationSyncFailureKeepsTheStartupFence(t *testing.T) {
 	s, dir := openStore(t)
 	c := newCharacter(t, s, testID(1), "Eivor")
 	rec, _, _ := s.Load(c.ID)
-	if err := os.WriteFile(s.recordPath(c.ID), encodeRecordLayout(rec, 10, int(protocol.InventorySlots)), 0600); err != nil {
+	if err := os.WriteFile(s.recordPath(c.ID), encodeRecordLayout(rec, 10, 40), 0600); err != nil {
 		t.Fatal(err)
 	}
 	writes := 0

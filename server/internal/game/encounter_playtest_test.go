@@ -400,7 +400,7 @@ func playtestLife(t *testing.T, spawn [3]float32, kit playtestKit, level uint16)
 	life.Experience = experienceBefore(level)
 	life.Health = maxHealthFor(level)
 	sword := itemRegistry[kit.sword]
-	life.Slots[0] = protocol.InventoryStack{ItemID: uint16(kit.sword), Count: 1,
+	life.Slots[equipmentMainHand] = protocol.InventoryStack{ItemID: uint16(kit.sword), Count: 1,
 		Durability: sword.maxDurability, MaxDurability: sword.maxDurability}
 	return life
 }
@@ -822,7 +822,7 @@ func (pt *playtest) act(b *playtestBot) {
 	})
 	if gap <= SwordReach-0.05 && pt.cfg.policy != policyEvader {
 		// Refused while the blade recovers, which is the attack cadence itself.
-		_, _ = b.p.Attack(protocol.AttackRequest{Slot: 0, ClientTick: b.clientTick})
+		_, _ = b.p.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: b.clientTick})
 	}
 }
 

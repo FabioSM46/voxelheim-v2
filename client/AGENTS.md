@@ -66,6 +66,8 @@ keeps meaning "everything the client is".
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
 | `player/birds.rs` | the ambient birds — the species table, the flight paths and the flap — chosen by `Ambience` | be sent, be hit, be targeted, be counted by anything, or be chosen by anything the server said |
+| `player/critters.rs` | the ambient ground creatures — the species table, the gaits, the surface they stand on, the trunk that ends a life and the model — chosen by `Ambience` | be sent, be hit, be targeted, be collided with, be counted by anything, or be chosen by anything the server said |
+| `player/watchers.rs` | the distant wolves' eyes — a pair of lights placed once on the far snow after dark, fading out as the eye comes near and removed at a hard distance floor — chosen by `Ambience` and the howl's hour | move toward the player, have a body, be hit or targeted or counted, or be chosen by anything the server said |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, the client-side hostility column that colours an over-head bar, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
@@ -134,19 +136,39 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are six**:
+**Every edge from `player` to `world` is narrow and read-only, and there are eight**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
 `player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
 one block that changes what the sky looks like; `player/wards.rs` reads that same answer to hide
 its presentation under water; `player/ambience.rs` reads a coarse lattice of loaded columns to
-describe their cosmetic ground look; and `player/items.rs` asks `palette` for a terrain
+describe their cosmetic ground look; `player/birds.rs` reads one bounded column under each bird,
+because an altitude measured from the eye's anchor says nothing about the ridge the bird is
+crossing and the clearance is what holds it clear of one; `player/critters.rs` reads the same kind
+of column under each critter for the opposite sign — a bird is lifted *off* the surface and a
+critter is placed *on* it — plus a bounded ring search for the trunk that ends a critter's life;
+and `player/items.rs` asks `palette` for a terrain
 swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
 local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
-state, and no edge points back from `world` to `player`.** A seventh, in either direction, is a
-design question rather than an import. The five that read the store all resolve their voxel
-through `ChunkStore::block_at`, the one place a world coordinate becomes a block id.
+state, and no edge points back from `world` to `player`.** A ninth, in either direction, is a
+design question rather than an import.
+
+**This count said six and had been wrong since #640**, which gave the flock its ground clearance
+and therefore gave `player/birds.rs` a `ChunkStore` read that nobody added to this paragraph. It
+was found by #1190, the issue that added the seventh, whose author went looking for the design
+question the sentence above promises and discovered that the arithmetic was already stale. The
+lesson is the one this repository keeps paying for: **a number in prose is a claim about the
+world, and a claim nothing checks goes quietly out of date.** It is also why this one is worth
+keeping as a count rather than softening to "several" — a wrong number is noticed and a vague one
+never is.
+
+The seven that read the store resolve their voxel through `ChunkStore::block_at` or through the
+two questions `world/mod.rs` owns about one — `solid_at` for what stops a body, `targetable_at`
+for what the crosshair finds. Which of the three a reader wants is the reader's question and not a
+detail: `birds.rs` deliberately does **not** use `solid_at`, because a bird must be seen to clear
+a lake surface and a leaf canopy while solidity excludes both, and `critters.rs` deliberately
+does, because what a squirrel stands on is exactly what would hold a body up.
 
 **The last of those is the client's one opinion about what an item looks like, and every
 renderer reads it rather than owning a second one.** `items::item_linear_rgba` answers which
@@ -690,12 +712,15 @@ The client samples the controls, sends what the player is *trying* to do at the 
   complete state is the only thing that changes the displayed contents. The welcome also
   announces a non-empty trailing equipment subset; the pack grid draws only the slots between
   the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
-  head/chest/legs/off-hand column beside the pack and routes every press through the same slot-index
-  message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy;
-  because no off-hand item exists yet, a non-off-hand drop onto that fourth cell sends nothing.
-  The four worn ids in a described appearance select optional head, chest and legs overlays on
-  world bodies while preserving the off-hand id without adding geometry. That renderer
-  reads only the server's latest description; it never infers equipment from the local pack.
+  head/chest/legs/off-hand/main-hand column beside the pack and routes every press through the same slot-index
+  message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy,
+  and a drop onto the off-hand cell of an item that table does not route there sends nothing.
+  Every worn slot is found through `player::inventory::equipment_slot` and a named offset
+  (`OFF_HAND_OFFSET`), never a literal `first + n`, so a slot the server appends after the
+  off-hand moves nothing. The five worn ids in a described appearance select optional head,
+  chest and legs overlays and the wooden shield on world bodies; the main-hand id (V44) is
+  decoded and carried on `Worn`, and no body draws it yet. That renderer reads only the
+  server's latest description; it never infers equipment from the local pack.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
   same two-snapshot buffer as player bodies. Proximity and clicks are not inputs. Spin and bob
@@ -1217,6 +1242,24 @@ into one mesh and carry absolute vertex colours — skin from the local player's
 from this table — under one white material. One stable mesh asset is rebuilt in place only when
 the selected item or skin colour changes, so arbitrary server colours cannot grow a cache and all
 three swing shapes still move one transform.
+
+**The bow is a pure function of a draw fraction, and every surface draws it at zero** (#1230).
+`hands::bow_mesh_drawn(length, draw)` pulls the string's nock back from the brace height to
+`BOW_DRAW_LENGTH` behind the grip and flexes both limbs toward it, with the string built from the
+same tip positions as the limbs so it is tied to both at every value; `bow_mesh` is that at `0.0`,
+and it is what the hand, the ground drop and the body's fist draw. The rule above decides how a draw
+animation may use it: **quantised rebuilds, not a posed string.** It builds the bow at a handful of
+fractions once, as that many stable assets, and swaps the handle. A pose cannot do it, because the
+string is merged into the same mesh as limbs that flex with it.
+
+**The arrow is one mesh on every surface, the flight included** (#1231). `hands::arrow_mesh(length)`
+is a square wooden shaft in the arrow row's colour, a bone point and two crossed vanes of dark
+fletching behind a short nock — point up, centred, in absolute vertex colours, with every coordinate
+on the neutral band. The hand stands it on its nock in the fist; the ground drop and the body's fist
+lay it flat; `projectiles.rs` turns it point-forward at `ARROW_LENGTH` under a white material, so
+the arrow in flight is no longer one bone colour over the whole of it and the arrow a player picks
+up is the one they shot. The arrow nocked on a drawing bow builds this same mesh rather than a
+sixth arrow.
 
 **A sword's grip is turned wood, and the wood is reached by division rather than written down.**
 The gladius' three furniture pieces were boxes; the grip is now a cylinder of `GRIP_SIDES`
@@ -3230,10 +3273,10 @@ Recorded here so the next reader does not mistake them for oversights:
 
   **The column is explicit per row and is never derived from `ItemColour`**, which is the finding
   that decided the shape of it. `ItemColour::Block(palette::LOG)` is worn by the log, the campfire,
-  the wooden shield, the bow and the sceptre — and also by the **axe**, whose swatch is the ground
-  it works rather than what it is made of, and by the **leather patch**, which is bark-coloured
-  worked hide. Two of those seven are not wood, so a livery inferred from the colour would grain
-  them both.
+  the wooden shield, the bow, the sceptre and the three implements' hafts — and also by the
+  **leather patch**, which is bark-coloured worked hide and not wood, so a livery inferred from the
+  colour would grain it. (The axe was the second such row until #1229 drew it as a wooden haft
+  under an iron bit; its swatch now names its haft.)
 
   **A livery has to earn its place, and the default answer is no.** Which materials have one, and
   why the rest do not:
@@ -3242,7 +3285,7 @@ Recorded here so the next reader does not mistake them for oversights:
   | --- | --- | --- |
   | worn steel | oxide | The starter blade is meant to look old, and a flat tint said "grey sword". It displaces as well as tints, because corrosion eats metal. |
   | forged steel | forge marks | Colour only: an unground flat over the ridge, hammer banding, grinding streaks, a sparse scale. It darkens toward **blue-grey** where the rust goes warm, which is what tells the two blades apart at a distance. |
-  | wood | grain | Lines along the piece, wandering slowly across it, sharpened to narrow dark bands. The strongest case in the set: a bare cube carried in the hand is the flattest thing in the game. Colour only — grain is what a tree grew, not what took its surface away. Worn by the log, the campfire, the wooden shield, the bow and the sceptre; **not** by the axe or the leather patch, which borrow the `LOG` swatch for reasons that are not their material. |
+  | wood | grain | Lines along the piece, wandering slowly across it, sharpened to narrow dark bands. The strongest case in the set: a bare cube carried in the hand is the flattest thing in the game. Colour only — grain is what a tree grew, not what took its surface away. Worn by the log, the campfire, the wooden shield, the bow and the sceptre; **not** by the leather patch, which borrows the `LOG` swatch for a reason that is not its material, nor by the axe, pickaxe and shovel, whose hafts are wood too thin for grain to earn a texture. |
   | worked hide | none | Three pieces share one `Armour` silhouette, and a warm dark brown already reads as hide. Grain would be detail neither the mesh nor the cell's plate-and-shoulders picture has anywhere else. |
   | bone, meat, arrow | none | One `Material` stub each. A texture nobody will look at. |
   | stone, earth, snow, ore | none | Block-like items take the terrain swatch they represent, whole. **Terrain is not in this**: `world/palette.rs` plus vertex colours is that material system, greedy meshing merges quads across blocks, and a texture there is a different problem with different costs. An item that represents a block may take a livery in the hand and in the cell; the world does not change. |

@@ -72,11 +72,16 @@ const (
 	RefusedActionPlayerTrade RefusedAction = 20
 	/// PortalRequest refused without a destination, session id or remote world state.
 	RefusedActionCrossPortal RefusedAction = 21
-	/// An `AttackRequest` refused because the swing's energy was not there to spend.
-	/// A member of its own rather than `Attack` with a reason, because the answering
-	/// surface is the energy display rather than the weapon: `Attack` keeps meaning a
-	/// refusal about what is in the hand. Nothing was queued and nothing was spent.
+	/// An `AttackRequest` refused because the swing's energy was not there to spend, or a
+	/// `BlockRequest` press refused because the parry's was not. A member of its own rather
+	/// than `Attack` with a reason, because the answering surface is the energy display
+	/// rather than the weapon: `Attack` keeps meaning a refusal about what is in the hand.
+	/// Nothing was queued and nothing was spent; a refused block press is still held, and
+	/// is answered once per press rather than once per tick.
 	RefusedActionEnergy RefusedAction = 22
+	/// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
+	/// inventory the player already holds is still the complete answer.
+	RefusedActionMoveInventory RefusedAction = 23
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -103,6 +108,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionPlayerTrade:    "PlayerTrade",
 	RefusedActionCrossPortal:    "CrossPortal",
 	RefusedActionEnergy:         "Energy",
+	RefusedActionMoveInventory:  "MoveInventory",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -129,6 +135,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"PlayerTrade":    RefusedActionPlayerTrade,
 	"CrossPortal":    RefusedActionCrossPortal,
 	"Energy":         RefusedActionEnergy,
+	"MoveInventory":  RefusedActionMoveInventory,
 }
 
 func (v RefusedAction) String() string {

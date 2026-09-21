@@ -15,8 +15,8 @@ use bevy::prelude::*;
 use super::appearance::ArmourPiece;
 use super::armour::{self, ArmourLook};
 use super::hands::{
-    bow_mesh, pickaxe_mesh, sceptre_mesh, shield_mesh, shovel_mesh, sword_grip_mesh,
-    sword_guard_base, sword_mesh_with,
+    arrow_mesh, axe_mesh, bow_mesh, pickaxe_mesh, sceptre_mesh, shield_mesh, shovel_mesh,
+    sword_grip_mesh, sword_guard_base, sword_mesh_with,
 };
 #[cfg(test)]
 use super::hands::{sword_blade_span, sword_grip_centre, sword_guard_span};
@@ -48,6 +48,12 @@ const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
 /// ground reaches or how it tumbles moves — [`sword_mesh_with`] fills the same length with a
 /// weapon.
 const BLADE_DROP_LENGTH: f32 = 1.25;
+
+/// How long a dropped arrow is, in [`DROP_EDGE`]s, nock to point.
+///
+/// Shorter than the sword and the bow on the ground, as the arrow is shorter than the bow in
+/// the hand.
+const ARROW_DROP_LENGTH: f32 = 1.0;
 
 /// The point a fist closes around, in the shared world-scale mesh.
 ///
@@ -125,6 +131,7 @@ fn mesh_varies_with_livery(shape: ItemShape) -> bool {
         | ItemShape::Armour
         | ItemShape::Shield
         | ItemShape::Bow
+        | ItemShape::Arrow
         | ItemShape::Sceptre
         | ItemShape::Coin
         | ItemShape::HorseHead => false,
@@ -271,14 +278,20 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        // White preserves the shield mesh's separate bark and iron vertex colours, and the
-        // pickaxe's and the shovel's wooden haft and iron head — keyed on the shape for those
-        // two, since that is where their two colours are authored.
-        let colour = if matches!(
-            item_id,
-            super::crafting::ITEM_WOODEN_SHIELD | super::crafting::ITEM_WOODEN_SCEPTRE
-        ) || matches!(item_shape(item_id), ItemShape::Pickaxe | ItemShape::Shovel)
-        {
+        // White preserves the shield's planks, rim, iron boss and leather handle, every
+        // implement's wooden haft and iron head, the bow's wooden limbs, leather grip and
+        // cord string, and the arrow's shaft, bone point and fletching — keyed on the shape for
+        // those six, since that is where their colours are authored.
+        let colour = if item_id == super::crafting::ITEM_WOODEN_SCEPTRE
+            || matches!(
+                item_shape(item_id),
+                ItemShape::Shield
+                    | ItemShape::Tool
+                    | ItemShape::Pickaxe
+                    | ItemShape::Shovel
+                    | ItemShape::Bow
+                    | ItemShape::Arrow
+            ) {
             [1.0; 4]
         } else {
             item_linear_rgba(item_id)
@@ -429,30 +442,21 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
         // collars. The four structures share this silhouette and their item-table colour
         // tells them apart. `bundle_mesh` fills the old box's exact bounds.
         ItemShape::Bundle => bundle_mesh(),
-        // A haft with a head across the top of it, merged into one mesh for the reason the
-        // held one is: a drop is one entity with one transform, and the spin is on it.
-        ItemShape::Tool => {
-            let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
-                DROP_EDGE * 0.14,
-                DROP_EDGE * 1.30,
-                DROP_EDGE * 0.14,
-            )));
-            let head = Mesh::from(Cuboid::from_size(Vec3::new(
-                DROP_EDGE * 0.52,
-                DROP_EDGE * 0.20,
-                DROP_EDGE * 0.26,
-            )))
-            .translated_by(Vec3::new(0.0, DROP_EDGE * 0.65, 0.0));
-            merge_all(&mut merged, [head], "dropped tool");
-            merged
-        }
-        // The pick and the shovel are the held silhouettes at the sceptre's and the bow's
-        // drop length, as those two are: which implement it is is not a per-surface retuning.
+        // The axe, the pick and the shovel are the held silhouettes at the sceptre's and the
+        // bow's drop length, as those two are: which implement it is is not a per-surface
+        // retuning. Until #1229 the axe was a second, separately written T here.
+        ItemShape::Tool => axe_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Pickaxe => pickaxe_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Shovel => shovel_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Armour => armour_mesh(),
         ItemShape::Shield => shield_mesh(DROP_EDGE * 2.0),
         ItemShape::Bow => bow_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
+        // The one arrow, laid down (#1231): turned from point-up to point-forward — the flying
+        // arrow's own orientation — so its length lies along the ground and the spin turns it
+        // there, and in the body's fist it points the way the body faces. It was the material
+        // capsule until then.
+        ItemShape::Arrow => arrow_mesh(DROP_EDGE * ARROW_DROP_LENGTH)
+            .rotated_by(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
         ItemShape::Sceptre => sceptre_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         // A coin lies where it fell: a disc a third of a drop across and a tenth of one
         // thick. Its own silhouette rather than the material stub's, which is what
@@ -1514,6 +1518,246 @@ mod tests {
                 "{shape:?} is drawn from nothing"
             );
         }
+    }
+
+    /// **The axe on the ground, and so in the body's fist, is the held axe at drop scale**
+    /// (#1229), drawn in its own wood and iron under a white material.
+    ///
+    /// Proportional vertex for vertex to the axe authored at unit length, which is what the
+    /// hand's [`axe_mesh`] call scales from too — so the three surfaces cannot drift back into
+    /// a held axe and a separately written T on the ground. The material is the shared
+    /// `material_for` the body reaches through `BodyHeldAssets::presentation`, and it must be
+    /// white or the row's log brown would multiply over the iron head.
+    #[test]
+    fn a_dropped_axe_is_the_held_axe_in_wood_and_iron() {
+        let length = DROP_EDGE * BLADE_DROP_LENGTH;
+        let points = |mesh: &Mesh| -> Vec<[f32; 3]> {
+            let Some(VertexAttributeValues::Float32x3(points)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("an axe carries Float32x3 positions");
+            };
+            points.clone()
+        };
+        let dropped = drop_mesh(ItemShape::Tool, None);
+        let unit = points(&axe_mesh(1.0));
+        let drawn = points(&dropped);
+        assert_eq!(
+            drawn.len(),
+            unit.len(),
+            "the dropped axe is not the held one"
+        );
+        for (drop_point, unit_point) in drawn.iter().zip(&unit) {
+            for axis in 0..3 {
+                assert!(
+                    (drop_point[axis] - unit_point[axis] * length).abs() < 1e-5,
+                    "the dropped axe's {drop_point:?} is not the held axe's {unit_point:?} at \
+                     drop scale"
+                );
+            }
+        }
+
+        let Some(VertexAttributeValues::Float32x4(colours)) =
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the dropped axe must carry its wood and iron per vertex");
+        };
+        let mut tints: Vec<[u32; 4]> = colours
+            .iter()
+            .map(|colour| colour.map(|channel| (channel * 1000.0).round() as u32))
+            .collect();
+        tints.sort_unstable();
+        tints.dedup();
+        assert_eq!(
+            tints.len(),
+            2,
+            "the dropped axe is not wood and iron: {tints:?}"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let handle = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::crafting::ITEM_AXE, &mut materials);
+        assert_eq!(
+            materials
+                .get(&handle)
+                .expect("the axe's material")
+                .base_color,
+            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+            "the axe's drop material tints its iron head with the row's brown"
+        );
+        world.insert_resource(materials);
+    }
+
+    /// **The bow on the ground, and so in the body's fist, is the held bow at drop scale**
+    /// (#1230): curved wooden limbs, a leather grip and a cord string in one mesh, under a
+    /// white material that still carries the wood's grain.
+    ///
+    /// Proportional vertex for vertex to the bow at unit length, which the hand's
+    /// [`bow_mesh`] call scales from too, so the three surfaces share one silhouette. White,
+    /// or the row's log brown would multiply over the cord; textured, or the limbs' grain
+    /// coordinates would sample nothing.
+    #[test]
+    fn a_dropped_bow_is_the_held_bow_in_wood_leather_and_cord() {
+        let length = DROP_EDGE * BLADE_DROP_LENGTH;
+        let points = |mesh: &Mesh| -> Vec<[f32; 3]> {
+            let Some(VertexAttributeValues::Float32x3(points)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("a bow carries Float32x3 positions");
+            };
+            points.clone()
+        };
+        let dropped = drop_mesh(ItemShape::Bow, None);
+        let unit = points(&bow_mesh(1.0));
+        let drawn = points(&dropped);
+        assert_eq!(
+            drawn.len(),
+            unit.len(),
+            "the dropped bow is not the held one"
+        );
+        for (drop_point, unit_point) in drawn.iter().zip(&unit) {
+            for axis in 0..3 {
+                assert!(
+                    (drop_point[axis] - unit_point[axis] * length).abs() < 1e-5,
+                    "the dropped bow's {drop_point:?} is not the held bow's {unit_point:?} at \
+                     drop scale"
+                );
+            }
+        }
+
+        let Some(VertexAttributeValues::Float32x4(colours)) =
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the dropped bow must carry its wood, leather and cord per vertex");
+        };
+        let mut tints: Vec<[u32; 4]> = colours
+            .iter()
+            .map(|colour| colour.map(|channel| (channel * 1000.0).round() as u32))
+            .collect();
+        tints.sort_unstable();
+        tints.dedup();
+        assert_eq!(
+            tints.len(),
+            3,
+            "the dropped bow is not wood, leather and cord: {tints:?}"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let handle = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::crafting::ITEM_BOW, &mut materials);
+        let material = materials.get(&handle).expect("the bow's material");
+        assert_eq!(
+            material.base_color,
+            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+            "the bow's drop material tints its cord with the row's brown"
+        );
+        assert!(
+            material.base_color_texture.is_some(),
+            "the bow's drop material carries no livery image, so its limbs have no grain"
+        );
+        world.insert_resource(materials);
+    }
+
+    /// **An arrow on the ground is the one arrow, lying flat** (#1231): the shared
+    /// [`arrow_mesh`] at drop scale with its length along the ground, in its own shaft, bone
+    /// point and fletching under a white material — not the capsule a material stub is.
+    ///
+    /// Vertex for vertex the point-up arrow at unit length, scaled and turned, so the drop
+    /// cannot drift into a second authoring of the arrow the hand and the flight draw.
+    #[test]
+    fn a_dropped_arrow_is_the_one_arrow_lying_flat() {
+        let length = DROP_EDGE * ARROW_DROP_LENGTH;
+        let points = |mesh: &Mesh| -> Vec<[f32; 3]> {
+            let Some(VertexAttributeValues::Float32x3(points)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("an arrow carries Float32x3 positions");
+            };
+            points.clone()
+        };
+        let dropped = drop_mesh(ItemShape::Arrow, None);
+        let unit = points(&arrow_mesh(1.0));
+        let drawn = points(&dropped);
+        assert_eq!(
+            drawn.len(),
+            unit.len(),
+            "the dropped arrow is not the shared one"
+        );
+        let lay = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        for (drop_point, unit_point) in drawn.iter().zip(&unit) {
+            let want = lay * (Vec3::from_array(*unit_point) * length);
+            assert!(
+                Vec3::from_array(*drop_point).distance(want) < 1e-5,
+                "the dropped arrow's {drop_point:?} is not the shared arrow's {want:?}"
+            );
+        }
+
+        let extent = |axis: usize| {
+            let low = drawn
+                .iter()
+                .map(|point| point[axis])
+                .fold(f32::INFINITY, f32::min);
+            let high = drawn
+                .iter()
+                .map(|point| point[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            high - low
+        };
+        assert!(
+            (extent(2) - length).abs() < 1e-5,
+            "the dropped arrow is {} long along the ground, want {length}",
+            extent(2)
+        );
+        assert!(
+            extent(0) < length / 4.0 && extent(1) < length / 4.0,
+            "the dropped arrow is not lying flat: {} across and {} tall over {length}",
+            extent(0),
+            extent(1)
+        );
+
+        let Some(VertexAttributeValues::Float32x4(colours)) =
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the dropped arrow must carry its shaft, point and fletching per vertex");
+        };
+        let mut tints: Vec<[u32; 4]> = colours
+            .iter()
+            .map(|colour| colour.map(|channel| (channel * 1000.0).round() as u32))
+            .collect();
+        tints.sort_unstable();
+        tints.dedup();
+        assert_eq!(
+            tints.len(),
+            3,
+            "the dropped arrow is not shaft, point and fletching: {tints:?}"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let handle = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::crafting::ITEM_ARROW, &mut materials);
+        let material = materials.get(&handle).expect("the arrow's material");
+        assert_eq!(
+            material.base_color,
+            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+            "the arrow's drop material tints its point and fletching with the shaft's colour"
+        );
+        assert!(
+            material.base_color_texture.is_none(),
+            "the arrow wears no livery, so its drop material samples no image"
+        );
+        world.insert_resource(materials);
     }
 
     /// A bundle is a rolled load with collars, not the unequal-sided box it replaces.

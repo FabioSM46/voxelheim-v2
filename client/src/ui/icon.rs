@@ -79,6 +79,12 @@ pub(crate) struct IconPart {
     iron: bool,
     /// Uses the sceptre focus green instead of the item's base colour.
     green: bool,
+    /// Uses the bow string's cord instead of the item's base colour — the one
+    /// `player::bow_cord_linear_rgba` the modelled string is drawn in, so the two agree.
+    cord: bool,
+    /// Uses the arrow's dark fletching instead of the item's base colour — the one
+    /// `player::arrow_fletching_linear_rgba` the modelled vanes are drawn in, so the two agree.
+    fletching: bool,
     /// Draws the item's livery over this rectangle, when the item wears one.
     ///
     /// **A property of the rectangle, not of the shape.** A blade's guard and grip are not
@@ -100,6 +106,8 @@ impl IconPart {
         rotation: 0.0,
         iron: false,
         green: false,
+        cord: false,
+        fletching: false,
         livery: false,
     };
 }
@@ -321,6 +329,8 @@ const BLADE: [IconPart; 3] = [
         rotation: QUARTER_TURN,
         iron: false,
         green: false,
+        cord: false,
+        fletching: false,
         livery: false,
     },
 ];
@@ -355,43 +365,65 @@ const BUNDLE: [IconPart; 3] = [
     },
 ];
 
-/// An implement: a haft up the cell with a head across the top of it.
+/// An axe: a wooden haft up the cell under an iron head with its cutting bit on one side.
 ///
-/// The T is what tells it from [`BLADE`] at a glance — a blade is one tapering box, and
-/// this is a handle with weight on the end. Only the axe is drawn as it since #1121; the
-/// pickaxe and the shovel are [`PICKAXE`] and [`SHOVEL`].
-///
-/// Drawn head-last so it sits over the haft, which is the order these arrays mean.
-const TOOL: [IconPart; 3] = [
-    // The haft, up the middle and slightly right of centre so the head has somewhere to
-    // overhang.
+/// The head is the held mesh's, drawn flat (#1229): a short poll behind the haft, the bit's
+/// neck leaving the other side, the edge at its end — taller than the neck, which is the flare
+/// that reads as a blade rather than a hammer — and the eye over the haft's end on top of
+/// them. The haft is the row's colour, which is the log's wood; every head part is `iron`, as
+/// the pickaxe's are. Drawn haft first, head over it.
+const AXE: [IconPart; 5] = [
     IconPart {
-        left: 44.0,
+        left: 45.0,
         top: 26.0,
+        width: 10.0,
+        height: 60.0,
+        radius: 6.0,
+        shade: -0.30,
+        ..IconPart::PLAIN
+    },
+    // The poll, short and square, behind the haft.
+    IconPart {
+        left: 32.0,
+        top: 22.0,
         width: 12.0,
-        height: 54.0,
-        radius: 6.0,
-        shade: -0.42,
+        height: 12.0,
+        radius: 10.0,
+        shade: -0.10,
+        iron: true,
         ..IconPart::PLAIN
     },
-    // The head, across the top.
+    // The bit's neck, narrow where it leaves the eye.
     IconPart {
-        left: 20.0,
-        top: 20.0,
-        width: 60.0,
-        height: 20.0,
-        radius: 6.0,
-        shade: 0.22,
+        left: 52.0,
+        top: 21.0,
+        width: 22.0,
+        height: 13.0,
+        radius: 8.0,
+        shade: 0.05,
+        iron: true,
         ..IconPart::PLAIN
     },
-    // And the lit edge along the head's top, which is what stops it reading as a flat bar.
+    // The edge: tall, rounded, and hanging a little below the neck into a beard.
     IconPart {
-        left: 20.0,
-        top: 20.0,
-        width: 60.0,
-        height: 7.0,
-        radius: 6.0,
-        shade: 0.52,
+        left: 66.0,
+        top: 12.0,
+        width: 16.0,
+        height: 34.0,
+        radius: 35.0,
+        shade: 0.28,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+    // The eye closed over the haft's end, lit, on top of the rest of the head.
+    IconPart {
+        left: 41.0,
+        top: 18.0,
+        width: 18.0,
+        height: 18.0,
+        radius: 12.0,
+        shade: 0.40,
+        iron: true,
         ..IconPart::PLAIN
     },
 ];
@@ -451,7 +483,7 @@ const PICKAXE: [IconPart; 4] = [
 
 /// A shovel: a flat iron blade over a wooden haft that ends in a small D-grip.
 ///
-/// Blade up, as the hand holds it and as [`TOOL`] and [`PICKAXE`] put their heads: a cell and
+/// Blade up, as the hand holds it and as [`AXE`] and [`PICKAXE`] put their heads: a cell and
 /// the hand agree about which end the work is at. The blade is the broadest, roundest-ended
 /// part of any implement drawing, which is what reads as a spade at a cell's size; the grip is
 /// a crossbar across the haft's foot. Drawn haft first, head over it.
@@ -744,28 +776,51 @@ const RUSTY_GREAVES: [IconPart; 8] = [
     },
 ];
 
-/// Wooden board, rim and iron boss.
-const SHIELD: [IconPart; 3] = [
+/// A round shield seen from the front: a darker rim, a planked face inside it and an iron boss.
+///
+/// The model the hand, the ground and a body draw, flattened. The face is a circle of five
+/// planks, `70` across; the second and fourth are drawn as darker strips whose corners sit on
+/// that circle — `21` from the centre across and `28` up and down, which is `35` exactly — so
+/// the planks follow the round outline rather than standing out of it. The boss is drawn last,
+/// in the same `iron` the pickaxe's head uses.
+const SHIELD: [IconPart; 5] = [
     IconPart {
-        left: 24.0,
-        top: 16.0,
-        width: 52.0,
-        height: 64.0,
-        radius: 24.0,
+        left: 10.0,
+        top: 10.0,
+        width: 80.0,
+        height: 80.0,
+        radius: 50.0,
+        shade: -0.45,
         ..IconPart::PLAIN
     },
     IconPart {
-        left: 30.0,
-        top: 66.0,
-        width: 40.0,
-        height: 17.0,
+        left: 15.0,
+        top: 15.0,
+        width: 70.0,
+        height: 70.0,
         radius: 50.0,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 29.0,
+        top: 22.0,
+        width: 14.0,
+        height: 56.0,
+        shade: -0.22,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 57.0,
+        top: 22.0,
+        width: 14.0,
+        height: 56.0,
         shade: -0.22,
         ..IconPart::PLAIN
     },
     IconPart {
         left: 40.0,
-        top: 35.0,
+        top: 40.0,
         width: 20.0,
         height: 20.0,
         radius: 50.0,
@@ -775,35 +830,115 @@ const SHIELD: [IconPart; 3] = [
     },
 ];
 
-/// A bowed stave in two limbs and its taut string.
-const BOW: [IconPart; 3] = [
+/// A wooden bow seen from the side: a string of pale cord on the right, two curved limbs
+/// bending toward it from a darker grip on the left.
+///
+/// The model the hand, the ground and a body draw, flattened (#1230). Each limb is two
+/// segments — steep where it leaves the grip, turning over toward the string at its tip, and
+/// narrower there — which is the curve that reads as a bow rather than the `>` of two sticks
+/// this replaced. The upper limb's outer segment ends on the string's top, and the lower limb
+/// mirrors it. Drawn string first, limbs over its ends, grip last.
+const BOW: [IconPart; 6] = [
     IconPart {
-        left: 28.0,
-        top: 12.0,
-        width: 10.0,
-        height: 42.0,
+        left: 57.0,
+        top: 10.0,
+        width: 3.0,
+        height: 80.0,
+        radius: 30.0,
+        cord: true,
+        ..IconPart::PLAIN
+    },
+    // The upper limb, leaving the grip.
+    IconPart {
+        left: 30.0,
+        top: 21.0,
+        width: 8.0,
+        height: 22.0,
+        radius: 30.0,
+        rotation: 0.38,
+        shade: 0.15,
+        ..IconPart::PLAIN
+    },
+    // And turning over toward its tip on the string.
+    IconPart {
+        left: 45.0,
+        top: 5.0,
+        width: 6.0,
+        height: 24.0,
         radius: 35.0,
-        rotation: -0.24,
-        shade: 0.18,
+        rotation: 0.97,
+        shade: 0.22,
+        ..IconPart::PLAIN
+    },
+    // The lower limb, the upper one mirrored across the middle of the cell.
+    IconPart {
+        left: 30.0,
+        top: 57.0,
+        width: 8.0,
+        height: 22.0,
+        radius: 30.0,
+        rotation: -0.38,
+        shade: -0.10,
         ..IconPart::PLAIN
     },
     IconPart {
-        left: 28.0,
-        top: 46.0,
-        width: 10.0,
-        height: 42.0,
+        left: 45.0,
+        top: 71.0,
+        width: 6.0,
+        height: 24.0,
         radius: 35.0,
-        rotation: 0.24,
-        shade: -0.18,
+        rotation: -0.97,
+        shade: -0.15,
+        ..IconPart::PLAIN
+    },
+    // The leather grip, thicker than either limb, over both their roots.
+    IconPart {
+        left: 25.0,
+        top: 37.0,
+        width: 10.0,
+        height: 26.0,
+        radius: 30.0,
+        shade: -0.40,
+        ..IconPart::PLAIN
+    },
+];
+
+/// An arrow, on the blade's diagonal: point to the top right, fletching to the bottom left.
+///
+/// The model every other surface draws, flattened (#1231): a long thin shaft in the row's pale
+/// wood, a point lifted toward bone-white at its front end, and a vane of dark fletching over the
+/// shaft near its tail — short of the end, so a nock shows behind it. The point is a square left
+/// square to the cell, which at the shaft's forty-five degrees puts one corner on the shaft's own
+/// line: the one way a rectangle comes to a point along a diagonal. Until then an arrow was the
+/// three nuggets [`MATERIAL`] draws. Drawn fletching first, shaft over it, point last.
+const ARROW: [IconPart; 3] = [
+    IconPart {
+        left: 21.0,
+        top: 59.0,
+        width: 18.0,
+        height: 22.0,
+        radius: 25.0,
+        rotation: QUARTER_TURN,
+        fletching: true,
         ..IconPart::PLAIN
     },
     IconPart {
-        left: 58.0,
-        top: 13.0,
-        width: 4.0,
-        height: 74.0,
-        radius: 20.0,
-        shade: 0.65,
+        left: 47.0,
+        top: 8.0,
+        width: 6.0,
+        height: 84.0,
+        radius: 30.0,
+        shade: 0.10,
+        rotation: QUARTER_TURN,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 66.0,
+        top: 18.0,
+        width: 16.0,
+        height: 16.0,
+        radius: 12.0,
+        shade: 0.55,
         ..IconPart::PLAIN
     },
 ];
@@ -1172,12 +1307,13 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Material => &MATERIAL,
         ItemShape::Blade => &BLADE,
         ItemShape::Bundle => &BUNDLE,
-        ItemShape::Tool => &TOOL,
+        ItemShape::Tool => &AXE,
         ItemShape::Pickaxe => &PICKAXE,
         ItemShape::Shovel => &SHOVEL,
         ItemShape::Armour => &ARMOUR,
         ItemShape::Shield => &SHIELD,
         ItemShape::Bow => &BOW,
+        ItemShape::Arrow => &ARROW,
         ItemShape::Sceptre => &SCEPTRE,
         ItemShape::Coin => &COIN,
         ItemShape::HorseHead => &HORSE_HEAD,
@@ -1307,6 +1443,12 @@ fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
         LinearRgba::new(0.30, 0.35, 0.42, 1.0)
     } else if part.green {
         LinearRgba::new(0.16, 0.82, 0.28, 1.0)
+    } else if part.cord {
+        let [red, green, blue, alpha] = crate::player::bow_cord_linear_rgba();
+        LinearRgba::new(red, green, blue, alpha)
+    } else if part.fletching {
+        let [red, green, blue, alpha] = crate::player::arrow_fletching_linear_rgba();
+        LinearRgba::new(red, green, blue, alpha)
     } else {
         base
     };
@@ -1722,7 +1864,7 @@ mod tests {
         assert!(
             parts(ItemShape::HorseHead)
                 .iter()
-                .all(|part| !part.iron && !part.green && !part.livery),
+                .all(|part| !part.iron && !part.green && !part.cord && !part.livery),
             "every horse-head plane must keep the registry's exact coat colour"
         );
 
@@ -1892,6 +2034,260 @@ mod tests {
         assert!(
             blade.rotation == 0.0,
             "the shovel's blade is turned, so it no longer reads as flat"
+        );
+    }
+
+    /// **The flat bow is the modelled one: curved limbs from a grip, and a lighter string**
+    /// (#1230).
+    ///
+    /// The structure a reader can check against `player::hands::bow_mesh` by eye: the string
+    /// is cord and nothing else is; each limb is two segments that turn further over toward
+    /// the string the farther they are from the grip — which is the curve — and the lower limb
+    /// mirrors the upper; the upper tip ends on the string; and the string is drawn lighter
+    /// than any part of the wood.
+    #[test]
+    fn the_flat_bow_is_curved_limbs_on_a_grip_with_a_lighter_string() {
+        let [string, upper_root, upper_tip, lower_root, lower_tip, grip] =
+            <[IconPart; 6]>::try_from(parts(ItemShape::Bow))
+                .expect("the bow is drawn as a string, two limbs of two segments and a grip");
+
+        assert!(string.cord, "the bow's string is not drawn in cord");
+        for part in [upper_root, upper_tip, lower_root, lower_tip, grip] {
+            assert!(
+                !part.cord && !part.iron && !part.green,
+                "a wooden part of the bow is not drawn in the item's colour: {part:?}"
+            );
+        }
+
+        // Curved: the segment at the tip turns further over than the one at the grip, and
+        // the lower limb is the upper one mirrored across the cell's middle.
+        assert!(
+            upper_tip.rotation > upper_root.rotation && upper_root.rotation > 0.0,
+            "the upper limb does not bend toward the string"
+        );
+        for (upper, lower) in [(upper_root, lower_root), (upper_tip, lower_tip)] {
+            assert_eq!(lower.rotation, -upper.rotation);
+            assert_eq!(lower.left, upper.left);
+            assert_eq!(lower.top + lower.height, 100.0 - upper.top);
+        }
+
+        // The upper tip is where the string is: the far end of the turned segment lands on
+        // the string's top, give or take a cell percent or two.
+        let reach = upper_tip.height / 2.0;
+        let end_x = upper_tip.left + upper_tip.width / 2.0 + upper_tip.rotation.sin() * reach;
+        let end_y = upper_tip.top + upper_tip.height / 2.0 - upper_tip.rotation.cos() * reach;
+        assert!(
+            (end_x - (string.left + string.width / 2.0)).abs() < 2.0
+                && (end_y - string.top).abs() < 2.0,
+            "the upper limb ends at ({end_x}, {end_y}), not on the string's top"
+        );
+
+        // The grip is at the middle, behind every limb, and thicker than any of them.
+        assert_eq!(grip.top + grip.height / 2.0, 50.0);
+        for limb in [upper_root, upper_tip, lower_root, lower_tip] {
+            assert!(grip.left < limb.left && grip.width > limb.width);
+        }
+
+        // Lighter: the drawn string is brighter in every channel than any drawn wood.
+        let wood = {
+            let [red, green, blue, alpha] =
+                crate::world::palette::linear_rgba(crate::world::palette::LOG);
+            LinearRgba::new(red, green, blue, alpha)
+        };
+        let [red, green, blue, alpha] = crate::player::bow_cord_linear_rgba();
+        let cord = shaded(LinearRgba::new(red, green, blue, alpha), string.shade).to_linear();
+        for part in [upper_root, upper_tip, lower_root, lower_tip, grip] {
+            let drawn = shaded(wood, part.shade).to_linear();
+            assert!(
+                cord.red > drawn.red && cord.green > drawn.green && cord.blue > drawn.blue,
+                "the string's {cord:?} is not lighter than the wood's {drawn:?}"
+            );
+        }
+    }
+
+    /// **The flat arrow is the modelled one on the blade's diagonal** (#1231): a long thin shaft
+    /// at forty-five degrees, a lighter point past its top-right end and dark fletching near its
+    /// bottom-left one, every part on the shaft's own line — not the three nuggets a material
+    /// stub is drawn as.
+    #[test]
+    fn the_flat_arrow_is_a_diagonal_shaft_with_a_point_and_fletching() {
+        use crate::player::{item_linear_rgba, item_shape, known_item_ids};
+
+        let [fletching, shaft, point] = <[IconPart; 3]>::try_from(parts(ItemShape::Arrow))
+            .expect("the arrow is drawn as fletching, a shaft and a point");
+        assert!(
+            fletching.fletching && !shaft.fletching && !point.fletching,
+            "only the fletching is drawn in the fletching's colour"
+        );
+        for part in [fletching, shaft, point] {
+            assert!(
+                !part.iron && !part.green && !part.cord && !part.livery,
+                "a part of the arrow borrows another item's colour: {part:?}"
+            );
+        }
+
+        // A shaft on the diagonal, far longer than it is wide.
+        assert_eq!(shaft.rotation, QUARTER_TURN, "the shaft is not diagonal");
+        assert!(
+            shaft.height > shaft.width * 10.0,
+            "the shaft is {} by {}, which is not an arrow's",
+            shaft.width,
+            shaft.height
+        );
+
+        // Along the shaft's own line: the rotation is clockwise on a y-down cell, so the
+        // rectangle's top end is toward the top right.
+        let centre =
+            |part: IconPart| Vec2::new(part.left + part.width / 2.0, part.top + part.height / 2.0);
+        let axis = Vec2::new(shaft.rotation.sin(), -shaft.rotation.cos());
+        let along = |part: IconPart| (centre(part) - centre(shaft)).dot(axis);
+        let off_line = |part: IconPart| (centre(part) - centre(shaft)).dot(axis.perp()).abs();
+        let half = shaft.height / 2.0;
+        for (name, part) in [("point", point), ("fletching", fletching)] {
+            assert!(off_line(part) < 1.0, "the {name} is off the shaft's line");
+        }
+        // The point is at the front, and the corner the square turns toward the front reaches
+        // past the shaft's end: that corner is the tip.
+        assert!(
+            point.rotation == 0.0 && along(point) > half * 0.6,
+            "the point is not a square at the shaft's front end"
+        );
+        assert!(
+            along(point) + point.width / 2.0 * std::f32::consts::SQRT_2 > half,
+            "the point does not reach past the end of the shaft"
+        );
+        // The fletching is at the tail, wider than the shaft, and short of its end.
+        assert!(
+            along(fletching) < -half * 0.4 && along(fletching) - fletching.height / 2.0 > -half,
+            "the fletching is not at the tail short of the nock"
+        );
+        assert!(
+            fletching.width > shaft.width * 2.0,
+            "the fletching is no wider than the shaft"
+        );
+
+        // In the colours that tell the three apart: a point lighter than the shaft, and
+        // fletching darker than both in every channel.
+        let arrow = known_item_ids()
+            .find(|item_id| item_shape(*item_id) == ItemShape::Arrow)
+            .expect("an item is drawn as an arrow");
+        let [red, green, blue, alpha] = item_linear_rgba(arrow);
+        let wood = LinearRgba::new(red, green, blue, alpha);
+        let [red, green, blue, alpha] = crate::player::arrow_fletching_linear_rgba();
+        let feather = shaded(LinearRgba::new(red, green, blue, alpha), fletching.shade).to_linear();
+        assert!(
+            point.shade > shaft.shade,
+            "the point is not lighter than the shaft"
+        );
+        for part in [shaft, point] {
+            let drawn = shaded(wood, part.shade).to_linear();
+            assert!(
+                feather.red < drawn.red && feather.green < drawn.green && feather.blue < drawn.blue,
+                "the fletching's {feather:?} does not contrast with the arrow's {drawn:?}"
+            );
+        }
+    }
+
+    /// **The flat axe is the held one: an iron bit on one side of a wooden haft** (#1229).
+    ///
+    /// The structure a reader can check against `player::hands::axe_mesh` by eye, for the
+    /// reason the pickaxe's test above gives: the haft is wood and every head part iron, the
+    /// head sits across the haft's top, the bit reaches much farther from the haft than the
+    /// poll does — a T would reach equally — and the edge is taller than the neck it ends.
+    #[test]
+    fn the_flat_axe_is_an_iron_bit_on_one_side_of_a_wooden_haft() {
+        let centre_x = |part: IconPart| part.left + part.width / 2.0;
+        let centre_y = |part: IconPart| part.top + part.height / 2.0;
+        let [haft, poll, neck, edge, eye] = <[IconPart; 5]>::try_from(parts(ItemShape::Tool))
+            .expect("the axe is drawn as a haft, a poll, a neck, an edge and an eye");
+
+        assert!(
+            !haft.iron,
+            "the axe's haft is drawn in iron rather than wood"
+        );
+        for (name, part) in [("poll", poll), ("neck", neck), ("edge", edge), ("eye", eye)] {
+            assert!(part.iron, "the axe's {name} is not iron");
+            assert!(
+                centre_y(part) < haft.top + haft.height / 4.0,
+                "the axe's {name} is not across the top of the haft"
+            );
+        }
+
+        let axis = centre_x(haft);
+        let ahead = edge.left + edge.width - axis;
+        let behind = axis - poll.left;
+        assert!(
+            ahead > behind * 1.5,
+            "the axe's bit reaches {ahead} from the haft and its poll {behind}, which is a T"
+        );
+        assert!(
+            centre_x(neck) > axis && centre_x(edge) > centre_x(neck) && centre_x(poll) < axis,
+            "the axe's poll, neck and edge are not poll behind, bit ahead"
+        );
+        assert!(
+            edge.height > neck.height * 2.0,
+            "the axe's edge is {} tall against a {} neck, so the bit does not flare",
+            edge.height,
+            neck.height
+        );
+    }
+
+    /// **The flat shield is the round one the hand holds**: a planked face inside a darker
+    /// rim, with an iron boss at the centre.
+    ///
+    /// As with the sword and the implements above, the mesh constants are out of reach here,
+    /// so what is pinned is the structure a reader checks by eye — round parts, the rim around
+    /// the face, planks that stay inside the face's circle, and the boss in iron at the middle.
+    #[test]
+    fn the_flat_shield_is_a_round_planked_face_inside_a_rim_around_an_iron_boss() {
+        let [rim, face, left_plank, right_plank, boss] =
+            <[IconPart; 5]>::try_from(parts(ItemShape::Shield))
+                .expect("the shield is drawn as a rim, a face, two planks and a boss");
+        let centre = |part: IconPart| (part.left + part.width / 2.0, part.top + part.height / 2.0);
+
+        for (name, part) in [("rim", rim), ("face", face), ("boss", boss)] {
+            assert!(
+                part.width == part.height && part.radius >= 50.0,
+                "the shield's {name} is not round: {part:?}"
+            );
+            assert_eq!(
+                centre(part),
+                (50.0, 50.0),
+                "the shield's {name} is off centre"
+            );
+        }
+        assert!(
+            rim.width > face.width && rim.shade < face.shade,
+            "the rim is not a darker ring around the face"
+        );
+        assert!(
+            boss.iron && !rim.iron && !face.iron,
+            "only the boss is iron"
+        );
+        assert!(boss.width < face.width / 2.0, "the boss covers the face");
+
+        let face_radius = face.width / 2.0;
+        for (name, plank) in [("left", left_plank), ("right", right_plank)] {
+            assert!(!plank.iron, "the {name} plank is iron");
+            assert!(
+                plank.shade < face.shade,
+                "the {name} plank does not read against the face"
+            );
+            for x in [plank.left, plank.left + plank.width] {
+                for y in [plank.top, plank.top + plank.height] {
+                    let reach = ((x - 50.0).powi(2) + (y - 50.0).powi(2)).sqrt();
+                    assert!(
+                        reach <= face_radius + 1e-3,
+                        "the {name} plank's corner ({x}, {y}) stands {reach} out, past the \
+                         face's {face_radius}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            left_plank.left + left_plank.width / 2.0 + right_plank.left + right_plank.width / 2.0,
+            100.0,
+            "the two planks are not mirrored about the boss"
         );
     }
 

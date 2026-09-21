@@ -98,7 +98,12 @@ table MineProgress {
 /// Moves up to `count` items between authoritative inventory slots. Client ->
 /// server, and intent only: the server decides whether any move is legal and
 /// sends a complete `InventoryState` when its answer changes the inventory.
-/// There is no acknowledgement or rejection payload.
+/// There is no acknowledgement payload.
+///
+/// **A move can be refused.** Since V44 a move the equipment rules forbid is answered
+/// with `ActionRefused{MoveInventory, <reason>}` — a two-handed weapon and an off-hand
+/// item worn together is `HandsOccupied` — and nothing moves. The inventory the player
+/// holds is still the complete answer; the refusal says why it did not change.
 ///
 /// Decoder invariants the server enforces on this untrusted input:
 ///   - `from` and `to` must each be < `ServerWelcome.inventory_slots`
@@ -132,8 +137,13 @@ table InventoryMoveRequest {
 ///     connection whose framing is still perfectly readable.
 ///   - `client_tick` is ordering and staleness only, never a trusted clock
 table AttackRequest {
-  /// The authoritative inventory slot this swing spends. The server reads what is
-  /// actually in that slot; naming an empty, resource or broken one gains nothing.
+  /// The main-hand equipment slot, which is the only slot a swing spends. The server
+  /// reads what is actually in it; naming an empty, resource or broken one gains nothing.
+  ///
+  /// **V44 changed what this field means**, and the change is why the version moved.
+  /// Before V44 it was whichever inventory slot the client named, usually the selected
+  /// hotbar slot. Now any slot other than the main hand is refused. A V43 client would go
+  /// on naming its hotbar slot, and every swing would be dropped after a clean handshake.
   slot: ubyte;
 
   /// The client's own tick counter, for ordering and staleness only.
@@ -142,9 +152,40 @@ table AttackRequest {
 
 /// Raising or lowering whatever the player currently holds in the off-hand.
 /// Client -> server, and intent only: the server decides whether the authoritative
-/// off-hand item can block, whether it has durability left and whether anything is
-/// actually raised. The request carries no item, slot, damage reduction or outcome.
+/// off-hand item can block, whether it has durability left, whether there is the energy
+/// to parry and whether anything is actually raised. `active: true` is held until
+/// `active: false`, so a press made short of energy raises the shield by itself once the
+/// reserve allows. The request carries no item, slot, damage reduction or outcome.
 table BlockRequest {
+  active: bool;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// Drawing or loosing the bow in the main hand. Client -> server, and intent only.
+///
+/// A press (`active: true`) asks the server to begin a draw; a release (`active: false`)
+/// looses the arrow. The edges follow `BlockRequest` and `MineRequest.active`. The server
+/// decides whether a draw may begin: the weapon in the main hand, ammunition, energy and
+/// the player's state. It answers through `PlayerVitals.draw_progress` and the projectile
+/// state that follows.
+///
+/// **The charge is measured by the server, from its own ticks, and it is never sent.** It
+/// starts at the tick the server admits the press and ends at the tick it applies the
+/// release. A client that reported how long it held the button, or how far the string
+/// came back, would be stating the arrow's speed: an outcome, which `schemas/AGENTS.md`
+/// rule 4 forbids. For the same reason the request names no slot, no item, no aim and no
+/// charge. The main hand is the only slot a bow is drawn from, and aim is the latest
+/// `PlayerInput` the server accepted, as it is for `AttackRequest`.
+///
+/// There is no acknowledgement payload. Appended in V44; a V43 server cannot name the tag
+/// and closes the session, which is part of why the version moved.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table DrawRequest {
+  /// True to begin a draw, false to loose the arrow.
   active: bool;
 
   /// The client's own tick counter, for ordering and staleness only.
@@ -946,11 +987,19 @@ enum RefusedAction : ubyte {
 
   // -- V40. Appended so every shipped action keeps its number.
 
-  /// An `AttackRequest` refused because the swing's energy was not there to spend.
-  /// A member of its own rather than `Attack` with a reason, because the answering
-  /// surface is the energy display rather than the weapon: `Attack` keeps meaning a
-  /// refusal about what is in the hand. Nothing was queued and nothing was spent.
-  Energy = 22
+  /// An `AttackRequest` refused because the swing's energy was not there to spend, or a
+  /// `BlockRequest` press refused because the parry's was not. A member of its own rather
+  /// than `Attack` with a reason, because the answering surface is the energy display
+  /// rather than the weapon: `Attack` keeps meaning a refusal about what is in the hand.
+  /// Nothing was queued and nothing was spent; a refused block press is still held, and
+  /// is answered once per press rather than once per tick.
+  Energy = 22,
+
+  // -- V44. Appended so every shipped action keeps its number.
+
+  /// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
+  /// inventory the player already holds is still the complete answer.
+  MoveInventory = 23
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1176,6 +1225,13 @@ enum RefusalReason : ubyte {
   /// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
   /// the answer, so no amount is carried here.
   NotEnoughEnergy = 53,
+
+  // -- V44. Appended inside the low group: the request was well formed, and the player's
+  //    own equipment answered no.
+
+  /// A two-handed weapon and an off-hand item cannot be worn together. Paired with
+  /// `RefusedAction.MoveInventory`. The player can take off one of them.
+  HandsOccupied = 54,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -1595,12 +1651,15 @@ table PlayerVitals {
   experience_to_next: uint;
 
   /// Whether the authoritative server currently holds this recipient's off-hand raised.
-  /// Intent alone never makes this true; the server's equipment and durability rules do.
+  /// Intent alone never makes this true; the server's equipment, durability and energy
+  /// rules do. A raised shield needs at least the parry's cost in energy: it lowers on the
+  /// tick the reserve falls below that cost and, while the press is still held, rises again
+  /// on the tick the reserve reaches it.
   blocking: bool;
 
   /// V40. Current energy, in the same units as `max_energy`, rounded down to a whole
-  /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
-  /// the blow through the shield at full damage, and nothing else changes. Attacks and
+  /// point. Zero is legal. Below an action's cost the server refuses the swing, or keeps
+  /// the shield down, and nothing else changes. Attacks and
   /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
   /// locally**: a client that drew its own regeneration would show a swing as ready the
   /// tick before the server refuses it.
@@ -1608,6 +1667,14 @@ table PlayerVitals {
 
   /// V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
   max_energy: ushort;
+
+  /// V44. How far this recipient's own bow draw has charged. Zero means the player is not
+  /// drawing; `1 .. 255` is the charge, a fraction of 255 as `CastState.progress` and
+  /// `MineProgress` are. Unlike a cast, 255 is legal and means a full draw still held,
+  /// because a draw ends only when the player lets go. **The server's number, measured
+  /// from its ticks**: the client animates the string from it and never runs a timer of
+  /// its own. Absent from a V43 server, it reads as zero, and that server has no draws.
+  draw_progress: ubyte;
 }
 
 /// One mob's authoritative state in a snapshot.
@@ -2381,8 +2448,8 @@ table InventoryState {
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
-///   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
-///     meaning that the corresponding equipment slot is empty
+///   - `worn_head`, `worn_chest`, `worn_legs`, `worn_offhand` and `worn_mainhand` are
+///     item ids, with zero meaning that the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 table PlayerAppearance {
@@ -2416,6 +2483,11 @@ table PlayerAppearance {
 
   /// Item id in the trailing off-hand equipment slot, or zero when nothing is held.
   worn_offhand: ushort;
+
+  /// V44. Item id in the trailing main-hand equipment slot, or zero when nothing is held.
+  /// The same type as `worn_offhand`. A V43 server never sends it, and it reads as an
+  /// empty hand, which is what that server's layout has.
+  worn_mainhand: ushort;
 }
 
 // -----------------------------------------------------------------------------

@@ -230,7 +230,7 @@ func TestAWardRemovalPaysNoLootAndNoExperience(t *testing.T) {
 	id := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
 
 	// A real blow through the authoritative path, so the tap is the one combat sets.
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()

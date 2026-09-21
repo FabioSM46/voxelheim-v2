@@ -367,11 +367,11 @@ func TestAWornThroughBladeSwingsAgainAfterARepair(t *testing.T) {
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 
 	player.inventory.mu.Lock()
-	player.inventory.slots[0].durability = 0
+	player.inventory.slots[equipmentMainHand].durability = 0
 	player.inventory.slots[1] = stackOf(ItemSharpeningStone, 1)
 	player.inventory.mu.Unlock()
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused before it could be judged: %v", err)
 	}
 	h.step()
@@ -379,15 +379,15 @@ func TestAWornThroughBladeSwingsAgainAfterARepair(t *testing.T) {
 		t.Fatalf("a blade worn through cost the draugr %d health", draugrRow.maxHealth-got)
 	}
 
-	state, err := player.Repair(protocol.RepairRequest{KitSlot: 1, TargetSlot: 0, ClientTick: 2})
+	state, err := player.Repair(protocol.RepairRequest{KitSlot: 1, TargetSlot: mainHandSlot, ClientTick: 2})
 	if err != nil {
 		t.Fatalf("mending a blade worn through: %v", err)
 	}
-	if got := state.Stacks[0].Durability; got != SharpeningStoneRestore {
+	if got := state.Stacks[equipmentMainHand].Durability; got != SharpeningStoneRestore {
 		t.Fatalf("the mended blade is at %d durability, want %d", got, SharpeningStoneRestore)
 	}
 
-	if err := h.swing(player, 0, 3); err != nil {
+	if err := h.swing(player, mainHandSlot, 3); err != nil {
 		t.Fatalf("the swing after the repair was refused: %v", err)
 	}
 	h.step()
@@ -441,7 +441,7 @@ func TestEveryRefusedRepairLeavesThePackBitIdentical(t *testing.T) {
 			name: "the kit slot holds a blade",
 			stock: func(h *structureHarness, p *Player) {
 				h.stockPack(p)
-				h.equipWorn(p, 0, ItemIronSword, 20)
+				h.equipWorn(p, mainHandSlot, ItemIronSword, 20)
 				h.equipWorn(p, 1, ItemRustySword, 10)
 			},
 			kit: 0, target: 1,

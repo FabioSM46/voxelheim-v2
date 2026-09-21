@@ -312,6 +312,9 @@ pub enum Control {
     Talk,
     /// The dungeon sessions window: what this character is currently saved to.
     Sessions,
+    /// Draw the main-hand weapon into the hand, or sheathe it again. Local input routing
+    /// only: the drawn state is never sent, and the server still judges every swing.
+    DrawWeapon,
 }
 
 /// Every control, in the order the settings screen lists them.
@@ -320,7 +323,7 @@ pub enum Control {
 /// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
 /// that array with `CONTROLS.map`, so a control listed here out of its declaration order
 /// would silently hand every control below it somebody else's key.
-pub const CONTROLS: [Control; 14] = [
+pub const CONTROLS: [Control; 15] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -335,6 +338,7 @@ pub const CONTROLS: [Control; 14] = [
     Control::Mount,
     Control::Talk,
     Control::Sessions,
+    Control::DrawWeapon,
 ];
 
 impl Control {
@@ -355,6 +359,7 @@ impl Control {
             Self::Mount => "mount",
             Self::Talk => "talk",
             Self::Sessions => "sessions",
+            Self::DrawWeapon => "draw-weapon",
         }
     }
 
@@ -375,6 +380,7 @@ impl Control {
             Self::Mount => "Call mount",
             Self::Talk => "Push to talk",
             Self::Sessions => "Dungeon sessions",
+            Self::DrawWeapon => "Draw weapon",
         }
     }
 
@@ -414,6 +420,9 @@ impl Control {
             // [`Bindings::from_pairs`] gives it the first key nothing else holds — which
             // is `KeyO` unless the player has moved something onto it.
             Self::Sessions => KeyCode::KeyO,
+            // `KeyR` was offered and bound to nothing, the shape `Sessions` arrived in on
+            // `KeyO`: an older settings file has no `draw-weapon` line and gets it here.
+            Self::DrawWeapon => KeyCode::KeyR,
         }
     }
 }
@@ -3110,9 +3119,9 @@ mod tests {
     /// older client carries no `sessions` line and gets the key from the default.
     #[test]
     fn the_sessions_control_is_appended_last_and_starts_on_o() {
-        assert_eq!(CONTROLS.len(), 14);
-        assert_eq!(CONTROLS[CONTROLS.len() - 1], Control::Sessions);
-        assert_eq!(Control::Sessions as usize, CONTROLS.len() - 1);
+        // Last when it arrived; `DrawWeapon` has been appended after it since.
+        assert_eq!(CONTROLS[13], Control::Sessions);
+        assert_eq!(Control::Sessions as usize, 13);
 
         let mut settings = Settings::default();
         assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyO);
@@ -3132,6 +3141,36 @@ mod tests {
         assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyB);
         settings.reset(Tab::Controls);
         assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyO);
+    }
+
+    /// **The draw-weapon key, appended last and starting on `R`** (#1239).
+    ///
+    /// Appended for the reason every control is: [`Bindings`] indexes by `control as usize`.
+    /// `KeyR` was offered and held by nothing, so an older settings file loads with the new
+    /// control on its default, and it rebinds and resets like any other.
+    #[test]
+    fn the_draw_weapon_control_is_appended_last_and_starts_on_r() {
+        assert_eq!(CONTROLS.len(), 15);
+        assert_eq!(CONTROLS[CONTROLS.len() - 1], Control::DrawWeapon);
+        assert_eq!(Control::DrawWeapon as usize, CONTROLS.len() - 1);
+
+        let mut settings = Settings::default();
+        assert_eq!(settings.bindings().key(Control::DrawWeapon), KeyCode::KeyR);
+        assert_eq!(key_name(KeyCode::KeyR), Some("r"));
+        assert_eq!(Control::DrawWeapon.label(), "Draw weapon");
+        assert_eq!(Control::from_name("draw-weapon"), Some(Control::DrawWeapon));
+
+        assert_eq!(
+            settings.rebind(Control::DrawWeapon, KeyCode::KeyE),
+            Err(RebindRefusal::WouldUnbind(Control::Inventory))
+        );
+        assert_eq!(settings.bindings().key(Control::DrawWeapon), KeyCode::KeyR);
+        settings
+            .rebind(Control::DrawWeapon, KeyCode::KeyG)
+            .expect("g is free");
+        assert_eq!(settings.bindings().key(Control::DrawWeapon), KeyCode::KeyG);
+        settings.reset(Tab::Controls);
+        assert_eq!(settings.bindings().key(Control::DrawWeapon), KeyCode::KeyR);
     }
 
     /// The mode knob's whole bound: three values, stopping at each end, starting on the one

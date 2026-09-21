@@ -610,7 +610,7 @@ func TestASwingAtAResidentHitsNothing(t *testing.T) {
 	// Yaw 0 looks along -Z, so this is the position combat_test.go's landing swing uses.
 	r := h.standResidentAt(vnet.ResidentRoleSmith, [3]float64{0.5, 64, -1.5}, 0)
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()

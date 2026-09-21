@@ -64,7 +64,7 @@ func TestEnergyRefillNeverPauses(t *testing.T) {
 
 	for name, arrange := range map[string]func(*Player){
 		"idle":                  func(*Player) {},
-		"blocking":              func(p *Player) { p.blocking = true },
+		"blocking":              func(p *Player) { p.wantsBlock, p.blocking = true, true },
 		"swing pending":         func(p *Player) { p.pendingSwing = &pendingSwing{slot: 0} },
 		"weapon recovering":     func(p *Player) { p.attackCooldown = 5 },
 		"just hit":              func(p *Player) { p.damageLocked(1) },

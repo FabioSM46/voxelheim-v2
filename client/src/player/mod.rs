@@ -32,6 +32,8 @@
 //! | `mod.rs` | input sampling, the send cadence, the bodies the snapshots drive |
 //! | `ambience.rs` | the cosmetic ground look read from loaded voxels around the eye |
 //! | `birds.rs` | the ambient birds: the species table, the flight paths and the flap |
+//! | `critters.rs` | the ambient ground creatures: the species table, the gaits, the ground they stand on and the climb that ends a life |
+//! | `watchers.rs` | the distant wolves' eyes: a pair of lights on the snow's horizon after dark, which never comes nearer |
 //! | `interpolate.rs` | the two-snapshot buffer and the interpolation — pure, no Bevy world |
 //! | `drops.rs` | authoritative drop spawn/despawn and cosmetic cube motion |
 //! | `hands.rs` | the camera-space held item and its cosmetic swing |
@@ -56,8 +58,10 @@ mod combat;
 mod combat_audio;
 mod constants;
 mod crafting;
+mod critters;
 mod drops;
 pub(crate) mod encounters;
+mod eyeshine;
 mod hands;
 mod horse;
 mod instance_entry;
@@ -83,6 +87,8 @@ mod tool_audio;
 mod trade;
 mod vendor;
 mod wards;
+mod watchers;
+mod water_audio;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -114,9 +120,11 @@ pub use crafting::{CraftClick, Ingredient, Recipe, RecipeCategory};
 // pack and the station panels a partition of the table; tests still sweep the table whole.
 #[cfg(test)]
 pub(crate) use crafting::RECIPES;
+pub(crate) use hands::{arrow_fletching_linear_rgba, bow_cord_linear_rgba};
 pub use interpolate::{Interpolated, SnapshotBuffer};
-#[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;
+#[cfg(test)]
+pub(crate) use inventory::MAIN_HAND_OFFSET;
 pub(crate) use inventory::equipment_item_fits;
 pub use inventory::{
     ApplyInventory, Inventory, InventoryClick, InventoryClickKind, PickedStack, SelectedSlot,
@@ -365,6 +373,7 @@ impl Plugin for PlayerPlugin {
         ambient_sound::register(app);
         tool_audio::register(app);
         mount_audio::register(app);
+        water_audio::register(app);
         combat_audio::register(app);
         encounters::register(app);
         // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
@@ -404,6 +413,8 @@ impl Plugin for PlayerPlugin {
                     sky::spawn_sky,
                     precipitation::create_visuals,
                     birds::create_visuals,
+                    critters::create_visuals,
+                    watchers::create_visuals,
                 ),
             )
             .add_systems(
@@ -498,7 +509,8 @@ impl Plugin for PlayerPlugin {
                     // their owners have published this frame's values.
                     refresh_body_held_item
                         .after(ApplySnapshots)
-                        .after(ApplyInventory),
+                        .after(ApplyInventory)
+                        .after(combat::ApplyWeaponDrawn),
                 )
                     .after(crate::net::DrainNetwork),
             )
@@ -515,6 +527,28 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 (birds::keep_the_flock, birds::fly_the_flock)
+                    .chain()
+                    .after(camera::AimCamera)
+                    .after(ambience::sample_the_ground),
+            )
+            // The same ordering and the same reasons one module over: the critters are
+            // anchored to the eye, which species is about is the look this frame settled on,
+            // and the pair is chained because `keep_the_critters` decides what should exist
+            // while `run_the_critters` stands it on the ground — a frame between the two
+            // would draw a newborn squirrel at the origin.
+            .add_systems(
+                Update,
+                (critters::keep_the_critters, critters::run_the_critters)
+                    .chain()
+                    .after(camera::AimCamera)
+                    .after(ambience::sample_the_ground),
+            )
+            // The distant eyes, on the same order for the same reasons: measured from this
+            // frame's eye, gated on this frame's look, and chained so a pair lit this frame is
+            // faded and held to its floor on the frame it appears.
+            .add_systems(
+                Update,
+                (watchers::keep_the_watchers, watchers::run_the_watchers)
                     .chain()
                     .after(camera::AimCamera)
                     .after(ambience::sample_the_ground),
@@ -1001,6 +1035,7 @@ impl Appearances {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: Instant::now(),
                 drawn: true,
             },
@@ -1019,6 +1054,7 @@ impl Appearances {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: Instant::now(),
                 drawn: true,
             },
@@ -1097,6 +1133,7 @@ struct Described {
     worn_chest: u16,
     worn_legs: u16,
     worn_offhand: u16,
+    worn_mainhand: u16,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -1362,6 +1399,11 @@ struct Worn {
     chest: u16,
     legs: u16,
     off_hand: u16,
+    /// The weapon the server says this body holds. **Carried and drawn by nothing**: no
+    /// overlay, no material key and no mesh reads it, so a sword in the main hand leaves a
+    /// body exactly as it was. It is here so that what a body wears is the server's whole
+    /// description rather than four fifths of it.
+    main_hand: u16,
 }
 
 impl Worn {
@@ -1372,6 +1414,7 @@ impl Worn {
             chest: 0,
             legs: 0,
             off_hand: 0,
+            main_hand: 0,
         }
     }
 
@@ -1382,6 +1425,7 @@ impl Worn {
             chest: description.worn_chest,
             legs: description.worn_legs,
             off_hand: description.worn_offhand,
+            main_hand: description.worn_mainhand,
         }
     }
 
@@ -2143,6 +2187,7 @@ fn ingest_appearances(
                 worn_chest: message.worn_chest,
                 worn_legs: message.worn_legs,
                 worn_offhand: message.worn_offhand,
+                worn_mainhand: message.worn_mainhand,
                 at: now,
                 drawn: false,
             },
@@ -2164,6 +2209,7 @@ fn ingest_appearances(
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: now,
                 drawn: false,
             },
@@ -2979,10 +3025,11 @@ fn show_the_local_body(view: Res<ViewMode>, mut bodies: Query<&mut Visibility, W
     }
 }
 
-/// The authoritative selected stack and the local state that chooses its renderer.
+/// The authoritative stack in the hand and the local state that chooses its renderer.
 ///
 /// Grouped because they are one subject: the item comes from the server-sent pack, while
-/// the selected index and camera view decide only where that presentation appears.
+/// the drawn state, the selected index and the camera view decide only which slot is shown
+/// and where. Drawn, the hand is the main hand; sheathed, the selected hotbar slot.
 #[derive(SystemParam)]
 struct BodyHeldSubject<'w> {
     inventory: Res<'w, Inventory>,
@@ -2991,6 +3038,7 @@ struct BodyHeldSubject<'w> {
     view: Res<'w, ViewMode>,
     mount: Res<'w, LocalMount>,
     session: Option<Res<'w, Session>>,
+    drawn: Res<'w, combat::WeaponDrawn>,
 }
 
 impl BodyHeldSubject<'_> {
@@ -2998,7 +3046,8 @@ impl BodyHeldSubject<'_> {
         if self.mount.mounted() {
             None
         } else {
-            stack_item_id(self.inventory.slot(self.selected.0))
+            combat::hand_slot(self.drawn.0, self.selected.0, self.session.as_deref())
+                .and_then(|slot| stack_item_id(self.inventory.slot(slot)))
         }
     }
 
@@ -3358,6 +3407,7 @@ pub(crate) fn reset_world(world: &mut World) {
     despawn::<structures::Structure>(world);
     despawn::<horse::PaddockHorse>(world);
     despawn::<birds::Bird>(world);
+    despawn::<critters::Critter>(world);
     target::reset_world(world);
     projectiles::reset_world(world);
     wards::reset_world(world);
@@ -3367,6 +3417,7 @@ pub(crate) fn reset_world(world: &mut World) {
     combat::reset_world(world);
     tool_audio::reset_world(world);
     mount_audio::reset_world(world);
+    water_audio::reset_world(world);
     combat_audio::reset_world(world);
     trade::reset_world(world);
     use crate::world::transition::clear_messages;
@@ -3381,6 +3432,7 @@ pub(crate) fn reset_world(world: &mut World) {
     clear_messages::<InventoryClick>(world);
     clear_messages::<CraftClick>(world);
     clear_messages::<combat::SwingSent>(world);
+    clear_messages::<combat::SwingAbandoned>(world);
     clear_messages::<inventory::ConsumeSent>(world);
 }
 

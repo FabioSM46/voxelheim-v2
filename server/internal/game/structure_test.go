@@ -1423,6 +1423,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonInstanceUnavailable,
 		vnet.RefusalReasonSessionMismatch,
 		vnet.RefusalReasonEntryOfferUnknown,
+		// V44's two-handed refusal, produced by the equip rule in moveLocked.
+		vnet.RefusalReasonHandsOccupied,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1444,9 +1446,11 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// V40's NotEnoughEnergy does too: the contract part carries the member and its
-	// client silence, and the attack-cost part is its producer. The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 58 {
-		t.Errorf("RefusalReason has %d members, want 58 — a new one needs a producer and client handling, not a test edit", got)
+	// client silence, and the attack-cost part is its producer. V44's HandsOccupied follows
+	// the same pattern: the contract carries it, and #1236 is its producer. The count
+	// includes Unknown.
+	if got := len(vnet.EnumNamesRefusalReason); got != 59 {
+		t.Errorf("RefusalReason has %d members, want 59 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

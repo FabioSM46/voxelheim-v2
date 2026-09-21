@@ -61,13 +61,59 @@ impl Bed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Call {
     Rattlesnake,
-    Crow,
+    /// The snow's daytime raptor: a harsh, descending scream, built by [`scream`] from
+    /// [`EAGLE`].
     Eagle,
+    /// The sand's daytime raptor, the voice of the griffon vulture `birds::BIRDS` already
+    /// flies over the desert: the same construction as the eagle's and none of its numbers —
+    /// lower, hoarser and sparser. Built by [`scream`] from [`CONDOR`].
+    Condor,
     Wolf,
     /// Green country at night: an occasional cricket, not a continuous wall of them.
     Cricket,
-    /// The macaw's squawk, heard by day only where `birds::species_for` answers the macaw.
+    /// The macaw's squawk, heard by day only where the bird table flies the macaw.
     Parrot,
+    /// A squirrel's alarm chatter: a burst of dry barks, heard by day in a wood where
+    /// `critters::species_for` answers the squirrel — and heard *from the squirrel*, which is
+    /// the first voice in this table on the near side of the origin rule in `wildlife.rs`.
+    Squirrel,
+    /// The owl's two-part hoot, heard after dark wherever the bird table flies an owl.
+    Owl,
+    /// A mouse's squeak: one to three short, high, thin squeaks, heard after dark on the sand
+    /// where `critters::species_for` answers the mouse — and heard *from the mouse*. The highest
+    /// voice in this table, and the one the 3.6 kHz ceiling binds hardest: see [`squeak`].
+    Mouse,
+    /// A lynx's yowl: the harsh, rising, wavering cry of cats fighting, heard by day in snow
+    /// country where `critters::species_for` answers the lynx — and heard *from the lynx*. The
+    /// one voice in this table whose pitch climbs the whole way through: see [`yowl`].
+    Lynx,
+}
+
+impl Call {
+    /// Every variant, in declaration order. A file-wide rule is tested by walking this, so a
+    /// new variant joins those guarantees by existing rather than by somebody remembering to
+    /// add it to a list in a test. Raised in review on #1221, where the hand-written list was
+    /// the exact drift the rule existed to prevent.
+    ///
+    /// `every_call_is_in_all` holds it to that: it walks a value of every variant through an
+    /// exhaustive match, so a new variant stops the crate compiling until it is named there,
+    /// and asserts the list has no duplicates and the same length.
+    /// Test-only, like `wildlife::row_of` and for the same reason: nothing that runs enumerates
+    /// the calls — the table does — so this exists to let a file-wide rule be tested over every
+    /// variant instead of over a list somebody has to remember to extend.
+    #[cfg(test)]
+    pub(super) const ALL: &'static [Self] = &[
+        Self::Rattlesnake,
+        Self::Eagle,
+        Self::Condor,
+        Self::Wolf,
+        Self::Cricket,
+        Self::Parrot,
+        Self::Squirrel,
+        Self::Owl,
+        Self::Mouse,
+        Self::Lynx,
+    ];
 }
 
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
@@ -113,6 +159,97 @@ pub(super) fn squawk_onsets(seed: u64) -> Vec<f32> {
     (0..squawks(seed))
         .map(|index| index as f32 * period)
         .collect()
+}
+
+/// How many barks one squirrel's chatter carries: five to nine, from its seed.
+///
+/// **A burst rather than a call**, which is what makes it a squirrel rather than a bird. A red
+/// squirrel that has seen something does not say one thing: it sits on a branch and scolds, and
+/// the scolding is a run of near-identical barks close enough together to read as one utterance.
+/// Five is the shortest that still reads as a run rather than as a stutter.
+pub(super) fn chatters(seed: u64) -> usize {
+    5 + ((seed >> 8) % 5) as usize
+}
+
+/// How long one bark sounds.
+///
+/// Fifty-five milliseconds: shorter than the cricket's syllable and far shorter than a squawk,
+/// because a bark is an edge rather than a note and anything longer acquires a pitch a listener
+/// can hum.
+pub(super) const CHATTER_SECONDS: f32 = 0.055;
+
+/// Where each bark starts: one every 95 to 130 ms, from its seed, so every bark is followed by
+/// at least 40 ms of silence before the next.
+///
+/// The spacing is the *seed's*, not a constant, for the reason the cricket's and the macaw's
+/// are: two squirrels chattering within earshot at identical rates would beat against each
+/// other and read as one machine.
+pub(super) fn chatter_onsets(seed: u64) -> Vec<f32> {
+    let period = 0.095 + ((seed >> 16) % 36) as f32 / 1000.0;
+    (0..chatters(seed))
+        .map(|index| index as f32 * period)
+        .collect()
+}
+
+/// How far a bark's pitch falls across its length, as a fraction of where it starts.
+const BARK_FALL: f32 = 0.62;
+
+/// How far above the voice its rough twin sits, as the squawk's detune is: close enough to beat
+/// at tens of hertz rather than to sound as a second pitch.
+const BARK_DETUNE: f32 = 1.055;
+
+/// One bark of a squirrel's chatter: dry, harsh and broadband, never a note.
+///
+/// The squawk's construction with the arch taken out and the fall steepened, which is the
+/// difference between a parrot's cry and a rodent's scold:
+///
+/// - **A falling pitch and nothing else.** Every voiced layer rides one glide from the seed's
+///   pitch down to [`BARK_FALL`] of it, with no vibrato at all — a squawk arches because a
+///   macaw's cry does, and a bark is over before a contour could be heard in it.
+/// - **Roughness.** A sawtooth through two formant bands, the low 1300 Hz and the bright
+///   2500 Hz, and beside each a second sawtooth [`BARK_DETUNE`] higher so the two beat.
+/// - **A dry edge.** White noise through the same two bands and a narrow one at 3300 Hz, which
+///   is what makes a bark read as a click with a voice in it rather than as a short vowel.
+///
+/// Every band, and every frequency a glide reaches, stays under 3.6 kHz: 0.45 of the lowest
+/// supported rate, which is the bound every call in this file is written to.
+fn bark(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 780.0 + variation * 220.0;
+    let voice = |detune: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Saw,
+            from: hz * detune,
+            to: hz * detune * BARK_FALL,
+            seconds: CHATTER_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.0,
+                depth: 0.0,
+                onset: 0.0,
+            },
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.27, 1300.0, 1.1),
+        voice(BARK_DETUNE, 0.20, 1300.0, 1.1),
+        voice(1.0, 0.16, 2500.0, 1.5),
+        voice(BARK_DETUNE, 0.11, 2500.0, 1.5),
+        breath(0.17, 1300.0, 1.6),
+        breath(0.14, 2500.0, 2.0),
+        breath(0.07, 3300.0, 1.3),
+    ]
 }
 
 /// How far the squawk's pitch arches above its falling line, as the vibrato's depth: one half
@@ -175,6 +312,141 @@ fn squawk(variation: f32, envelope: Envelope) -> Vec<Layer> {
         breath(0.15, FilterKind::Band, 1500.0, 1.5),
         breath(0.15, FilterKind::Band, 2800.0, 2.0),
         breath(0.06, FilterKind::Band, 3400.0, 1.2),
+    ]
+}
+
+/// The numbers one raptor's cry differs from another's by.
+///
+/// **The construction is [`scream`] and is shared; a species is this row of figures.** That is
+/// the shape the issue behind the eagle asked for in as many words — the eagle and the condor
+/// "should share that construction and differ in their numbers, not in their kind" — and it is
+/// also the only way the two can be told apart by a test: a difference that lives in a number
+/// can be asserted against, where a second hand-written copy of the same seven layers can only
+/// be read.
+struct Scream {
+    /// The pitch the fall starts from at variation zero, and how far the seed lifts it.
+    hz: f32,
+    spread: f32,
+    /// Where the falling line ends, as a fraction of where it starts.
+    fall: f32,
+    /// How far above the voice its rough twin sits. The two beat at `(detune - 1) * hz`, which
+    /// is amplitude modulation a throat makes rather than a second note.
+    detune: f32,
+    /// The two formant bands the sawtooth is heard through, as `(hertz, q)`.
+    formants: [(f32, f32); 2],
+    /// A third band only the breath fills, above both formants: the air in the cry.
+    hiss: (f32, f32),
+    /// How loud the loudest voiced layer is, and how loud each of the two formant breaths is.
+    /// **A hoarser bird is more air than pitch**, so the condor's two numbers are the eagle's
+    /// the other way round.
+    voiced: f32,
+    breath: f32,
+    /// The rasp, as a tremble on the falling line: fast and shallow is a rough throat, where
+    /// slow and deep would be a siren. Its depth is a fraction of the pitch reached, so it
+    /// stays the same interval wide all the way down, and its rate stays inside the 40 Hz
+    /// `Sound::validate` allows a vibrato — a bound `every_raptor_stays_under_the_lowest_nyquist_margin`
+    /// reaches by baking each description rather than by restating the number.
+    rasp: Vibrato,
+    /// How long the fall takes. The glide holds its arrival afterwards, so this is the cry and
+    /// not the bake.
+    seconds: f32,
+}
+
+/// The snow's eagle: high, bright and harsh, a scream that falls by two fifths.
+const EAGLE: Scream = Scream {
+    hz: 980.0,
+    spread: 180.0,
+    fall: 0.6,
+    detune: 1.035,
+    formants: [(2000.0, 1.1), (3100.0, 1.5)],
+    hiss: (3400.0, 1.2),
+    voiced: 0.24,
+    breath: 0.13,
+    rasp: Vibrato {
+        // The synthesiser bounds a vibrato at 40 Hz (`Sound::validate`), so this is near the
+        // fastest tremble a glide may carry — which is what a rough throat is.
+        hz: 38.0,
+        depth: 0.045,
+        onset: 0.05,
+    },
+    seconds: 0.55,
+};
+
+/// The sand's condor: an octave and a half below the eagle, its formants down with it, more
+/// air than pitch, and a coarser and slower rasp. A vulture's cry is a hoarse rasp rather
+/// than a raptor's whistle, which is the whole of why its numbers are not the eagle's
+/// transposed.
+const CONDOR: Scream = Scream {
+    hz: 300.0,
+    spread: 60.0,
+    fall: 0.72,
+    detune: 1.05,
+    formants: [(750.0, 0.9), (1500.0, 1.2)],
+    hiss: (2400.0, 1.0),
+    voiced: 0.15,
+    breath: 0.26,
+    rasp: Vibrato {
+        hz: 26.0,
+        depth: 0.07,
+        onset: 0.04,
+    },
+    seconds: 0.8,
+};
+
+/// One raptor's cry: harsh, broadband and descending, never a note.
+///
+/// Built from the same vocabulary as [`squawk`], and deliberately so — that function is this
+/// repository's worked example of a voice that is textured rather than tonal, and the eagle is
+/// the voice it was never applied to:
+///
+/// - **A falling contour.** Every voiced layer rides one exponential glide from the seed's
+///   pitch down to [`Scream::fall`] of it, so the cry descends the whole way through. A
+///   squawk's single half-cycle of vibrato arches its pitch instead; a scream does not arch,
+///   it falls, so the vibrato here is the rasp and nothing else.
+/// - **Roughness.** A sawtooth's dense harmonics through two formant bands, and beside each a
+///   second sawtooth [`Scream::detune`] higher: the pair beats at tens of hertz.
+/// - **Breath.** White noise through the same two formants and a hiss above them, so the
+///   spectrum between the harmonics is filled rather than empty. This is where a hoarse bird
+///   spends its level.
+///
+/// Every band, and every frequency a glide reaches, stays under 3.6 kHz — 0.45 of the lowest
+/// supported rate — so both cries bake at an 8 kHz device rate. The widest reach is the
+/// detuned twin at the top of its variation, lifted by the rasp's depth:
+/// `(hz + spread) * detune * (1 + rasp.depth)`, which is 1254 Hz for the eagle and 404 Hz for
+/// the condor. `every_raptor_stays_under_the_lowest_nyquist_margin` is what holds that.
+fn scream(spec: &Scream, variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = spec.hz + variation * spec.spread;
+    let voice = |detune: f32, gain: f32, (formant, q): (f32, f32)| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Saw,
+            from: hz * detune,
+            to: hz * detune * spec.fall,
+            seconds: spec.seconds,
+            curve: Curve::Exponential,
+            vibrato: spec.rasp,
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, (formant, q)| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    let [low, high] = spec.formants;
+    vec![
+        voice(1.0, spec.voiced, low),
+        voice(spec.detune, spec.voiced * 0.73, low),
+        voice(1.0, spec.voiced * 0.65, high),
+        voice(spec.detune, spec.voiced * 0.46, high),
+        breath(spec.breath, (low.0, 1.5)),
+        breath(spec.breath, (high.0, 2.0)),
+        breath(spec.breath * 0.42, spec.hiss),
     ]
 }
 
@@ -401,12 +673,320 @@ fn rattle(variation: f32, seed: u64, envelope: Envelope) -> Vec<Layer> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// The mouse
+// ---------------------------------------------------------------------------
+
+/// How many squeaks one mouse call carries: one to three, from its seed.
+pub(super) fn squeaks(seed: u64) -> usize {
+    1 + ((seed >> 8) % 3) as usize
+}
+
+/// How long one squeak sounds.
+///
+/// Seventy milliseconds: a squeak is a flick of pitch rather than a note, and long enough for
+/// its fall to be heard as one — a squirrel's bark is shorter and has no contour worth hearing.
+pub(super) const SQUEAK_SECONDS: f32 = 0.07;
+
+/// Where each squeak starts: one every 110 to 150 ms, from its seed, so every squeak is followed
+/// by at least 40 ms of silence before the next.
+pub(super) fn squeak_onsets(seed: u64) -> Vec<f32> {
+    let period = 0.11 + ((seed >> 16) % 41) as f32 / 1000.0;
+    (0..squeaks(seed))
+        .map(|index| index as f32 * period)
+        .collect()
+}
+
+/// Where a squeak's pitch line ends, as a fraction of where it starts.
+const SQUEAK_FALL: f32 = 0.82;
+
+/// How far one half-cycle of vibrato lifts the squeak above its falling line on the way: the
+/// pitch flicks up into the squeak and drops out of it.
+const SQUEAK_ARCH: f32 = 0.10;
+
+/// How far above the voice its rough twin sits: at 2.5 to 2.8 kHz, 3.5% beats at 90 to 100 Hz,
+/// a rasp in the voice rather than a second pitch.
+const SQUEAK_DETUNE: f32 = 1.035;
+
+/// One squeak of a mouse: short, high and thin, and never a note.
+///
+/// **A real mouse squeaks well above the 3.6 kHz ceiling, so this is built to read as a squeak
+/// under it rather than to reproduce its spectrum** — the cricket's narrow noise bands near
+/// 3.2 kHz are the worked example of that, and the rattle the most recent one:
+///
+/// - **A pitch contour.** Two voiced layers ride one glide from the seed's pitch down to
+///   [`SQUEAK_FALL`] of it, lifted by a single half-cycle of vibrato — a flick up and a drop.
+/// - **Sines, and that is the synthesiser's rule rather than a shortcut.** Its saw and triangle
+///   are not band-limited (`audio/synth/mod.rs` says so and says to prefer sine and noise for
+///   bright sounds), and at 2.5 kHz their harmonics would fold back down across an 8 kHz
+///   device. What makes the voice rough is the twin [`SQUEAK_DETUNE`] above it, beating at
+///   about a hundred hertz.
+/// - **Breath, most of the level.** White noise through two bands high under the ceiling and a
+///   wider one below them fills the band the squeak lives in, which is what separates it from
+///   the clean partials `a_squeak_is_thin_and_textured_and_not_a_note` builds as its negative
+///   control.
+///
+/// **What the 3.6 kHz ceiling guarantees here, said exactly.** Every frequency a glide reaches
+/// with its arch stays under it — the widest reach is `2800 * SQUEAK_DETUNE * (1 +
+/// SQUEAK_ARCH)`, 3188 Hz — and every band is *centred* under it, which is what
+/// `Sound::validate` bounds and what lets the description bake at an 8 kHz device. A resonant
+/// band is a slope rather than a wall, so the breath does put some energy above the line, and
+/// that is measured rather than claimed: at 8 kHz a squeak carries 0.3 to 0.5% of its energy
+/// above 3.6 kHz, against 2.4 to 5.2% for the same squeak with its top band centred on the
+/// ceiling itself. Noise is drawn at the device's own rate, so nothing that spills is folded
+/// back down. `a_squeak_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more`
+/// holds both numbers; an earlier version of this comment said every band stayed under the
+/// ceiling, which is true of the centres and not of the skirts (review on #1222).
+fn squeak(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 2500.0 + variation * 300.0;
+    let voice = |detune: f32, gain| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Sine,
+            from: hz * detune,
+            to: hz * detune * SQUEAK_FALL,
+            seconds: SQUEAK_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.5 / SQUEAK_SECONDS,
+                depth: SQUEAK_ARCH,
+                onset: 0.0,
+            },
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: None,
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.17),
+        voice(SQUEAK_DETUNE, 0.12),
+        breath(0.70, 2600.0, 3.0),
+        breath(0.55, 3250.0, 3.5),
+        breath(0.30, 2000.0, 2.0),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The owl
+// ---------------------------------------------------------------------------
+
+/// The two notes of one hoot: how long each sounds, and where the second starts.
+///
+/// **Unequal, which is the whole shape of the call.** A tawny owl's hoot is a short opening
+/// note, a held silence, and then a longer one that falls away — and an owl whose two notes
+/// are the same length reads as a stutter rather than as a bird. `Sound::bake_parts` exists
+/// because [`Sound::bake_at`] could only strike one length; its doc says so.
+///
+/// The gap is true silence rather than a dip: the second note is a separate strike, so its
+/// envelope starts at its own zero.
+const HOOT_FIRST_SECONDS: f32 = 0.34;
+const HOOT_SECOND_SECONDS: f32 = 0.62;
+const HOOT_GAP_SECONDS: f32 = 0.30;
+
+/// How long the whole call is baked for, with the second note ending inside it.
+///
+/// `HOOT_FIRST_SECONDS + HOOT_GAP_SECONDS + HOOT_SECOND_SECONDS` is 1.26, and the buffer is a
+/// little longer so both edges sit at exact silence.
+pub(super) const HOOT_SECONDS: f32 = 1.35;
+
+/// Where each note of a hoot starts and how long it sounds.
+///
+/// The first note opens the call; the second follows the gap. Nothing here varies with the
+/// seed — an owl's two notes are the same two notes every time, and what the seed moves is the
+/// pitch and the breath, not the rhythm. That is the opposite of the cricket and the macaw,
+/// whose *counts* vary, and it is deliberate: a hoot with a random number of notes is not a
+/// hoot.
+pub(super) fn hoot_parts() -> [(f32, f32); 2] {
+    [
+        (0.0, HOOT_FIRST_SECONDS),
+        (HOOT_FIRST_SECONDS + HOOT_GAP_SECONDS, HOOT_SECOND_SECONDS),
+    ]
+}
+
+/// How far the hoot's pitch falls across one note, as a fraction of where it starts.
+const HOOT_FALL: f32 = 0.88;
+
+/// How far above the voice its rough twin sits: at 240 to 300 Hz, 1.5% beats at 3.6 to 4.5 Hz,
+/// the slow waver of a soft throat rather than a second note.
+const HOOT_DETUNE: f32 = 1.015;
+
+/// One note of an owl: low, breathy and soft-edged, and never a note in the musical sense.
+///
+/// Closer to the wolf's register than to any bird in the catalogue, and built from the same
+/// vocabulary as [`squawk`] and [`howl`]:
+///
+/// - **A pitch contour.** Every voiced layer rides one glide falling to [`HOOT_FALL`] of where
+///   it started, with a single half-cycle of vibrato arching it a little on the way — a hoot
+///   swells and sags rather than sitting on a pitch.
+/// - **Formants over a triangle, not a harmonic stack.** Two low bands stand for the throat and
+///   the open beak — 330 Hz and 780 Hz — and beside the lower one a twin [`HOOT_DETUNE`] above
+///   it beats with it at a few hertz. A triangle rather than a saw because an owl is *soft*:
+///   the saw's dense upper harmonics are what make a macaw harsh, and an owl is the opposite.
+/// - **Breath, and a lot of it.** An owl's hoot is mostly air. Noise through the same two
+///   bands and a low wash above them fills the spectrum between the harmonics, which is what
+///   separates this from the clean partials its negative control is built from.
+///
+/// Every band, and every frequency a glide reaches with its arch, stays far under 3.6 kHz —
+/// the easy case for the 8 kHz bound, because an owl's call is low, and asserted anyway.
+fn hoot(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 240.0 + variation * 60.0;
+    let voice = |detune: f32, harmonic: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Triangle,
+            from: hz * detune * harmonic,
+            to: hz * detune * harmonic * HOOT_FALL,
+            seconds: HOOT_SECOND_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.5 / HOOT_SECOND_SECONDS,
+                depth: 0.06,
+                onset: 0.05,
+            },
+        }),
+        gain,
+        envelope,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+        gate: None,
+    };
+    let breath = |gain, kind, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, kind, formant, q)
+    };
+    vec![
+        // The throat, and the waver in it.
+        voice(1.0, 1.0, 0.35, 330.0, 1.1),
+        voice(HOOT_DETUNE, 1.0, 0.16, 330.0, 1.1),
+        // The beak: the second partial read through a higher band, which is what gives the
+        // hoot its "oo" rather than leaving it a hum.
+        voice(1.0, 2.0, 0.13, 780.0, 1.3),
+        // The air. Wide bands and a low-passed wash above them, for the reason `howl` gives:
+        // narrow bands alone leave empty bins, and empty bins are what a flatness measurement
+        // reads as a note.
+        breath(0.39, FilterKind::Band, 330.0, 0.55),
+        breath(0.31, FilterKind::Band, 780.0, 0.6),
+        breath(0.19, FilterKind::Low, 1600.0, 0.6),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The lynx
+// ---------------------------------------------------------------------------
+
+/// How long a yowl's pitch climbs for. The glide holds its arrival afterwards, so this is the
+/// cry rather than the bake — and it ends before the release begins, which
+/// `a_yowl_finishes_rising_before_its_release_begins` holds.
+const YOWL_SECONDS: f32 = 1.05;
+
+/// Where a yowl's pitch line ends, as a multiple of where it starts: above one, which is the
+/// whole of how a yowl differs from a squawk, a scream and a whinny.
+const YOWL_RISE: f32 = 1.55;
+
+/// How far above the voice its rough twin sits: at 430 to 850 Hz along the climb, 4.5% beats at
+/// 19 to 38 Hz, the rasp of a throat forced rather than a second pitch.
+const YOWL_DETUNE: f32 = 1.045;
+
+/// The waver: a real vibrato rather than an arch, and the other half of what makes a cat.
+///
+/// **Seven cycles a second, opening over the first third of a second**, so the cry starts as a
+/// sound and becomes a wail. A squawk carries one half-cycle as its arch and a scream a shallow
+/// 38 Hz tremble as its rasp; this is between them in rate and wider than either in depth —
+/// seven percent either side of the line, which is the "how far the vibrato opens" the issue
+/// names.
+const YOWL_WAVER: Vibrato = Vibrato {
+    hz: 7.0,
+    depth: 0.07,
+    onset: 0.35,
+};
+
+/// One lynx's yowl: harsh, rising and wavering, never a note.
+///
+/// Built from the vocabulary [`squawk`] is this repository's worked example of, and different
+/// from it in exactly the two ways the issue asks for:
+///
+/// - **A rising contour.** Every voiced layer rides one exponential glide from the seed's pitch
+///   up to [`YOWL_RISE`] of it, so the cry climbs the whole way through. A squawk's pitch arches
+///   and falls, a scream's falls, and a whinny rides one falling track — this one goes up.
+/// - **A wide waver.** [`YOWL_WAVER`] on every voiced layer, so the partials waver together as one
+///   voice rather than beating against each other.
+/// - **Roughness.** A sawtooth's dense harmonics through two formant bands, a nasal 1150 Hz and a
+///   bright 2300 Hz, and beside each a second sawtooth [`YOWL_DETUNE`] higher so the two beat.
+/// - **Breath.** White noise through the same two formants and a hiss above them, so the spectrum
+///   between the harmonics is filled rather than empty.
+///
+/// **What the 3.6 kHz ceiling guarantees here, said exactly** — the finding review on #1222 made
+/// about the squeak, applied before anybody has to make it again. Every frequency a glide
+/// reaches with its waver stays far under it: the widest reach is
+/// `550 * YOWL_RISE * YOWL_DETUNE * (1 + YOWL_WAVER.depth)`, 953 Hz. Every band is *centred*
+/// under it, which is what `Sound::validate` bounds. A resonant band is a slope rather than a
+/// wall, and a sawtooth is not band-limited, so some energy does land above the line, and it is
+/// measured rather than claimed.
+/// At 8 kHz a yowl carries 0.06 to 0.08% of its energy above 3.6 kHz, against 0.22 to 0.29% for
+/// the same yowl with its top band centred on the ceiling itself. At 48 kHz, where no Nyquist cuts
+/// anything off, it is 3.1% — and moving the top band out to 4.5 kHz barely changes that, because
+/// at that rate what lies above the line is the sawtooth's own upper harmonics through the bands'
+/// skirts rather than any band: the construction the squawk and the eagle ship.
+/// `a_yowl_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more` holds the 8 kHz
+/// pair and the 48 kHz bound.
+fn yowl(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 430.0 + variation * 120.0;
+    let voice = |detune: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Saw,
+            from: hz * detune,
+            to: hz * detune * YOWL_RISE,
+            seconds: YOWL_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: YOWL_WAVER,
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.26, 1150.0, 1.0),
+        voice(YOWL_DETUNE, 0.19, 1150.0, 1.0),
+        voice(1.0, 0.15, 2300.0, 1.4),
+        voice(YOWL_DETUNE, 0.11, 2300.0, 1.4),
+        breath(0.16, 1150.0, 1.5),
+        breath(0.14, 2300.0, 1.8),
+        breath(0.06, 3000.0, 1.3),
+    ]
+}
+
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
             Self::Rattlesnake => ([12.0, 31.0], 5.0, -1.3, 0.8, 24.0),
-            Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
-            Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
+            // The 0.55 s fall plus the 0.14 s release ends inside the baked 0.74 s, leaving
+            // 0.05 s of arrival pitch held open before the close. **It was 0.65 s, which did
+            // not fit**: the release began at 0.51 s, four hundredths *before* the glide had
+            // finished falling, so the cry was at 44% of its peak and dropping at the moment
+            // it reached its lowest pitch — the envelope-shaped fall this issue set out to
+            // replace, reintroduced by a length rather than by a description.
+            // `a_raptor_cry_finishes_falling_before_its_release_begins` is what now holds it.
+            Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.74, 96.0),
+            // High over the sand, in the band `BIRDS[VULTURE]` circles in (25 to 45 blocks),
+            // and **sparser than the eagle**: a bird that calls seldom, as the issue asks. The
+            // 0.8 s fall plus the 0.1 s release ends inside the baked 0.95 s, the same 0.05 s
+            // of held arrival.
+            Self::Condor => ([26.0, 58.0], 24.0, 30.0, 0.95, 96.0),
             Self::Wolf => ([35.0, 79.0], 26.0, 0.0, HOWL_SECONDS, 96.0),
             // In the grass a few blocks off. The longest call, three syllables at the slowest
             // spacing, ends at 2 * 0.19 + 0.06 = 0.44 s, inside the baked 0.45 s.
@@ -415,6 +995,66 @@ impl Call {
             // a few calls a minute rather than one every second (#1176). Two squawks at the
             // slowest spacing end at 0.52 + 0.3 = 0.82 s, inside the baked 0.85 s.
             Self::Parrot => ([8.0, 22.0], 7.0, 5.0, 0.85, 32.0),
+            // **The radius and the height here are the *fallback*, not the placement.** This
+            // is the first row whose voice is normally placed at a body — the lane sets the
+            // origin to the squirrel and this radius to zero when one is drawn — so these two
+            // numbers only decide where an *unseen* squirrel is, which the origin rule in
+            // `wildlife.rs` says is still ambience rather than silence. Six blocks off and on
+            // the ground is where an unseen one would be. The longest chatter, nine barks at
+            // the slowest spacing, ends at 8 * 0.13 + 0.055 = 1.095 s, inside the baked 1.15.
+            Self::Squirrel => ([11.0, 28.0], 6.0, 0.0, 1.15, 28.0),
+            // **The sparsest call in the table, and that is the acceptance criterion**: a
+            // night has a few hoots, not a chorus. Thirty to ninety seconds between them,
+            // against the cricket's six to sixteen.
+            //
+            // `radius` and `height` are the fallback bearing only — an owl is drawn, so its
+            // hoot is placed at its body and these are what a hoot uses when no owl has
+            // spawned yet. See `Origin` in `wildlife.rs`. They put it in a tree eight blocks
+            // off and six up, which is where an owl perches, and which is also the distance
+            // `a_hoot_carries_from_its_tree_without_clipping_at_any_rate` measures the call's
+            // level against: the fallback is the *pessimistic* case, since a hoot placed at a
+            // body is as close as the bird is.
+            Self::Owl => ([30.0, 90.0], 8.0, 6.0, HOOT_SECONDS, 64.0),
+            // **Sparse, and that is the acceptance criterion**: a desert night is mostly silent,
+            // so eighteen to forty-five seconds between calls, each one to three squeaks.
+            //
+            // `radius` and `height` are the fallback only — a mouse is drawn, so its squeak is
+            // placed at its body — and put an unseen mouse five blocks off on the ground. The
+            // range is short because a mouse is small: nothing hears one across a valley. The
+            // longest call, three squeaks at the slowest spacing, ends at 2 * 0.15 + 0.07 =
+            // 0.37 s, inside the baked 0.40 s.
+            Self::Mouse => ([18.0, 45.0], 5.0, 0.0, 0.40, 20.0),
+            // **Sparse, and sparser than the eagle it shares the snow's day with** (#1194) — and
+            // the sparseness comes from the lynx more than from this interval. A yowl may only
+            // begin while a lynx is drawn (`Origin::Body`), a lynx is drawn for at most its
+            // ten-second life of every forty-second window, and the lane holds its countdown at
+            // four seconds whenever it may not begin. So a lynx's first yowl comes about four
+            // seconds after it breaks cover, and a second one fits into its life only when the
+            // draw lands under six seconds — about one time in ten. A lynx in the player's cell
+            // every window is one yowl, now and then two, per forty seconds: about one and a half
+            // a minute, against the eagle's three and a half.
+            //
+            // **It was thirty to seventy-five seconds**, written while a yowl could still come
+            // from a bearing with no lynx drawn. Under the gating a countdown that starts at
+            // thirty never reaches zero inside a ten-second life, so that interval would have
+            // silenced the lynx altogether.
+            //
+            // `radius` and `height` are **never a placement**: a yowl with no lynx drawn is not
+            // heard at all. They are where a lynx is usually met, twenty-four blocks off on the
+            // snow, which is the distance
+            // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` measures the level at.
+            // The 1.05 s climb plus the 0.2 s release ends inside the baked 1.3 s, with 0.05 s of
+            // arrival held between.
+            //
+            // **The range is the eagle's ninety-six, and the interval is what keeps the two
+            // apart.** A yowl has to carry as far as a lynx can be seen: one is drawn up to 62.6
+            // blocks from the eye — `CRITTER_RANGE` out from an anchor the eye can be a cell's
+            // corner away from — and this was first written as sixty-four, at which a lynx
+            // standing forty blocks off was faded to 0.019 against the 0.031 the eagle overhead is
+            // faded to, and one sixty blocks off to 0.002.
+            // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` failing at twenty-four
+            // blocks is what said so.
+            Self::Lynx => ([4.0, 25.0], 24.0, 0.0, 1.3, 96.0),
         };
         CallProfile {
             interval,
@@ -427,8 +1067,8 @@ impl Call {
 
     /// One call rendered at the device's rate, from its seed. Every call is its description
     /// baked once for its profile's length — except the cricket and the macaw, whose
-    /// descriptions are one syllable, struck at each of [`syllable_onsets`] or
-    /// [`squawk_onsets`] with silence between.
+    /// descriptions are one syllable, struck at each of [`syllable_onsets`],
+    /// [`squawk_onsets`] or [`chatter_onsets`] with silence between.
     pub(super) fn bake(self, seed: u64, rate: u32) -> Result<Baked, synth::Error> {
         let seconds = self.profile().seconds;
         match self {
@@ -446,33 +1086,64 @@ impl Call {
                 rate,
                 seed,
             ),
+            Self::Squirrel => self.description(seed).bake_at(
+                &chatter_onsets(seed),
+                CHATTER_SECONDS,
+                seconds,
+                rate,
+                seed,
+            ),
+            Self::Mouse => self.description(seed).bake_at(
+                &squeak_onsets(seed),
+                SQUEAK_SECONDS,
+                seconds,
+                rate,
+                seed,
+            ),
+            // Two notes of **unequal** length, which `bake_at` cannot say — see
+            // `Sound::bake_parts`, which exists for this call.
+            Self::Owl => self
+                .description(seed)
+                .bake_parts(&hoot_parts(), seconds, rate, seed),
             _ => self.description(seed).bake(seconds, rate, seed),
         }
     }
 
     pub(super) fn description(self, seed: u64) -> Sound {
+        // **No bare `tone` closure lives here any more, and that is the shape of the change
+        // rather than a tidy-up.** It built a clean sine partial, and every voice that reached
+        // for one was a voice this repository has since found to whistle: the rattlesnake
+        // (#1184), the wolf (#1185), and now the eagle (#1186). Each is a named construction —
+        // `rattle`, `howl`, `scream`, `squawk` — and the last caller went with the eagle.
         let variation = (seed % 101) as f32 / 100.0;
-        let tone = |hz, gain, envelope| Layer {
-            exciter: Exciter::Oscillator {
-                wave: Wave::Sine,
-                hz,
-            },
-            gain,
-            envelope,
-            gate: None,
-            filter: None,
-        };
         let (attack, decay, sustain, release) = match self {
             // A rattle is wound up rather than started: the level climbs over a tenth of a
             // second, settles high, and the bake's release takes the last quarter away.
             Self::Rattlesnake => (0.1, 0.22, 0.82, 0.25),
-            Self::Crow => (0.025, 0.28, 0.05, 0.12),
-            Self::Eagle => (0.015, 0.4, 0.0, 0.1),
+            // A scream: struck hard, held open while the pitch falls, closed quickly. The old
+            // eagle decayed to a zero sustain over 0.4 s, which made the fall an envelope
+            // rather than a pitch.
+            Self::Eagle => (0.012, 0.1, 0.62, 0.14),
+            // The same shape with a softer onset and a longer close: a vulture's cry is
+            // breathed rather than struck.
+            Self::Condor => (0.03, 0.14, 0.66, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
             // One syllable: a quick scrape that settles and is cut off before the next.
             Self::Cricket => (0.005, 0.025, 0.85, 0.02),
             // One squawk: a hard but unclicked onset, a harsh held middle, a quick close.
             Self::Parrot => (0.012, 0.08, 0.7, 0.06),
+            // One bark: the hardest onset in this file short of a click, almost no sustain,
+            // and a close fast enough to leave real silence before the next bark.
+            Self::Squirrel => (0.004, 0.03, 0.18, 0.014),
+            // One note of a hoot: a soft swell rather than an onset, a held body, and a long
+            // sigh out of it. The attack is what keeps an owl from sounding struck.
+            Self::Owl => (0.055, 0.18, 0.62, 0.12),
+            // One squeak: a sharp onset, a short held middle while the pitch drops, and a close
+            // fast enough to leave real silence before the next.
+            Self::Mouse => (0.006, 0.03, 0.55, 0.02),
+            // A yowl swells rather than strikes: a tenth of a second to open, a strained held
+            // body while the pitch climbs, and a short close.
+            Self::Lynx => (0.09, 0.25, 0.75, 0.2),
         };
         let envelope = Envelope {
             attack,
@@ -482,31 +1153,12 @@ impl Call {
         };
         let layers = match self {
             Self::Rattlesnake => rattle(variation, seed, envelope),
-            Self::Crow => {
-                let hz = 560.0 + variation * 100.0;
-                vec![
-                    tone(hz, 0.28, envelope),
-                    tone(hz * 2.05, 0.14, envelope),
-                    Layer {
-                        envelope,
-                        ..noise(Noise::White, 0.19, FilterKind::Band, 1200.0, 1.8)
-                    },
-                ]
-            }
-            Self::Eagle => {
-                let hz = 2100.0 + variation * 300.0;
-                vec![
-                    tone(hz, 0.36, envelope),
-                    tone(
-                        hz * 1.35,
-                        0.12,
-                        Envelope {
-                            attack: 0.08,
-                            ..envelope
-                        },
-                    ),
-                ]
-            }
+            // Two raptors, one construction, two rows of numbers. What was here for the eagle
+            // was `tone(hz, ..)` at 2.1 kHz and a 1.35× partial — two clean sines, which
+            // whistle; that is the finding `a_squawk_is_harsh_and_broadband_and_not_a_note`
+            // was written from, and the eagle is the voice it had never been applied to.
+            Self::Eagle => scream(&EAGLE, variation, envelope),
+            Self::Condor => scream(&CONDOR, variation, envelope),
             // A voice with a pitch contour, not a harmonic stack whose colour opens: see
             // [`howl`]. The gesture is read from the whole seed rather than from `variation`.
             Self::Wolf => howl(seed, envelope),
@@ -526,6 +1178,10 @@ impl Call {
                     .collect()
             }
             Self::Parrot => squawk(variation, envelope),
+            Self::Squirrel => bark(variation, envelope),
+            Self::Owl => hoot(variation, envelope),
+            Self::Mouse => squeak(variation, envelope),
+            Self::Lynx => yowl(variation, envelope),
         };
         Sound { layers }
     }
@@ -821,7 +1477,19 @@ mod tests {
     /// white noise, and near zero for clean partials, whose energy is on a few bins and whose
     /// other bins are empty. A voice made rough and breathy fills the bins between harmonics.
     fn flatness(samples: &[f32], rate: u32) -> f64 {
-        let power = band_power(samples, rate, 400.0, 3600.0);
+        flatness_between(samples, rate, 400.0, 3600.0)
+    }
+
+    /// The same measurement over a stated band.
+    ///
+    /// **The band has to be the one the voice actually fills**, and that is not a detail. A
+    /// macaw's squawk lives between 400 Hz and 3.6 kHz, which is why [`flatness`] reads there.
+    /// An owl's hoot lives between 240 and 1600 Hz, so read over the macaw's band most of the
+    /// bins are empty *because the owl is not in them* — which measures as a note and would
+    /// have condemned a perfectly breathy call. The floor separates rough from clean only
+    /// inside the band both are in.
+    fn flatness_between(samples: &[f32], rate: u32, low: f32, high: f32) -> f64 {
+        let power = band_power(samples, rate, low, high);
         let floor = power.iter().sum::<f64>() / power.len() as f64 * 1e-12;
         let log = power.iter().map(|p| (p + floor).ln()).sum::<f64>() / power.len() as f64;
         log.exp() / (power.iter().sum::<f64>() / power.len() as f64)
@@ -912,8 +1580,13 @@ mod tests {
             let call = Call::Parrot.bake(seed, 8000).unwrap();
             let flat = flatness(call.samples(), 8000);
             let tonal = tonal_share(call.samples(), 8000);
+            // **A floor of its own rather than the macaw's 0.15.** A bark is 55 ms where a
+            // squawk is 300, so its spectrum is read from a twentieth of the samples and is
+            // coarser for it; the chatter measures about 0.14 where the squawk measures well
+            // above 0.15. The number that matters is not this floor anyway but the separation
+            // asserted below, which is what a negative control is for.
             assert!(
-                flat > 0.15 && tonal < 0.4,
+                flat > 0.10 && tonal < 0.4,
                 "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
             );
             let old = old_parrot(seed).bake(0.3, 8000, seed).unwrap();
@@ -1005,6 +1678,43 @@ mod tests {
             }
         }
         assert_eq!(seen, [true; 2], "both squawk counts occur");
+    }
+
+    /// The eagle #1186 replaced, verbatim: a sine at 2.1 kHz plus a 1.35× partial with a
+    /// staggered attack, decaying to a zero sustain over four tenths of a second. Two clean
+    /// partials, which is what whistles.
+    fn old_eagle(seed: u64) -> Sound {
+        let variation = (seed % 101) as f32 / 100.0;
+        let hz = 2100.0 + variation * 300.0;
+        let envelope = Envelope {
+            attack: 0.015,
+            decay: 0.4,
+            sustain: 0.0,
+            release: 0.1,
+        };
+        let tone = |hz, gain, envelope| Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz,
+            },
+            gain,
+            envelope,
+            filter: None,
+            gate: None,
+        };
+        Sound {
+            layers: vec![
+                tone(hz, 0.36, envelope),
+                tone(
+                    hz * 1.35,
+                    0.12,
+                    Envelope {
+                        attack: 0.08,
+                        ..envelope
+                    },
+                ),
+            ],
+        }
     }
 
     /// The rate every howl measurement below renders at. A rate the synthesiser accepts, chosen
@@ -1199,6 +1909,67 @@ mod tests {
         }
     }
 
+    /// A cry with its voice made clean: every voiced layer the same glide as a sine, no
+    /// filter, and no breath.
+    ///
+    /// **What survives is the whole gesture — the falling contour *and* its rasp**, since
+    /// `..glide` keeps every field but `wave`, and [`Scream::rasp`] is that glide's `vibrato`.
+    /// What is removed is the sawtooth's dense harmonics, the formant bands that shape them,
+    /// and the breath beside them: the timbre, and nothing about the movement.
+    ///
+    /// **That is deliberate, and it is what makes this a control worth having.** A control
+    /// that also dropped the vibrato would differ from the real cry in two ways at once, and
+    /// passing it would no longer say which of the two the measurement reads. Keeping the
+    /// movement identical leaves texture as the only difference, so the floor that separates
+    /// them is measuring texture — which is the claim
+    /// `a_raptor_scream_is_harsh_and_broadband_and_not_a_note` makes. `clean_squawk` is the
+    /// same transform on the macaw, and keeps its arch for the same reason.
+    fn clean_scream(call: Call, seed: u64) -> Sound {
+        Sound {
+            layers: call
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter_map(|layer| match layer.exciter {
+                    Exciter::Glide(glide) => Some(Layer {
+                        exciter: Exciter::Glide(Glide {
+                            wave: Wave::Sine,
+                            ..glide
+                        }),
+                        filter: None,
+                        ..layer
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// One cry's voiced layers alone, baked at 8 kHz **for the length the lane actually bakes
+    /// it** — `profile().seconds`, not the glide's own `seconds`: the pitch without the breath,
+    /// so a tracker reads the voice rather than the noise around it.
+    ///
+    /// **The length is the point, and it used to be the glide's.** Reading the contour over
+    /// exactly the fall meant the measurement could not see what happened after the fall, or
+    /// under a release that started before it ended — which is precisely the defect
+    /// `a_raptor_cry_finishes_falling_before_its_release_begins` now catches, and which this
+    /// test was structurally blind to while it chose its own duration. A test that renders a
+    /// sound differently from the way the game renders it is measuring a different sound.
+    fn voiced_scream(call: Call, seed: u64) -> Vec<f32> {
+        Sound {
+            layers: call
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .collect(),
+        }
+        .bake(call.profile().seconds, 8000, seed)
+        .unwrap()
+        .samples()
+        .to_vec()
+    }
+
     /// The call #1184 replaced, verbatim: two sine partials 29 Hz apart near 2.3 kHz under one
     /// band of noise. Two close sines beating is a tremolo on a tone, which is what the owner
     /// heard as an electronic buzz, and it is the negative control for every measurement below.
@@ -1244,6 +2015,224 @@ mod tests {
         .unwrap()
         .samples()
         .to_vec()
+    }
+
+    /// The two raptors and the figures each is built from.
+    const RAPTORS: [(Call, &Scream); 2] = [(Call::Eagle, &EAGLE), (Call::Condor, &CONDOR)];
+
+    /// The pitch a cry's glide starts from, read back from its description.
+    fn scream_pitch(call: Call, seed: u64) -> f32 {
+        match call.description(seed).layers[0].exciter {
+            Exciter::Glide(glide) => glide.from,
+            other => panic!("{call:?}'s first layer is not voiced: {other:?}"),
+        }
+    }
+
+    /// #1186: the owner's rule is that a sound is realistic, never a note, and the eagle was
+    /// the voice `a_squawk_is_harsh_and_broadband_and_not_a_note` had never been applied to —
+    /// two clean sine partials, which whistle. Both raptors now spread their energy across the
+    /// band they fill.
+    ///
+    /// **The negative controls are the point, and there are two per bird**: the cry voiced as
+    /// clean sines along its own falling contour, and — for the eagle — the exact description
+    /// it replaced. Each fails the measurement the cry passes, so the floor separates the two
+    /// rather than passing everything put in front of it.
+    #[test]
+    fn a_raptor_scream_is_harsh_and_broadband_and_not_a_note() {
+        for (call, _) in RAPTORS {
+            let seconds = call.profile().seconds;
+            for seed in (0..20u64).map(scramble) {
+                let cry = call.bake(seed, 8000).unwrap();
+                let flat = flatness(cry.samples(), 8000);
+                let tonal = tonal_share(cry.samples(), 8000);
+                assert!(
+                    flat > 0.15 && tonal < 0.4,
+                    "{call:?} seed {seed}: flatness {flat}, {tonal} of the energy on one \
+                     frequency"
+                );
+                let clean = clean_scream(call, seed).bake(seconds, 8000, seed).unwrap();
+                let mut notes = vec![("a clean scream", clean)];
+                if call == Call::Eagle {
+                    notes.push((
+                        "the old eagle",
+                        old_eagle(seed).bake(seconds, 8000, seed).unwrap(),
+                    ));
+                }
+                for (name, note) in notes {
+                    let flat = flatness(note.samples(), 8000);
+                    assert!(
+                        flat < 0.05,
+                        "{call:?} seed {seed}: {name} measured flatness {flat}"
+                    );
+                }
+            }
+        }
+        // And the two birds are not one description at another frequency: the condor spends
+        // more of its level on air than on pitch, sits far below the eagle, and calls less
+        // often. Each of the three is a number in its own [`Scream`] row or profile.
+        //
+        // The first two are `const` blocks because both rows are `const`: a build that made
+        // the condor the brighter or the breathier of the pair would not compile, which is a
+        // stronger claim than a test that has to be run and the one clippy asks for here.
+        const {
+            assert!(
+                CONDOR.breath / CONDOR.voiced > EAGLE.breath / EAGLE.voiced * 2.0,
+                "the condor is meant to be the hoarser of the two"
+            );
+        }
+        const {
+            assert!(
+                CONDOR.hz + CONDOR.spread < EAGLE.hz * 0.5,
+                "the condor is meant to be the lower of the two"
+            );
+        }
+        assert!(
+            Call::Condor.profile().interval[0] > Call::Eagle.profile().interval[1],
+            "the condor is meant to be the sparser of the two"
+        );
+    }
+
+    /// Both cries descend, and neither arches. A squawk rises into itself and falls out of it;
+    /// a scream falls the whole way, which is the one contour difference between the two
+    /// constructions. Read on the voiced layers alone, over the **whole baked call** and inside
+    /// a band the fundamental stays in for the entire fall and its second harmonic never
+    /// enters.
+    ///
+    /// Three claims, and the third only became readable once this stopped baking the glide's
+    /// own length and started baking the profile's: the cry falls, it never arches, and after
+    /// the fall it **holds its arrival** rather than drifting on — which is the audible half of
+    /// `a_raptor_cry_finishes_falling_before_its_release_begins`.
+    #[test]
+    fn a_raptor_scream_falls_the_whole_way_through() {
+        for (call, spec) in RAPTORS {
+            for seed in (0..12u64).map(scramble) {
+                let hz = scream_pitch(call, seed);
+                let (low, high) = (hz * spec.fall * 0.9, hz * 1.15);
+                let track = dominant_track(&voiced_scream(call, seed), 8000, low, high);
+                // A reading pinned to either end of the search band is the tracker reporting
+                // "no pitch found in here", not a pitch: `dominant_track` returns the best of a
+                // 5 Hz grid, so when a window's spectrum is smeared — the eagle's 38 Hz rasp is
+                // 1.1 cycles inside a 30 ms window, and the tail is quiet — the argmax can land
+                // on the boundary. Four such windows out of sixty-six are what made the raw max
+                // read 1191 Hz on a cry whose glide never exceeds 1078. They are dropped rather
+                // than trusted; every window that carries a pitch is kept.
+                let grid = 5.0;
+                let track: Vec<(f32, f32)> = track
+                    .into_iter()
+                    .filter(|(_, hz)| *hz > low + grid && *hz < high - grid)
+                    .collect();
+                assert!(
+                    track.len() >= 20,
+                    "{call:?} seed {seed}: {} voiced windows",
+                    track.len()
+                );
+                let quarter = track.len() / 4;
+                let early = track[..quarter]
+                    .iter()
+                    .map(|(_, hz)| *hz)
+                    .fold(0.0, f32::max);
+                let late = track[track.len() - quarter..]
+                    .iter()
+                    .map(|(_, hz)| *hz)
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    early >= late * 1.25,
+                    "{call:?} seed {seed}: falls from {early} to only {late} Hz"
+                );
+                let (time, _) = track
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap();
+                assert!(
+                    time <= track[quarter].0,
+                    "{call:?} seed {seed}: peaks at {time} s — a scream falls, it does not arch"
+                );
+                // The arrival is held: every window after the fall sits within a fifth of the
+                // pitch the glide lands on, so the tail is a held note under a closing envelope
+                // rather than a pitch still moving when the sound is taken away.
+                let arrival = hz * spec.fall;
+                for (time, pitch) in track.iter().filter(|(t, _)| *t > spec.seconds) {
+                    assert!(
+                        (pitch - arrival).abs() <= arrival * 0.2,
+                        "{call:?} seed {seed}: {pitch} Hz at {time} s, {arrival} Hz expected"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A cry reaches its lowest pitch before its close begins, with the arrival held open in
+    /// between — the property both descriptions are written for and neither was checked
+    /// against.
+    ///
+    /// **`Sound::bake` starts the release `release` seconds before the buffer ends**, so the
+    /// three numbers that decide this live in three places: the glide's `seconds` in a
+    /// [`Scream`] row, the envelope's `release` in `description`, and the buffer length in
+    /// `profile`. Nothing connected them, and the eagle did not satisfy it — a 0.55 s fall
+    /// and a 0.14 s release in a 0.65 s bake put the release 0.04 s *inside* the fall, so the
+    /// cry was at 44% of its peak and dropping when it reached its lowest pitch. That is an
+    /// envelope-shaped fall, which is the defect this issue replaced a description to remove;
+    /// it survived as an arithmetic between three files (#1214 review).
+    ///
+    /// The margin is required to be positive rather than merely non-negative: a cry that
+    /// begins closing at the exact instant it stops falling has no arrival, and "held open
+    /// while the pitch falls, closed quickly" then describes a corner rather than a sound.
+    #[test]
+    fn a_raptor_cry_finishes_falling_before_its_release_begins() {
+        for (call, spec) in RAPTORS {
+            let profile = call.profile();
+            // Every layer of a scream carries the one envelope, so any of them reports it —
+            // and that they agree is worth asserting rather than assuming.
+            let layers = call.description(7).layers;
+            let release = layers[0].envelope.release;
+            assert!(
+                layers.iter().all(|layer| layer.envelope.release == release),
+                "{call:?}'s layers close at different times"
+            );
+            let held = profile.seconds - release - spec.seconds;
+            assert!(
+                held > 0.0,
+                "{call:?}: a {} s fall and a {release} s release in a {} s bake leave {held} s \
+                 of held arrival — the release begins {} s before the fall ends",
+                spec.seconds,
+                profile.seconds,
+                -held
+            );
+            // And it is an audible hold rather than a rounding: both birds carry 0.05 s.
+            assert!(held >= 0.04, "{call:?} holds its arrival for only {held} s");
+        }
+    }
+
+    /// Every frequency either raptor's description names stays at or under 3.6 kHz — 0.45 of
+    /// the lowest supported rate — so both bake at an 8 kHz device rate. The glides are read
+    /// at their widest: the top of the variation, the detuned twin, lifted by the rasp's
+    /// depth.
+    #[test]
+    fn every_raptor_stays_under_the_lowest_nyquist_margin() {
+        const MARGIN: f32 = 3600.0;
+        for (call, spec) in RAPTORS {
+            assert!(
+                (spec.hz + spec.spread) * spec.detune * (1.0 + spec.rasp.depth) <= MARGIN,
+                "{call:?}'s widest glide reach is over the margin"
+            );
+            for (band, _) in spec.formants.iter().chain(std::iter::once(&spec.hiss)) {
+                assert!(*band <= MARGIN, "{call:?} has a {band} Hz band");
+            }
+            // And the description that is actually built, at both ends of the variation.
+            for seed in [0, 100, 7, 0xfedc_ba98_7654_3210] {
+                for layer in call.description(seed).layers {
+                    if let Exciter::Glide(glide) = layer.exciter {
+                        let reach = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                        assert!(reach <= MARGIN, "{call:?} glides to {reach} Hz");
+                    }
+                    if let Some(filter) = layer.filter {
+                        assert!(filter.hz <= MARGIN, "{call:?} filters at {} Hz", filter.hz);
+                    }
+                }
+                assert!(call.bake(seed, 8000).is_ok(), "{call:?} bakes at 8 kHz");
+            }
+        }
     }
 
     /// The band a howl's fundamental stays inside for the whole call and no partial of it ever
@@ -1695,6 +2684,1084 @@ mod tests {
                 );
                 assert!(
                     peak(samples) * gain >= 0.055,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// The chatter's voiced layers alone, one bark baked at 8 kHz, as [`voiced_squawk`] is for
+    /// the macaw: the pitch without the breath around it.
+    fn voiced_bark(seed: u64) -> Vec<f32> {
+        Sound {
+            layers: Call::Squirrel
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .collect(),
+        }
+        .bake(CHATTER_SECONDS, 8000, seed)
+        .unwrap()
+        .samples()
+        .to_vec()
+    }
+
+    /// The same barks with the voice made clean: every glide a sine, and no breath. The
+    /// falling contour survives; the rasp and the air do not.
+    fn clean_bark(seed: u64) -> Sound {
+        Sound {
+            layers: Call::Squirrel
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter_map(|layer| match layer.exciter {
+                    Exciter::Glide(glide) => Some(Layer {
+                        exciter: Exciter::Glide(Glide {
+                            wave: Wave::Sine,
+                            ..glide
+                        }),
+                        filter: None,
+                        ..layer
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// #1190, and the owner's standing rule: a sound is realistic, never a note. A squirrel's
+    /// scold is a dry broadband bark, where a note keeps its energy on a few frequencies with
+    /// nothing between them.
+    ///
+    /// **The negative controls are the point**, and there are two of them, because a
+    /// measurement that everything passes measures nothing: the same barks voiced as clean
+    /// sines along the same falling contour, and a bare sine pair at the bark's own pitch.
+    /// Both fail the flatness floor the real chatter clears by a wide margin — which is what
+    /// makes this a test of the timbre rather than of the envelope, since the clean control
+    /// keeps the envelope, the contour and the onsets exactly.
+    #[test]
+    fn a_squirrel_chatter_is_harsh_and_broadband_and_not_a_note() {
+        let profile = Call::Squirrel.profile();
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Squirrel.bake(seed, 8000).unwrap();
+            let flat = flatness(call.samples(), 8000);
+            let tonal = tonal_share(call.samples(), 8000);
+            // **A floor of its own rather than the macaw's 0.15.** A bark is 55 ms where a
+            // squawk is 300, so its spectrum is read from a fraction of the samples and is
+            // coarser for it: the chatter measures about 0.14. The number that matters is not
+            // this floor anyway but the separation asserted below, which is what a negative
+            // control is for — a floor alone could be cleared by something that was not rough.
+            assert!(
+                flat > 0.10 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+
+            let clean = clean_bark(seed)
+                .bake_at(
+                    &chatter_onsets(seed),
+                    CHATTER_SECONDS,
+                    profile.seconds,
+                    8000,
+                    seed,
+                )
+                .unwrap();
+            let hz = match Call::Squirrel.description(seed).layers[0].exciter {
+                Exciter::Glide(glide) => glide.from,
+                other => panic!("the bark's first layer is not voiced: {other:?}"),
+            };
+            let envelope = Call::Squirrel.description(seed).layers[0].envelope;
+            let pair = Sound {
+                layers: vec![
+                    Layer {
+                        exciter: Exciter::Oscillator {
+                            wave: Wave::Sine,
+                            hz,
+                        },
+                        gain: 0.3,
+                        envelope,
+                        gate: None,
+                        filter: None,
+                    },
+                    Layer {
+                        exciter: Exciter::Oscillator {
+                            wave: Wave::Sine,
+                            hz: hz * 1.7,
+                        },
+                        gain: 0.12,
+                        envelope,
+                        gate: None,
+                        filter: None,
+                    },
+                ],
+            }
+            .bake_at(
+                &chatter_onsets(seed),
+                CHATTER_SECONDS,
+                profile.seconds,
+                8000,
+                seed,
+            )
+            .unwrap();
+
+            for (name, note) in [("a clean bark", clean), ("a sine pair", pair)] {
+                let control = flatness(note.samples(), 8000);
+                assert!(
+                    control < 0.05,
+                    "seed {seed}: {name} measured flatness {control}"
+                );
+                // **The separation is the claim, and it is what makes the floor above a
+                // detail rather than the test.** A measurement both a rough voice and a clean
+                // one pass is a measurement of nothing, so the chatter has to beat each
+                // control by a wide margin and not merely clear an absolute line. It beats
+                // them by a factor of forty or more in practice; three is the bound.
+                assert!(
+                    flat > control * 3.0,
+                    "seed {seed}: the chatter measured {flat} against {name}'s {control}"
+                );
+            }
+        }
+    }
+
+    /// A bark's pitch falls and never rises: the macaw arches because a macaw's cry does, and
+    /// a squirrel's does not. Read on the voiced layers alone, inside a band the fundamental
+    /// stays in for the whole bark and its second harmonic never enters.
+    #[test]
+    fn a_bark_falls_in_pitch_and_never_arches() {
+        for seed in (0..12u64).map(scramble) {
+            let hz = match Call::Squirrel.description(seed).layers[0].exciter {
+                Exciter::Glide(glide) => glide.from,
+                other => panic!("the bark's first layer is not voiced: {other:?}"),
+            };
+            let track = dominant_track(&voiced_bark(seed), 8000, hz * 0.5, hz * 1.25);
+            assert!(
+                track.len() >= 3,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let (first, last) = (track[0].1, track[track.len() - 1].1);
+            assert!(
+                last <= first * 0.95,
+                "seed {seed}: fell from {first} to only {last} Hz"
+            );
+            let highest = track.iter().map(|(_, hz)| *hz).fold(0.0, f32::max);
+            assert!(
+                highest <= first * 1.02,
+                "seed {seed}: arched to {highest} above its {first} Hz start"
+            );
+        }
+    }
+
+    /// A chatter is five to nine barks with real silence between them: a scold rather than one
+    /// call, and never a trill.
+    #[test]
+    fn a_squirrel_chatter_is_a_run_of_barks_with_silence_between() {
+        let mut seen = [false; 5];
+        for seed in (0..80u64).map(scramble) {
+            let expected = chatters(seed);
+            seen[expected - 5] = true;
+            for rate in [8000, 48000] {
+                let call = Call::Squirrel.bake(seed, rate).unwrap();
+                let found = rendered_syllables(call.samples(), rate);
+                assert_eq!(found.len(), expected, "seed {seed} at {rate}: {found:?}");
+                for (first, last) in &found {
+                    let seconds = (last - first) as f32 / rate as f32;
+                    assert!(
+                        seconds > 0.02 && seconds <= CHATTER_SECONDS,
+                        "seed {seed} at {rate}: a {seconds} s bark"
+                    );
+                }
+                for pair in found.windows(2) {
+                    let silence = (pair[1].0 - pair[0].1) as f32 / rate as f32;
+                    assert!(
+                        silence >= 0.03,
+                        "seed {seed} at {rate}: {silence} s between barks"
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, [true; 5], "every bark count occurs");
+    }
+
+    /// Every band and every frequency a glide reaches stays under 3.6 kHz, which is 0.45 of the
+    /// lowest supported rate and the bound every call in this file is written to.
+    ///
+    /// **Asserted over the description rather than trusted to the prose beside it**, and over
+    /// every call rather than only the new one: the rule is the file's, so a future row that
+    /// forgets it fails here rather than aliasing on an 8 kHz device nobody tests on.
+    #[test]
+    fn every_call_is_in_all() {
+        // Exhaustive on purpose: a new variant fails to compile here rather than quietly
+        // escaping every rule that walks `Call::ALL`.
+        for &call in Call::ALL {
+            match call {
+                Call::Rattlesnake
+                | Call::Eagle
+                | Call::Condor
+                | Call::Wolf
+                | Call::Cricket
+                | Call::Parrot
+                | Call::Squirrel
+                | Call::Owl
+                | Call::Mouse
+                | Call::Lynx => {}
+            }
+        }
+        let mut seen = Call::ALL.to_vec();
+        seen.dedup();
+        assert_eq!(seen.len(), Call::ALL.len(), "a call is listed twice in ALL");
+    }
+
+    #[test]
+    fn no_call_reaches_a_frequency_the_lowest_rate_cannot_carry() {
+        const CEILING: f32 = 3600.0;
+        for &call in Call::ALL {
+            for seed in (0..12u64).map(scramble) {
+                for layer in Call::description(call, seed).layers {
+                    if let Some(filter) = layer.filter {
+                        assert!(filter.hz <= CEILING, "{call:?} filters at {} Hz", filter.hz);
+                    }
+                    match layer.exciter {
+                        Exciter::Oscillator { hz, .. } => {
+                            assert!(hz <= CEILING, "{call:?} sounds a {hz} Hz partial")
+                        }
+                        Exciter::Glide(glide) => {
+                            // The vibrato lifts the glide above its own endpoints, so the
+                            // reachable peak is what the ceiling has to hold rather than
+                            // either end of the line.
+                            let peak = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                            assert!(peak <= CEILING, "{call:?} glides up to {peak} Hz");
+                        }
+                        Exciter::Noise(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Heard at the fallback bearing an *unseen* squirrel keeps — six blocks off and on the
+    /// ground — faded by the same `spatial::attenuation` every placed sound is. A squirrel
+    /// placed at its body is nearer than this and therefore louder, so this is the quiet case.
+    #[test]
+    fn a_chatter_at_its_fallback_bearing_is_clearly_heard() {
+        let profile = Call::Squirrel.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 192000] {
+                let call = Call::Squirrel.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.06,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
+    }
+    /// The owl's two notes, as rendered runs: `(first, last)` sounding sample.
+    fn hoot_notes(samples: &[f32], rate: u32) -> Vec<(usize, usize)> {
+        rendered_syllables(samples, rate)
+    }
+
+    /// #1191: an owl's call is two parts of **unequal** length with real silence between
+    /// them — a short opening note and a longer one after it. `Sound::bake_parts` exists
+    /// because `bake_at` could only strike one length, so this is the test that would fail if
+    /// the owl went back to it.
+    #[test]
+    fn a_hoot_is_two_notes_of_unequal_length_with_silence_between() {
+        for seed in (0..24u64).map(scramble) {
+            for rate in [8000, 48000] {
+                let call = Call::Owl.bake(seed, rate).unwrap();
+                let found = hoot_notes(call.samples(), rate);
+                assert_eq!(found.len(), 2, "seed {seed} at {rate}: {found:?}");
+                let length = |(first, last): (usize, usize)| (last - first) as f32 / rate as f32;
+                let (first, second) = (length(found[0]), length(found[1]));
+                assert!(
+                    second > first * 1.3,
+                    "seed {seed} at {rate}: a {first} s note then a {second} s one, which is \
+                     not the unequal pair an owl makes"
+                );
+                // Each inside the window `hoot_parts` gave it, and neither vanishingly short.
+                assert!(first > 0.1 && first <= HOOT_FIRST_SECONDS);
+                assert!(second > 0.2 && second <= HOOT_SECOND_SECONDS);
+                // Real silence, not a dip: the gap is a whole separate strike apart.
+                let silence = (found[1].0 - found[0].1) as f32 / rate as f32;
+                assert!(
+                    silence >= 0.15,
+                    "seed {seed} at {rate}: {silence} s between the notes"
+                );
+                // Both edges of the call at exact silence, at every device rate.
+                assert_eq!(call.samples().first(), Some(&0.0));
+                assert_eq!(call.samples().last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// The owner's standing rule, applied to the owl: a sound is realistic, never a note. A
+    /// hoot is mostly breath over a soft throat, so its energy is spread across the band an
+    /// owl fills; a note keeps it on a few frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same two notes, the same contour, voiced as
+    /// clean partials with the breath removed, must **fail** the measurement the hoot passes —
+    /// otherwise the floor is passing everything rather than separating the two.
+    #[test]
+    fn a_hoot_is_breathy_and_broadband_and_not_a_note() {
+        let mut controls = 0usize;
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Owl.bake(seed, 8000).unwrap();
+            let flat = flatness_between(call.samples(), 8000, 150.0, 2000.0);
+            assert!(
+                flat > 0.12,
+                "seed {seed}: the hoot measured flatness {flat}, which is a note"
+            );
+
+            // The control: every voiced layer the same glide as a sine, and no breath at all.
+            let clean = Sound {
+                layers: Call::Owl
+                    .description(seed)
+                    .layers
+                    .into_iter()
+                    .filter_map(|layer| match layer.exciter {
+                        Exciter::Glide(glide) => Some(Layer {
+                            exciter: Exciter::Glide(Glide {
+                                wave: Wave::Sine,
+                                ..glide
+                            }),
+                            filter: None,
+                            ..layer
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+            .bake_parts(&hoot_parts(), HOOT_SECONDS, 8000, seed)
+            .unwrap();
+            let control = flatness_between(clean.samples(), 8000, 150.0, 2000.0);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates \
+                 nothing"
+            );
+            assert!(control < flat, "seed {seed}: {control} against {flat}");
+            controls += 1;
+        }
+        assert!(controls > 0, "no control was ever built");
+    }
+
+    /// An owl's call is low, so the 3.6 kHz bound is the easy case — and it is asserted
+    /// anyway, because "easy" is a claim about today's numbers and the bound is what lets
+    /// every description bake at an 8 kHz device.
+    #[test]
+    fn every_frequency_in_a_hoot_stays_under_the_eight_kilohertz_bound() {
+        const CEILING: f32 = 3600.0;
+        for seed in (0..24u64).map(scramble) {
+            for layer in Call::Owl.description(seed).layers {
+                match layer.exciter {
+                    // The highest frequency the glide reaches, arch included — the same
+                    // arithmetic `Glide::peak` does inside the synth, restated here because
+                    // that one is private to it.
+                    Exciter::Glide(glide) => {
+                        let top = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                        assert!(top <= CEILING, "seed {seed}: a glide reaches {top} Hz");
+                    }
+                    Exciter::Oscillator { hz, .. } => assert!(hz <= CEILING),
+                    Exciter::Noise(_) => {}
+                }
+                if let Some(filter) = layer.filter {
+                    assert!(
+                        filter.hz <= CEILING,
+                        "seed {seed}: a band sits at {} Hz",
+                        filter.hz
+                    );
+                }
+            }
+            // And it bakes at the lowest supported rate, which is what the bound is for.
+            assert!(Call::Owl.bake(seed, 8000).is_ok());
+        }
+    }
+
+    /// Heard where it is placed — at the owl's own body, so the distance is whatever the bird
+    /// is, and the fallback bearing is what this measures against. A hoot has to carry across
+    /// a wood without clipping at any device rate.
+    #[test]
+    fn a_hoot_carries_from_its_tree_without_clipping_at_any_rate() {
+        let profile = Call::Owl.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..16u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Owl.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.06,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+            }
+        }
+    }
+
+    /// Each strike of a `bake_parts` call lands at **its own** onset, for **its own** length,
+    /// from **its own** seed.
+    ///
+    /// **This replaces a test that could not fail.** It was an `assert_eq!` between
+    /// `bake_at(..)` and `bake_parts(..)` over the shipped cricket and macaw, cited as proof
+    /// that no shipped sound had moved — but `bake_at` *is* `bake_parts` since the
+    /// generalisation: it builds the `(onset, length)` pairs and delegates. Both sides ran
+    /// identical code on identical inputs and were equal by construction, so the assertion
+    /// would have passed with a real bug in `bake_parts` sitting on both sides of it. Caught
+    /// in review on #1219.
+    ///
+    /// **The actual guard that no shipped sound moved is `pins.rs`**, whose cricket, macaw,
+    /// rattlesnake, crow, eagle and wolf rows are byte-identical across this change; only the
+    /// three new Owl rows are new. A golden buffer captured before the refactor is what can
+    /// fail, and the pins are that.
+    ///
+    /// What *this* checks is the contract the pins cannot see: that `bake_parts` places three
+    /// independent things correctly. The owl's two strikes do not overlap, so each region of
+    /// the buffer is exactly one strike and can be compared against a `Sound::bake` built
+    /// here — `bake` is not part of the generalisation, so the two sides are genuinely
+    /// different code. Mis-seed the second strike, place it at the wrong sample, or give it
+    /// the first one's length, and this fails.
+    #[test]
+    fn each_strike_lands_at_its_own_onset_for_its_own_length_from_its_own_seed() {
+        for seed in (0..6u64).map(scramble) {
+            for rate in [8000, 48000] {
+                let description = Call::Owl.description(seed);
+                let parts = hoot_parts();
+                // The premise the region-by-region comparison rests on, asserted rather than
+                // assumed: the two strikes do not overlap.
+                assert!(parts[0].0 + parts[0].1 < parts[1].0, "{parts:?}");
+
+                let baked = description
+                    .bake_parts(&parts, HOOT_SECONDS, rate, seed)
+                    .unwrap();
+                let samples = baked.samples();
+                assert_eq!(samples.len(), (HOOT_SECONDS * rate as f32).round() as usize);
+
+                for (index, (onset, length)) in parts.iter().enumerate() {
+                    // Built from `bake`, which the generalisation did not touch, and seeded
+                    // the way `bake_parts` documents: the call's seed plus the strike's index.
+                    let alone = description
+                        .bake(*length, rate, seed.wrapping_add(index as u64))
+                        .unwrap();
+                    let start = (f64::from(*onset) * f64::from(rate)).round() as usize;
+                    assert_eq!(
+                        &samples[start..start + alone.samples().len()],
+                        alone.samples(),
+                        "seed {seed} at {rate}: strike {index} is not its own bake at {onset}s"
+                    );
+                }
+
+                // And everything outside the two strikes is exact silence — which is what
+                // makes the regions above the whole of the buffer rather than part of it.
+                let first_end = (f64::from(parts[0].1) * f64::from(rate)).round() as usize;
+                let second_start = (f64::from(parts[1].0) * f64::from(rate)).round() as usize;
+                assert!(
+                    samples[first_end..second_start].iter().all(|v| *v == 0.0),
+                    "seed {seed} at {rate}: the gap between the notes is not silent"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The mouse
+    // -----------------------------------------------------------------------
+
+    /// The squeak's voiced layers alone, as a clean control or as a pitch to track: every glide,
+    /// no breath and no band.
+    fn clean_squeak(seed: u64) -> Sound {
+        Sound {
+            layers: Call::Mouse
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .map(|layer| Layer {
+                    filter: None,
+                    ..layer
+                })
+                .collect(),
+        }
+    }
+
+    /// The pitch a squeak's glide starts from, read back from its description.
+    fn squeak_pitch(seed: u64) -> f32 {
+        match Call::Mouse.description(seed).layers[0].exciter {
+            Exciter::Glide(glide) => glide.from,
+            other => panic!("the squeak's first layer is not voiced: {other:?}"),
+        }
+    }
+
+    /// #1192: a mouse call is one to three short squeaks with real silence between them — a
+    /// squeak, or a squeak-squeak, and never a trill.
+    #[test]
+    fn a_mouse_call_is_one_to_three_squeaks_with_silence_between() {
+        let mut seen = [false; 3];
+        for seed in (0..60u64).map(scramble) {
+            let expected = squeaks(seed);
+            seen[expected - 1] = true;
+            for rate in [8000, 48000] {
+                let call = Call::Mouse.bake(seed, rate).unwrap();
+                let found = rendered_syllables(call.samples(), rate);
+                assert_eq!(found.len(), expected, "seed {seed} at {rate}: {found:?}");
+                for (first, last) in &found {
+                    let seconds = (last - first) as f32 / rate as f32;
+                    assert!(
+                        seconds > 0.04 && seconds <= SQUEAK_SECONDS,
+                        "seed {seed} at {rate}: a {seconds} s squeak"
+                    );
+                }
+                for pair in found.windows(2) {
+                    let silence = (pair[1].0 - pair[0].1) as f32 / rate as f32;
+                    assert!(
+                        silence >= 0.035,
+                        "seed {seed} at {rate}: {silence} s between squeaks"
+                    );
+                }
+                assert_eq!(call.samples().first(), Some(&0.0));
+                assert_eq!(call.samples().last(), Some(&0.0));
+            }
+        }
+        assert_eq!(seen, [true; 3], "every squeak count occurs");
+    }
+
+    /// The owner's standing rule, applied to the highest voice there is: a sound is realistic,
+    /// never a note. A squeak's energy is spread across the top of the band an 8 kHz device can
+    /// carry; a note keeps it on a few frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same squeaks, the same contour, the same
+    /// onsets, voiced by their glides alone — clean partials, no breath — must **fail** the
+    /// measurement the squeak passes, and by a wide margin, or the floor separates nothing. The
+    /// band is the one a squeak lives in, 1.8 to 3.6 kHz, for the reason `flatness_between`
+    /// gives: read over a band the voice is not in, empty bins would condemn any voice.
+    #[test]
+    fn a_squeak_is_thin_and_textured_and_not_a_note() {
+        let profile = Call::Mouse.profile();
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Mouse.bake(seed, 8000).unwrap();
+            let flat = flatness_between(call.samples(), 8000, 1800.0, 3600.0);
+            let tonal = tonal_share(call.samples(), 8000);
+            assert!(
+                flat > 0.15 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+
+            let clean = clean_squeak(seed)
+                .bake_at(
+                    &squeak_onsets(seed),
+                    SQUEAK_SECONDS,
+                    profile.seconds,
+                    8000,
+                    seed,
+                )
+                .unwrap();
+            let control = flatness_between(clean.samples(), 8000, 1800.0, 3600.0);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates \
+                 nothing"
+            );
+            assert!(
+                flat > control * 3.0,
+                "seed {seed}: the squeak measured {flat} against its clean control's {control}"
+            );
+        }
+    }
+
+    /// The seeds that reach every pitch one call can make — **all of them**, as a finite set that
+    /// provably holds each call's highest and lowest glide, so a bound taken over it is a bound
+    /// over every seed rather than over a sample.
+    ///
+    /// Exhaustive on purpose, like `every_call_is_in_all`: a new call does not compile here until
+    /// it says how its pitch reads its seed.
+    fn every_pitch_seed(call: Call) -> Vec<u64> {
+        match call {
+            // Noise alone: no glide, so there is no pitch for a seed to move.
+            Call::Rattlesnake | Call::Cricket => vec![0],
+            // The pitch reads the seed only through `variation`, which is `seed % 101`: these
+            // hundred and one seeds are every value it can take.
+            Call::Eagle
+            | Call::Condor
+            | Call::Parrot
+            | Call::Squirrel
+            | Call::Owl
+            | Call::Mouse
+            | Call::Lynx => (0..101).collect(),
+            // The howl reads `seed % 101` for its pitch and a slice of `spread(seed)` for its arch
+            // (`howl_gesture`), and its highest glide rises with both. So every residue of the
+            // one, plus a seed found to take both at their maximum at once — searched for here
+            // rather than assumed to exist.
+            Call::Wolf => {
+                let top = (0..100_000u64)
+                    .map(|step| 100 + 101 * step)
+                    .find(|seed| (spread(*seed) >> 16) % 17 == 16)
+                    .expect("a seed takes the howl's highest pitch and widest arch together");
+                (0..101).chain([top]).collect()
+            }
+        }
+    }
+
+    /// The highest pitch any glide of one call reaches at one seed, arch and detune included.
+    fn highest_glide(call: Call, seed: u64) -> f32 {
+        call.description(seed)
+            .layers
+            .into_iter()
+            .filter_map(|layer| match layer.exciter {
+                Exciter::Glide(glide) => {
+                    Some(glide.from.max(glide.to) * (1.0 + glide.vibrato.depth))
+                }
+                _ => None,
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Short and high means higher than anything else in the catalogue — **at every seed any call
+    /// can be handed** — and a squeak's pitch drops as it ends rather than sitting on a note.
+    ///
+    /// **This used to take the other calls' pitch from twelve seeds each**, which review on #1224
+    /// pointed out makes the claim a sample: a seed outside it could put another voice above the
+    /// squeak with this test still green. [`every_pitch_seed`] is the set that holds every pitch
+    /// there is, a wide scrambled sweep must never exceed what it finds, and the runner-up is
+    /// named so a regression in another voice's pitch shows here rather than inside the margin.
+    #[test]
+    fn a_squeak_is_the_highest_voice_there_is_and_falls_as_it_ends() {
+        let mut runner_up = (Call::Mouse, 0.0f32);
+        for &call in Call::ALL.iter().filter(|call| **call != Call::Mouse) {
+            let highest = every_pitch_seed(call)
+                .into_iter()
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            // The set is complete, and a wider sweep can only confirm it: nothing past it higher.
+            let swept = (0..1024u64)
+                .map(scramble)
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            assert!(
+                swept <= highest,
+                "{call:?} reached {swept} Hz outside the seeds said to hold its highest, {highest}"
+            );
+            if highest > runner_up.1 {
+                runner_up = (call, highest);
+            }
+        }
+        // The howl's third partial at its highest pitch and widest arch: 365 × 3 × 1.38.
+        assert_eq!(
+            runner_up.0,
+            Call::Wolf,
+            "the next highest voice is no longer the howl: {runner_up:?}"
+        );
+        let lowest = every_pitch_seed(Call::Mouse)
+            .into_iter()
+            .map(squeak_pitch)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            lowest * SQUEAK_FALL > runner_up.1,
+            "a squeak falling to {} Hz is not above {:?} at {} Hz",
+            lowest * SQUEAK_FALL,
+            runner_up.0,
+            runner_up.1
+        );
+
+        for seed in (0..12u64).map(scramble) {
+            let hz = squeak_pitch(seed);
+
+            // **The first voice alone, not its twin with it.** The twin sits 3.5% above and a
+            // thirty-millisecond window cannot tell the two apart, so read together the tracker
+            // hops between them and reports a fall of two or three percent where the voice
+            // falls five. Measured at 8 kHz on the voice alone the fall is 5.1 to 5.3% inside
+            // the four windows loud enough to read; three is the bound.
+            let voiced = Sound {
+                layers: clean_squeak(seed).layers.into_iter().take(1).collect(),
+            }
+            .bake(SQUEAK_SECONDS, 8000, seed)
+            .unwrap();
+            let track = dominant_track(voiced.samples(), 8000, hz * 0.7, hz * 1.2);
+            assert!(
+                track.len() >= 3,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let (first, last) = (track[0].1, track[track.len() - 1].1);
+            assert!(
+                last < first * 0.97,
+                "seed {seed}: fell from {first} to only {last} Hz"
+            );
+        }
+    }
+
+    /// Heard at the fallback bearing an *unseen* mouse keeps — five blocks off, on the ground —
+    /// faded by the same `spatial::attenuation` every placed sound is, without clipping at any
+    /// device rate. A mouse placed at its body is usually nearer and so louder.
+    #[test]
+    fn a_squeak_carries_a_few_blocks_without_clipping_at_any_rate() {
+        let profile = Call::Mouse.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Mouse.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.05,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+            }
+        }
+    }
+
+    /// The share of a sound's energy above `hz`: the DFT bins over that line against the whole
+    /// of its energy by Parseval, the same arithmetic [`tonal_share`] uses.
+    fn share_above(samples: &[f32], rate: u32, hz: f32) -> f64 {
+        let high: f64 = band_power(samples, rate, hz, rate as f32 / 2.0)
+            .iter()
+            .sum();
+        let energy: f64 = samples.iter().map(|x| f64::from(*x).powi(2)).sum();
+        high / (energy * samples.len() as f64 / 2.0)
+    }
+
+    /// A call with its highest band moved to be centred on `hz`, every other layer as it is — the
+    /// squeak's control, and the yowl's.
+    fn with_its_top_band_at(call: Call, seed: u64, hz: f32) -> Sound {
+        let description = call.description(seed);
+        let top = description
+            .layers
+            .iter()
+            .filter_map(|layer| layer.filter.map(|filter| filter.hz))
+            .fold(0.0f32, f32::max);
+        Sound {
+            layers: description
+                .layers
+                .into_iter()
+                .map(|layer| match layer.filter {
+                    Some(filter) if filter.hz == top => Layer {
+                        filter: Some(Filter { hz, ..filter }),
+                        ..layer
+                    },
+                    _ => layer,
+                })
+                .collect(),
+        }
+    }
+
+    /// **What the ceiling guarantees for a band, measured rather than claimed** (review on
+    /// #1222).
+    ///
+    /// `no_call_reaches_a_frequency_the_lowest_rate_cannot_carry` holds every glide's reach and
+    /// every band's *centre* under 3.6 kHz. A resonant band is a slope rather than a wall, so
+    /// that alone says nothing about how much of a squeak is heard above the line. This
+    /// measures it at the lowest rate, where the line is what a device can carry, and at the
+    /// 48 kHz a device usually runs at, where no Nyquist cuts the skirt off.
+    ///
+    /// **The control is the point.** The same squeak with its highest band centred on the
+    /// ceiling itself — the most `Sound::validate` allows at 8 kHz — and past it at 48 kHz must
+    /// fail the bound the squeak passes, or the bound separates nothing. Measured when this was
+    /// written: at 8 kHz the squeak spills 0.26–0.50% and the control 2.4–5.2%; at 48 kHz
+    /// 9.8–11.3% against 20–23.5%. For scale, the cricket — four bands up to 3.45 kHz, shipped
+    /// long before this — spills 0.7–1.1% and 21–26%.
+    #[test]
+    fn a_squeak_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more() {
+        let seconds = Call::Mouse.profile().seconds;
+        for (rate, seeds, bound, control_hz, control_floor) in [
+            (8000u32, 12u64, 0.01, 3600.0, 0.015),
+            (48000, 4, 0.15, 4500.0, 0.18),
+        ] {
+            for seed in (0..seeds).map(scramble) {
+                let squeak = Call::Mouse.bake(seed, rate).unwrap();
+                let spill = share_above(squeak.samples(), rate, 3600.0);
+                assert!(
+                    spill < bound,
+                    "seed {seed} at {rate}: {spill} of the squeak's energy lies above 3.6 kHz"
+                );
+                let control = with_its_top_band_at(Call::Mouse, seed, control_hz)
+                    .bake_at(&squeak_onsets(seed), SQUEAK_SECONDS, seconds, rate, seed)
+                    .unwrap();
+                let over = share_above(control.samples(), rate, 3600.0);
+                assert!(
+                    over > control_floor && over > spill * 1.5,
+                    "seed {seed} at {rate}: a top band centred at {control_hz} Hz spilled only \
+                     {over} against the squeak's {spill}, so the bound separates nothing"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The lynx
+    // -----------------------------------------------------------------------
+
+    /// #1194, and the owner's standing rule: a sound is realistic, never a note. A yowl spreads
+    /// its energy across the whole band a cat's voice fills, where a note keeps it on a few
+    /// frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same yowl, the same rising contour and the same
+    /// waver, voiced as clean sines with no formant and no breath — [`clean_scream`]'s transform,
+    /// which keeps the movement so texture is the only difference — must **fail** the
+    /// measurement the yowl passes, or the floor separates nothing. Measured when this was
+    /// written: the yowl at 0.24 to 0.28, the control at zero to four decimal places.
+    #[test]
+    fn a_yowl_is_harsh_and_textured_and_not_a_note() {
+        let seconds = Call::Lynx.profile().seconds;
+        for seed in (0..20u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 8000).unwrap();
+            let flat = flatness(yowl.samples(), 8000);
+            let tonal = tonal_share(yowl.samples(), 8000);
+            assert!(
+                flat > 0.15 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+            let clean = clean_scream(Call::Lynx, seed)
+                .bake(seconds, 8000, seed)
+                .unwrap();
+            let control = flatness(clean.samples(), 8000);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates nothing"
+            );
+            assert!(
+                flat > control * 3.0,
+                "seed {seed}: the yowl measured {flat} against its clean control's {control}"
+            );
+        }
+    }
+
+    /// The pitch a yowl's glide starts from, read back from its description.
+    fn yowl_pitch(seed: u64) -> f32 {
+        match Call::Lynx.description(seed).layers[0].exciter {
+            Exciter::Glide(glide) => glide.from,
+            other => panic!("the yowl's first layer is not voiced: {other:?}"),
+        }
+    }
+
+    /// How many times a pitch track swings back by more than `depth` hertz: a reversal counts
+    /// once the pitch has moved `depth` against its direction from the last extreme it reached.
+    /// A line that only climbs swings back never; a waver swings back twice a cycle.
+    ///
+    /// **With hysteresis, and the reason is the instrument's grid rather than a taste.**
+    /// [`dominant_track`] reads on a 5 Hz grid, so a slow and perfectly clean climb flips between
+    /// two neighbouring grid points wherever the true pitch sits near their midpoint. The first
+    /// version of this counted every change of sign and read twelve such flips as twelve turns of
+    /// a waver that the glide under it did not have; its own control is what caught it.
+    fn swings(track: &[(f32, f32)], depth: f32) -> usize {
+        let Some(&(_, first)) = track.first() else {
+            return 0;
+        };
+        let (mut extreme, mut rising, mut count) = (first, None::<bool>, 0usize);
+        for &(_, hz) in &track[1..] {
+            match rising {
+                None if (hz - extreme).abs() > depth => {
+                    rising = Some(hz > extreme);
+                    extreme = hz;
+                }
+                None => {}
+                Some(up) if (hz > extreme) == up => extreme = hz,
+                Some(up) if (hz - extreme).abs() > depth => {
+                    count += 1;
+                    rising = Some(!up);
+                    extreme = hz;
+                }
+                Some(_) => {}
+            }
+        }
+        count
+    }
+
+    /// "A yowl climbs where a squawk and a whinny fall — and in how far the vibrato opens." Two
+    /// claims about the pitch track, each with its opposite beside it.
+    ///
+    /// Read on the first voice alone, as a sine with no band, for the reason the squeak's fall is:
+    /// a thirty-millisecond window cannot tell the twin 4.5% above from the voice, and read
+    /// together the tracker hops between them. The whole baked call is read, so the climb has to
+    /// be in the cry rather than in the attack.
+    ///
+    /// - **It rises**: the last quarter of the track sits a quarter above the first, and its
+    ///   highest reading is in the second half — where a squawk, read by the same instrument,
+    ///   ends below where it began.
+    /// - **It wavers**: the pitch swings back by more than 20 Hz at least eight times, where the
+    ///   same glide with its vibrato taken away never does. Twenty is four steps of the tracker's
+    ///   grid, over the one-step flips a clean climb makes (see [`swings`]), and under the 50 to
+    ///   100 Hz a yowl swings by once its waver has opened.
+    #[test]
+    fn a_yowl_rises_and_wavers_where_a_squawk_falls() {
+        let seconds = Call::Lynx.profile().seconds;
+        let track_of = |seed: u64, waver: Vibrato| {
+            let voice = clean_scream(Call::Lynx, seed)
+                .layers
+                .into_iter()
+                .take(1)
+                .map(|layer| match layer.exciter {
+                    Exciter::Glide(glide) => Layer {
+                        exciter: Exciter::Glide(Glide {
+                            vibrato: waver,
+                            ..glide
+                        }),
+                        ..layer
+                    },
+                    _ => layer,
+                })
+                .collect();
+            let baked = Sound { layers: voice }.bake(seconds, 8000, seed).unwrap();
+            let hz = yowl_pitch(seed);
+            dominant_track(baked.samples(), 8000, hz * 0.8, hz * YOWL_RISE * 1.2)
+        };
+        let mean =
+            |part: &[(f32, f32)]| part.iter().map(|(_, hz)| hz).sum::<f32>() / part.len() as f32;
+        for seed in (0..8u64).map(scramble) {
+            let track = track_of(seed, YOWL_WAVER);
+            assert!(
+                track.len() >= 60,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let quarter = track.len() / 4;
+            let (early, late) = (
+                mean(&track[..quarter]),
+                mean(&track[track.len() - quarter..]),
+            );
+            assert!(
+                late >= early * 1.25,
+                "seed {seed}: climbs from {early} to only {late} Hz"
+            );
+            let (time, _) = track
+                .iter()
+                .copied()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert!(
+                time >= track[track.len() / 2].0,
+                "seed {seed}: peaks at {time} s, in the first half of a cry that climbs"
+            );
+            let wavers = swings(&track, 20.0);
+            assert!(wavers >= 8, "seed {seed}: swings back only {wavers} times");
+
+            // The same glide with no waver climbs without ever swinging back.
+            let steady = track_of(
+                seed,
+                Vibrato {
+                    hz: 0.0,
+                    depth: 0.0,
+                    onset: 0.0,
+                },
+            );
+            assert_eq!(
+                swings(&steady, 20.0),
+                0,
+                "seed {seed}: a glide with no vibrato swung back, so swinging is not the waver"
+            );
+
+            // And the squawk, read by the same instrument, ends lower than it began.
+            let hz = squawk_pitch(seed);
+            let squawk = dominant_track(&voiced_squawk(seed), 8000, hz * 0.6, hz * 1.3);
+            assert!(
+                squawk[squawk.len() - 1].1 < squawk[0].1,
+                "seed {seed}: the squawk did not fall, so the comparison says nothing"
+            );
+        }
+    }
+
+    /// A yowl reaches the top of its climb before its close begins, with the arrival held open in
+    /// between — the property [`a_raptor_cry_finishes_falling_before_its_release_begins`] holds
+    /// for a scream, and for the same reason: a pitch still moving when the envelope starts to
+    /// take the sound away is a contour shaped by the envelope rather than by the voice.
+    #[test]
+    fn a_yowl_finishes_rising_before_its_release_begins() {
+        let layers = Call::Lynx.description(7).layers;
+        let release = layers[0].envelope.release;
+        assert!(
+            layers.iter().all(|layer| layer.envelope.release == release),
+            "the yowl's layers close at different times"
+        );
+        let held = Call::Lynx.profile().seconds - release - YOWL_SECONDS;
+        assert!(held >= 0.04, "a yowl holds its arrival for only {held} s");
+    }
+
+    /// **What the ceiling guarantees for a yowl, measured rather than claimed** — the squeak's
+    /// test (review on #1222), applied before a review has to ask.
+    ///
+    /// At 8 kHz, where the ceiling is what a device can carry, the yowl must spill little and the
+    /// same yowl with its top band centred on the ceiling must spill more, or the bound separates
+    /// nothing. Measured when this was written: 0.06 to 0.08% against 0.22 to 0.29%.
+    ///
+    /// **At 48 kHz there is a bound and no control, and that is the finding rather than an
+    /// omission.** The yowl measured 3.1% there, and the same yowl with its top band moved out to
+    /// 4.5 kHz measured 3.5% — a control that does not separate, because at that rate what lies
+    /// above the line is the sawtooth's own harmonics through the formants' skirts rather than any
+    /// band. The squeak is sines and noise, which is why its 48 kHz control does separate.
+    #[test]
+    fn a_yowl_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more() {
+        let seconds = Call::Lynx.profile().seconds;
+        for seed in (0..12u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 8000).unwrap();
+            let spill = share_above(yowl.samples(), 8000, 3600.0);
+            assert!(
+                spill < 0.0015,
+                "seed {seed}: {spill} of the yowl's energy lies above 3.6 kHz at 8 kHz"
+            );
+            let control = with_its_top_band_at(Call::Lynx, seed, 3600.0)
+                .bake(seconds, 8000, seed)
+                .unwrap();
+            let over = share_above(control.samples(), 8000, 3600.0);
+            assert!(
+                over > 0.0018 && over > spill * 2.0,
+                "seed {seed}: a top band centred on the ceiling spilled only {over} against the \
+                 yowl's {spill}, so the bound separates nothing"
+            );
+        }
+        for seed in (0..4u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 48000).unwrap();
+            let spill = share_above(yowl.samples(), 48000, 3600.0);
+            assert!(
+                spill < 0.05,
+                "seed {seed}: {spill} of the yowl's energy lies above 3.6 kHz at 48 kHz"
+            );
+        }
+    }
+
+    /// Heard twenty-four blocks off on the snow, faded by the same `spatial::attenuation` every
+    /// placed sound is, without clipping at any device rate.
+    ///
+    /// Twenty-four is about where a lynx is met, not a placement: a yowl is only ever heard from a
+    /// drawn lynx (`Origin::Body`), and a lynx is drawn twenty to forty-five blocks out, so this is
+    /// the middle of its range rather than its loud end.
+    #[test]
+    fn a_yowl_carries_across_the_snow_without_clipping_at_any_rate() {
+        let profile = Call::Lynx.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Lynx.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.03,
                     "seed {seed} at {rate}: heard at {}",
                     peak(samples) * gain
                 );

@@ -79,6 +79,12 @@ gh() {
   printf ' <%s>' "$@" >>"$CALL_LOG"
   printf '\n' >>"$CALL_LOG"
 
+  # `require_gh` refuses a release below GH_MIN_VERSION before `auth status`.
+  if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' 'gh version 2.18.0'
+    return 0
+  fi
+
   if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
     return "$GH_AUTH_STATUS"
   fi

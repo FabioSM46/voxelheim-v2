@@ -83,7 +83,7 @@ func TestBlowsReportTwoSameTickSwingsAndAKillExactlyOnce(t *testing.T) {
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 	h.sim.mobs[target].health = 2 * RustySwordDamage
 	for _, player := range []*Player{a, b} {
-		if err := h.swing(player, 0, 1); err != nil {
+		if err := h.swing(player, mainHandSlot, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,8 +109,10 @@ func TestBlowsReportTwoSameTickSwingsAndAKillExactlyOnce(t *testing.T) {
 	}
 }
 
+// The wielded main hand is the miss: a real swing at nothing. Slot 0, where the starter
+// blade used to swing from, the off hand and an index past the table are dropped intents.
 func TestMissAndInvalidIntentProduceNoBlow(t *testing.T) {
-	for _, slot := range []uint8{0, 39, 255} {
+	for _, slot := range []uint8{mainHandSlot, 0, uint8(equipmentOffHand), 255} {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		p, out := h.join(1, [3]float32{.5, 64, .5})
 		h.spawnDraugrAt([3]float32{.5, 64, 6}) // Behind and beyond sword reach.
@@ -131,7 +133,7 @@ func TestProjectileContactReportsOnceAndHealingAndTerrainDoNot(t *testing.T) {
 			if hit {
 				target = h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 			}
-			spawnTestProjectile(t, h, kind, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+			spawnTestProjectile(t, h, kind, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 			h.advance(6)
 			blows := disclosedBlows(t, out.all())
 			if !hit {
@@ -202,7 +204,7 @@ func TestBlowProjectionSuppressesAbsentTargetsAndAnonymousSources(t *testing.T) 
 	attacker, near := h.join(1, [3]float32{.5, 64, .5})
 	_, far := h.join(2, [3]float32{200, 64, 200})
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
-	if err := h.swing(attacker, 0, 1); err != nil {
+	if err := h.swing(attacker, mainHandSlot, 1); err != nil {
 		t.Fatal(err)
 	}
 	h.step()
@@ -231,7 +233,7 @@ func TestDroppedBlowSnapshotDoesNotReplay(t *testing.T) {
 	deliver := p.deliverSnapshot
 	attempted := 0
 	p.deliverSnapshot = func(_ []byte, _ world.Column, following [][]byte) bool { attempted += len(following); return false }
-	if err := h.swing(p, 0, 1); err != nil {
+	if err := h.swing(p, mainHandSlot, 1); err != nil {
 		t.Fatal(err)
 	}
 	h.step()
@@ -250,7 +252,7 @@ func TestTerrainImpactAndEnvironmentalDamageHaveNoBlow(t *testing.T) {
 	for _, kind := range []vnet.ProjectileKind{vnet.ProjectileKindArrow, vnet.ProjectileKindEnergyOrb} {
 		h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{wallZ: &wall})
 		p, out := h.join(1, [3]float32{.5, 64, .5})
-		spawnTestProjectile(t, h, kind, p, [3]float64{0, 0, -1}, ArrowSpeed)
+		spawnTestProjectile(t, h, kind, p, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 		h.advance(6)
 		if len(disclosedBlows(t, out.all())) != 0 {
 			t.Fatal("terrain impact reported as a landed blow")
@@ -268,7 +270,7 @@ func TestOfflineProjectileOwnerIsAnonymousInARealSnapshot(t *testing.T) {
 	owner, _ := h.join(1, [3]float32{.5, 64, .5})
 	_, out := h.join(2, [3]float32{4, 64, .5})
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
-	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 	h.sim.Leave(owner)
 	h.advance(5)
 	blows := disclosedBlows(t, out.all())

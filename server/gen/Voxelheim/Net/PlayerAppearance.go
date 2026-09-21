@@ -46,8 +46,8 @@ import (
 // /     stored display text verbatim, and a renderer must bound its layout rather than
 // /     changing what names the server accepts. It is never parsed or used as identity
 // /   - `level` is never zero
-// /   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
-// /     meaning that the corresponding equipment slot is empty
+// /   - `worn_head`, `worn_chest`, `worn_legs`, `worn_offhand` and `worn_mainhand` are
+// /     item ids, with zero meaning that the corresponding equipment slot is empty
 // /   - nothing here is required to name an entity in any snapshot, in either
 // /     direction; see above
 type PlayerAppearance struct {
@@ -208,8 +208,26 @@ func (rcv *PlayerAppearance) MutateWornOffhand(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(18, n)
 }
 
+// / V44. Item id in the trailing main-hand equipment slot, or zero when nothing is held.
+// / The same type as `worn_offhand`. A V43 server never sends it, and it reads as an
+// / empty hand, which is what that server's layout has.
+func (rcv *PlayerAppearance) WornMainhand() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / V44. Item id in the trailing main-hand equipment slot, or zero when nothing is held.
+// / The same type as `worn_offhand`. A V43 server never sends it, and it reads as an
+// / empty hand, which is what that server's layout has.
+func (rcv *PlayerAppearance) MutateWornMainhand(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(20, n)
+}
+
 func PlayerAppearanceStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func PlayerAppearanceAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -234,6 +252,9 @@ func PlayerAppearanceAddWornLegs(builder *flatbuffers.Builder, wornLegs uint16) 
 }
 func PlayerAppearanceAddWornOffhand(builder *flatbuffers.Builder, wornOffhand uint16) {
 	builder.PrependUint16Slot(7, wornOffhand, 0)
+}
+func PlayerAppearanceAddWornMainhand(builder *flatbuffers.Builder, wornMainhand uint16) {
+	builder.PrependUint16Slot(8, wornMainhand, 0)
 }
 func PlayerAppearanceEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

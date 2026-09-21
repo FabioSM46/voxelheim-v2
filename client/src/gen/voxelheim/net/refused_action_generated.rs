@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 22;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 23;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 23] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 24] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -41,6 +41,7 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 23] = [
     RefusedAction::PlayerTrade,
     RefusedAction::CrossPortal,
     RefusedAction::Energy,
+    RefusedAction::MoveInventory,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -113,14 +114,19 @@ impl RefusedAction {
     pub const PlayerTrade: Self = Self(20);
     /// PortalRequest refused without a destination, session id or remote world state.
     pub const CrossPortal: Self = Self(21);
-    /// An `AttackRequest` refused because the swing's energy was not there to spend.
-    /// A member of its own rather than `Attack` with a reason, because the answering
-    /// surface is the energy display rather than the weapon: `Attack` keeps meaning a
-    /// refusal about what is in the hand. Nothing was queued and nothing was spent.
+    /// An `AttackRequest` refused because the swing's energy was not there to spend, or a
+    /// `BlockRequest` press refused because the parry's was not. A member of its own rather
+    /// than `Attack` with a reason, because the answering surface is the energy display
+    /// rather than the weapon: `Attack` keeps meaning a refusal about what is in the hand.
+    /// Nothing was queued and nothing was spent; a refused block press is still held, and
+    /// is answered once per press rather than once per tick.
     pub const Energy: Self = Self(22);
+    /// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
+    /// inventory the player already holds is still the complete answer.
+    pub const MoveInventory: Self = Self(23);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 22;
+    pub const ENUM_MAX: u8 = 23;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -145,6 +151,7 @@ impl RefusedAction {
         Self::PlayerTrade,
         Self::CrossPortal,
         Self::Energy,
+        Self::MoveInventory,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -172,6 +179,7 @@ impl RefusedAction {
             Self::PlayerTrade => Some("PlayerTrade"),
             Self::CrossPortal => Some("CrossPortal"),
             Self::Energy => Some("Energy"),
+            Self::MoveInventory => Some("MoveInventory"),
             _ => None,
         }
     }

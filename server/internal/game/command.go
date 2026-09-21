@@ -92,12 +92,14 @@ func (p *Player) teleportCommandLocked(args []string) (ChatOutcome, bool) {
 	p.idleTicks = 0
 	p.setMiningLocked(nil)
 	p.pendingSwing = nil
-	p.blocking = false
+	p.lowerShieldLocked()
+	p.cancelDrawLocked()
 
 	// Reset ordering guards across the discontinuity and wake chunk streaming.
 	p.haveTick, p.lastTick = false, 0
 	p.haveMineTick, p.lastMineTick = false, 0
 	p.haveAttackTick, p.lastAttackTick = false, 0
+	p.haveDrawTick, p.lastDrawTick = false, 0
 	p.haveLootOpenTick, p.lastLootOpenTick = false, 0
 	p.haveLootTakeTick, p.lastLootTakeTick = false, 0
 	p.haveLootTakeAllTick, p.lastLootTakeAllTick = false, 0

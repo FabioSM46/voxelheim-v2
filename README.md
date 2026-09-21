@@ -322,7 +322,7 @@ documented in [`docs/PUBLIC_REPOSITORY.md`](docs/PUBLIC_REPOSITORY.md).
 | Go    | pinned in `server/go.mod`       | server             |
 | Rust  | stable (rustfmt + clippy)       | client             |
 | flatc | pinned in [`.flatc-version`](.flatc-version) | schemas |
-| gh    | any recent                      | pipeline scripts   |
+| gh    | 2.18.0 or newer                 | pipeline scripts   |
 | jq    | any recent                      | pipeline scripts, `scripts/test/` |
 
 `jq` is a hard requirement of `scripts/gh-automation.sh` and of the helper test suite, not a
@@ -334,6 +334,14 @@ fail-closed sentinel is what must answer that; the same redirection swallowed
 `jq: command not found`. `require_jq` now runs before the first API call of every subcommand
 that needs the binary and says so in one line instead. Note that gh's built-in `--jq` is a
 different thing, evaluated inside gh, and needs nothing installed.
+
+`gh` must be **2.18.0 or newer**, the release that added the `headRefOid` pull-request field the
+`/develop-iteration` watch and `/process-pr` read; `pr-merge --head` also needs
+`gh pr merge --match-head-commit` (2.13.0). Distribution packages can lag years behind — Ubuntu
+22.04 ships 2.4.0 — and on such a release the pipeline used to fail only at merge time, as an
+`unknown flag` (#1281). `require_gh` now reads `gh --version` before `gh auth status` and refuses
+an older or unreadable release, naming both versions. The number lives in one constant,
+`GH_MIN_VERSION` in `scripts/gh-automation.sh`, next to the audit that sets it.
 
 `bash scripts/interop-check.sh` checks the real Rust client and Go server together, including
 voice sent through the ordinary encoder and queue and received by the Go probe as `VoiceHeard`.
