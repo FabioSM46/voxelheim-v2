@@ -697,6 +697,8 @@ fn capture_scene_counts(world: &mut World) -> (u32, usize, usize) {
 fn capture_counts_live_entities_and_retained_candles_not_allocator_slots() {
     use crate::net::{BlockCoord, Facing, StaticPropKind, StaticPropState};
     let mut world = World::new();
+    // Bevy 0.19 stores resources as live entities, including its bootstrap filter.
+    let baseline = world.entity_count();
     let root = |prop_id, kind| {
         static_props::StaticPropRoot(StaticPropState {
             prop_id,
@@ -710,10 +712,10 @@ fn capture_counts_live_entities_and_retained_candles_not_allocator_slots() {
     let candle = world.spawn(root(2, StaticPropKind::WallSconce)).id();
     let vacant = world.spawn_empty().id();
     world.despawn(vacant);
-    assert!(world.entities().len() >= 3);
-    assert_eq!(capture_scene_counts(&mut world), (2, 2, 1));
+    assert!(world.entities().len() > world.entity_count());
+    assert_eq!(capture_scene_counts(&mut world), (baseline + 2, 2, 1));
     world.despawn(candle);
-    assert_eq!(capture_scene_counts(&mut world), (1, 1, 0));
+    assert_eq!(capture_scene_counts(&mut world), (baseline + 1, 1, 0));
     world.despawn(furniture);
-    assert_eq!(capture_scene_counts(&mut world), (0, 0, 0));
+    assert_eq!(capture_scene_counts(&mut world), (baseline, 0, 0));
 }

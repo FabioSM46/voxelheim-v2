@@ -73,7 +73,7 @@ complete lighting costs, not point-shadow cost alone.
 
 Prepass draws are zero. Furnishings-on retains 209 roots; cosmetic details use the
 existing 64-block visibility rule. Entities count live main-world entities via
-`World::entity_count`, not allocated indices. Draws are actual mesh API submissions
+`World::entity_count` (including Bevy resource entities), not allocated indices. Draws are actual mesh API submissions
 after batching (one per multidraw), excluding fullscreen passes. Timings contain
 120 warmed updates synchronized with GPU completion: CPU+GPU latency of a bounded
 scene, not GPU-only time or full-game FPS. Small baseline differences are noise.
