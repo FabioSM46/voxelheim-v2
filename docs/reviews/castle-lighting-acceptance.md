@@ -1,89 +1,73 @@
-# Furnished castle and lighting acceptance — #1203 / #1204
+# Furnished castle acceptance — #1203 / #1204
 
-This completes the furnishing and lighting deliveries on the existing 63 × 63 × 68
-castle. Worldgen 37 opens the windows and places 92 cosmetic fixtures beside the
-117 authoritative furnishing roots: **209 roots**, below the shared 256-root cap.
-Protocol 45 and its refusal of older peers were delivered with the catalogue.
+Worldgen 37 completes the existing 63 × 63 × 68 castle with **209 roots**:
+117 furnishings and 92 cosmetic fixtures, below the shared 256-root limit.
+The [room inventory](castle-furniture-placement.md) covers banquet, throne,
+kitchen, council, guard room, library, galleries and four furnished tower rooms.
+Fixtures comprise 82 wall sconces, seven standing candelabra at landings and
+three tabletop candelabra (two banquet, one council). Slots 253–256 remain unused.
 
-## Placement and circulation
+Eighteen main-wing windows have 3 × 5 openings through both wall layers, with
+one grille layer. NW/SW/SE tower openings face south; NE faces north to avoid
+its wing roof. Exterior slate backing is cleared too. Sills, headers, roofs,
+piers and stair guards remain intact.
 
-The [room inventory](castle-furniture-placement.md) covers the two fully set banquet
-tables, carved throne and runner, kitchen/pantry, council, guard room, library,
-upper galleries and four scholar/lookout rooms. The fixture catalogue adds 82 wall
-sconces, seven standing candelabra at upper landings and three tabletop candelabra
-(two banquet tables and the council table). Slots 253–256 remain unused.
+Authoritative walking tests use the complete catalogue, both lanes and all four
+rotations across the main floors, bridge, curtain, dais and towers. They check
+movement and candle overlap at every tick, without jump or teleport corrections.
+Placement tests verify rotated mounts, support and separation from furniture and
+architecture. Existing arrival/respawn, ward, collision and lifecycle tests pass.
+Aperture tests check full wall depth and outward rays on every platform; only
+exact barred tower reveals are exempted from room connectivity. The production
+precipitation shelter probe passes in all nine main rooms in each review rotation.
 
-Eighteen main-wing openings are three blocks wide and five high, with one layer
-of narrow grille members through the complete two-block wall. NW, SW and SE
-lookouts have south openings; the NE opening faces north because its former south
-slit looks into the intact wing roof. Exterior slate trim is cleared as well as
-the glass: a grille backed by opaque trim was found and corrected in GPU review.
-Sills, headers, structural piers, roofs and stair guards remain in place.
+## Sources and settings
 
-Authoritative walking tests use the complete catalogue, all four rotations and
-both tread lanes across the nine main floors, bridge, curtain, dais and towers.
-They apply ordinary movement without jump or teleport corrections and check
-floor-candle envelopes at every tick. Rotated fixture tests verify mounts,
-support and separation from architecture/furniture. Existing authority, arrival,
-respawn, ward and snapshot-lifecycle regressions remain green.
+The 32 still captures and seven videos use `5706ab3`; extra west-wing and bridge
+videos use `0bdc373`, which changes only route tests. Client source is identical;
+fixture and encoded snapshot bytes were compared and are identical. The production
+client decodes the real server snapshot. `castle-capture-manifest.py` verifies
+clean source, fixture/snapshot hashes, complete traces, video frames and output
+hashes. Main views use the generated capital neighbourhood; window comparisons
+use explicitly labelled isolated rotations. Camera poses live in `castle_capture.rs`.
 
-The aperture test checks full wall depth and outward rays. It runs on all platforms;
-the former `_windows_test.go` name selected Windows only. Connectivity excludes
-only exact two-high tower reveals with actual grilles. Production precipitation
-shelter probes pass in all nine main rooms in each review rotation.
+1280 × 720; default FOV; EV100 9.7; AcesFitted; clear weather; day/night ticks
+6000/18000. Adapter: AMD Radeon RX 9070 XT (RADV GFX1201), Vulkan, Mesa 26.2.3;
+8192 texture-array layers. Directional shadows: two cascades, 64 blocks, 2048 map.
+Point shadows: 512 pixels per face.
 
-## Render settings and provenance
-
-The 32 still captures and seven initial videos use source `5706ab3`; the extra
-west-wing and bridge videos use `0bdc373`, which changes only route tests.
-The client tree is identical, and the generated fixture and encoded snapshot are
-byte-for-byte identical between these sources. All use real server-exported
-geometry and `EntitySnapshot`, decoded and consumed by the production client. The
-fixture/snapshot digests, clean source, complete traces and output hashes are
-verified by `scripts/castle-capture-manifest.py`. Each review turn has its own
-labelled isolated fixture; the main views and walks use the generated capital
-neighbourhood. Fixed player-height cameras live in `castle_capture.rs`.
-
-Settings: 1280 × 720, default field of view, EV100 9.7, AcesFitted, clear weather,
-day tick 6000 / night tick 18000, AMD Radeon RX 9070 XT (RADV GFX1201), Vulkan,
-Mesa 26.2.3. The adapter exposes 8192 texture-array layers. Directional shadows
-use two cascades over 64 blocks and a 2048 map; point shadow faces use 512 pixels.
-
-The [bounded pool](castle-candle-pool.md) selects at most four shadowed candles
-within 24 blocks, limited further by the device and other point shadows. Ranking
-uses at most 32 sight rays at 5 Hz with stable IDs and retention. Unselected flames
-remain visible. Wall/floor/table output is 120,000/240,000/160,000 in Bevy's lumen
-scale: game-art tuning for production exposure, not calibrated physical candles.
-Existing campfires and portals disable shadows and retain their behavior.
-
-GPU comparison exposed a previously invisible interaction: the sky dome itself
-cast directional shadows after shadows were enabled. `NotShadowCaster` on the
-four celestial meshes fixes that occluder; a regression verifies their exclusions.
-The sun trajectory, daylight/ambient curves and weather behavior are unchanged.
+The [pool](castle-candle-pool.md) selects at most **four** shadowed lights within
+24 blocks, further limited by device capacity and other point shadows. Ranking
+uses at most 32 sight rays at 5 Hz; unselected flames remain visible.
+Wall/floor/table intensity is 120,000/240,000/160,000 in Bevy's lumen scale, tuned
+for production exposure. Existing campfires and portals still disable shadows.
+GPU comparison found that the sky dome occluded sunlight after shadows were
+enabled. `NotShadowCaster` on celestial meshes fixes this, with a regression test;
+solar motion, ambient curves and weather remain unchanged.
 
 ## Window comparison
 
-Candles are disabled for these pairs. Only the grille-to-stone diagnostic switch
-changes between each open and blocked capture; camera, exposure and solar time
-remain identical. All four rotations produce a sunlit floor patch with visible
-bar shadows; blocking the openings removes it.
+Candles are disabled. Only the grille-to-stone diagnostic switch changes within
+each pair; camera, time and exposure match. All four rotations show floor patches
+with bar shadows which disappear when blocked. Rectangles are `(left, top, right,
+bottom)`, exclusive right/bottom. Means use sRGB linearization then Rec.709
+`0.2126 R + 0.7152 G + 0.0722 B`: final-image luminance, not physical lux.
 
-Pixel rectangles use `(left, top, right, bottom)` with exclusive right/bottom.
-Mean luminance is computed after sRGB linearization with Rec.709 weights
-`0.2126 R + 0.7152 G + 0.0722 B`. It measures the final tone-mapped image, not lux.
-Every rectangle lies on the same interior floor in its matched pair.
-
-| Review turn | View / tick | Floor rectangle | Open | Blocked | Ratio |
+| Turn | View / tick | Floor rectangle | Open | Blocked | Ratio |
 | --- | --- | --- | --- | --- | --- |
 | 0 | window_patch / 12000 | 800,510,1100,550 | 0.036301 | 0.003046 | 11.92 |
 | 1 | window_east / 6000 | 560,485,700,510 | 0.056637 | 0.002905 | 19.50 |
 | 2 | window_patch / 0 | 480,580,650,640 | 0.057306 | 0.003046 | 18.81 |
 | 3 | window_patch / 6000 | 530,495,730,520 | 0.059765 | 0.002979 | 20.06 |
 
-This chooses a sun-facing window/time for each orientation; it does not promise
-direct sun through every window at every hour.
+Each pair measures the same interior floor. Sun-facing windows/times are chosen
+per rotation; direct sun is not promised through every window at every hour.
 
-## Matched rendering cost
+## Rendering cost
+
+At tick 6000, `lighting=off` disables candle models/lights and directional shadows;
+`furniture=off` removes all prop descriptors. These compare furnishings-only and
+complete lighting costs, not point-shadow cost alone.
 
 | View | Lighting / furnishings | Live entities | Main / shadow draws | Active / shadowed points | p50 / p95 ms |
 | --- | --- | --- | --- | --- | --- |
@@ -96,74 +80,50 @@ direct sun through every window at every hour.
 | Exterior gate | on / off | 520 | 4 / 4 | 0 / 0 | 4.940 / 15.562 |
 | Exterior gate | on / on | 1399 | 6 / 6 | 0 / 0 | 5.122 / 17.004 |
 
-Prepass mesh draws were zero in all eight measurements. Both views retain the
-same 209 roots when furnishings are on; cosmetic detail visibility is bounded by
-the existing 64-block distance rule. Small baseline timing differences are noise,
-not evidence that adding furniture speeds rendering up.
+Prepass draws are zero. Furnishings-on retains 209 roots; cosmetic details use the
+existing 64-block visibility rule. Entities count live main-world entities via
+`World::entity_count`, not allocated indices. Draws are actual mesh API submissions
+after batching (one per multidraw), excluding fullscreen passes. Timings contain
+120 warmed updates synchronized with GPU completion: CPU+GPU latency of a bounded
+scene, not GPU-only time or full-game FPS. Small baseline differences are noise.
+Eight lights were tried and reduced to four after profiling the shadow workload.
 
-`lighting=off` disables candle registration and directional shadows;
-`furniture=off` removes all static-prop descriptors. The four combinations compare
-furnishings-only and complete lighting costs at the same view and settings.
-The lighting toggle also removes candle model children, so its difference is not
-a pure point-shadow benchmark. Entity counts are
-live main-world entities (`World::entity_count`), not allocator capacity. Draws
-are measured API mesh submissions after batching, with multidraw counted once;
-fullscreen passes and render-world entities are not included.
+## Night walks
 
-Frame distributions contain 120 warmed updates, each synchronized with GPU
-completion. They measure CPU+GPU frame latency of this bounded capture scene,
-not GPU-only time or full-game FPS. Eight lights were tried during tuning and
-reduced to four after the shadow workload became dominant; the final table above
-reports the actual chosen budget, without claiming a portable FPS target.
+Matched day/night views cover gate, banquet, throne, study, corridor, landing,
+NW lookout and tower study; eight cost views and eight window images complete
+32 stills. Nine night videos include the exact return to the gate. Export names
+now distinguish wings/lanes: the older main-floor filename contained the east
+second lane. Traces are never joined or edited.
 
-## Walks and visual evidence
-
-Matched day/night images cover gate entry, banquet, throne, study, corridor,
-stair landing, NW lookout and tower study. The fixed views show table legs,
-place settings, bookcases, carved seat, floor runners, candle mounts and local
-shadows at player height. The eight window images complete 32 still captures.
-
-Nine complete night videos include the exact return to the gate. Distinct wing
-and lane export names prevent one walk replacing another; the old main-floor
-export represented the east wing's second lane. A separate test crosses both
-bridge lanes in all rotations. Traces are never joined or edited.
-
-| Night route | Trace ticks | Encoded frames | Highest feet Y |
+| Route | Trace ticks | Video frames | Highest feet Y |
 | --- | --- | --- | --- |
 | East main floors, second lane | 2321 | 1161 | 28 |
 | West main floors, first lane | 1768 | 885 | 21 |
-| Complete curtain circuit | 1706 | 854 | 13 |
-| Northwest spire | 1628 | 815 | 35 |
-| Southwest spire | 1147 | 574 | 29 |
-| Northeast spire | 1837 | 919 | 41 |
-| Southeast spire | 1432 | 717 | 35 |
+| Curtain circuit | 1706 | 854 | 13 |
+| NW spire | 1628 | 815 | 35 |
+| SW spire | 1147 | 574 | 29 |
+| NE spire | 1837 | 919 | 41 |
+| SE spire | 1432 | 717 | 35 |
 | Audience dais | 692 | 347 | 8 |
 | Bridge, outward and return | 1184 | 593 | 21 |
 
-The videos contain 6,865 frames in total. Inspection includes the gate, stair
-approaches, intermediate landings, curtain corners, room entrances and tower
-arrivals. Next steps and doorway edges remain readable; recesses stay dark.
-Solid walls retain shadow separation, rather than receiving globally raised
-ambient illumination. Movement and overlap assertions run at every server tick; separate placement
-checks verify support, independently of visual inspection.
+The 6,865 frames include stair approaches, intermediate landings, curtain corners,
+room entrances and tower arrivals. Inspected next steps and doorway edges remain
+readable; recesses remain dark. Table settings, legs, bookcases, rugs, carved seat
+and candle mounts are recognizable in the fixed player-height views.
 
 ## Reproduction
 
-Use a committed checkout and a dedicated Cargo target directory per worktree.
-Sharing a target between worktrees can incorrectly reuse a same-named local test
-binary. Build the capture executable from the same source as the fixture.
-
-Follow [the capture harness instructions](castle-capture.md) for fixture/snapshot
-exports and manifest validation. For all furnished movement traces, export with
-`CASTLE_CAPTURE_TRACE_DIR` and run the game tests matching
+Follow [the harness instructions](castle-capture.md), using committed source and
+a dedicated Cargo target directory per worktree to avoid stale binary reuse.
+Export traces with `CASTLE_CAPTURE_TRACE_DIR` and game-test filter
 `TestCastle(MainFloors|CourtStair|WesternSpire|EasternSpire|AudienceDais|Bridge)`.
-For the nine rotation-zero route videos set `CASTLE_CAPTURE_TRACE` to the complete
-TSV and `CASTLE_CAPTURE_TICK=18000`; encode its frame directory at 10 fps as documented.
+Use each complete TSV as `CASTLE_CAPTURE_TRACE`, tick 18000, then encode at 10 fps.
 
-For cost pairs use `banquet` and `exterior_gate` at tick 6000 and the four
-`CASTLE_CAPTURE_LIGHTING=off/on`, `CASTLE_CAPTURE_FURNITURE=off/on` combinations.
-For each window pair export `CASTLE_CAPTURE_MODE=isolated` with its
-`CASTLE_CAPTURE_REVIEW_TURN`, choose the table's view/tick, set
-`CASTLE_CAPTURE_CANDLES=off`, and capture `CASTLE_CAPTURE_WINDOWS=open/blocked`.
-Keep output basenames and directories fresh. Large PNG/MP4/fixture outputs remain
-local review artifacts; the manifest binds each to its source and content hash.
+For costs use views `banquet`/`exterior_gate`, tick 6000, and all off/on combinations
+of `CASTLE_CAPTURE_LIGHTING` and `CASTLE_CAPTURE_FURNITURE`. For windows export
+isolated fixtures with `CASTLE_CAPTURE_REVIEW_TURN`, use the table's view/tick,
+set `CASTLE_CAPTURE_CANDLES=off` and compare `CASTLE_CAPTURE_WINDOWS=open/blocked`.
+Use fresh output names and validate every directory with the manifest script.
+Large PNG/MP4/fixture outputs remain local review artifacts.
