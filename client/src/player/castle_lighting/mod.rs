@@ -343,14 +343,15 @@ mod tests {
     #[test]
     fn pool_reserves_other_shadows_and_shrinks_without_waiting_for_ranking() {
         let mut app = app();
+        app.world_mut().resource_mut::<ShadowLayers>().0 = (selection::MAX_LIGHTS * 6) as u32;
         app.update();
-        assert_eq!(active(&mut app), 8);
+        assert_eq!(active(&mut app), selection::MAX_LIGHTS);
         app.world_mut().spawn(PointLight {
             shadow_maps_enabled: true,
             ..default()
         });
         app.update();
-        assert_eq!(active(&mut app), 7);
+        assert_eq!(active(&mut app), selection::MAX_LIGHTS - 1);
         app.world_mut().resource_mut::<ShadowLayers>().0 = 12;
         app.update();
         assert_eq!(active(&mut app), 1);
@@ -374,7 +375,7 @@ mod tests {
             .0;
         world.entity_mut(entity).despawn();
         app.update();
-        assert_eq!(active(&mut app), 7);
+        assert_eq!(active(&mut app), selection::MAX_LIGHTS - 1);
         assert!(
             !app.world()
                 .resource::<CandlePool>()
