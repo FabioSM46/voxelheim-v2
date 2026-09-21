@@ -325,10 +325,6 @@ fn capture_castle_production_scene() {
         .resource::<bevy::render::renderer::RenderDevice>()
         .limits();
     manifest.push_str(&format!("max_texture_array_layers={}\npoint_shadow_map_size={}\ndirectional_shadow_map_size={}\nexposure_ev100={}\ntonemapping=AcesFitted\ncamera_eye_local={:?}\ncamera_target_local={:?}\n", limits.max_texture_array_layers, app.world().resource::<bevy::light::PointLightShadowMap>().size, app.world().resource::<bevy::light::DirectionalLightShadowMap>().size, bevy::camera::Exposure::default().ev100, config.eye, config.target));
-    manifest.push_str(&format!(
-        "candles={}\n",
-        std::env::var("CASTLE_CAPTURE_CANDLES").unwrap_or_else(|_| "on".into())
-    ));
     manifest.push_str(&capture_costs(&mut app));
     manifest.push_str(&format!(
         "lighting={}\nwindows={}\n",
@@ -653,12 +649,7 @@ fn capture_costs(app: &mut App) -> String {
     }
     millis.sort_by(f64::total_cmp);
     let world = app.world_mut();
-    // Entities::len counts allocated indices, including vacant allocator capacity.
-    let entities = world.entity_count();
-    let props = world
-        .query::<&static_props::StaticPropRoot>()
-        .iter(world)
-        .count();
+    let (entities, props, candles) = capture_scene_counts(world);
     let lights = world
         .query::<&PointLight>()
         .iter(world)
@@ -670,7 +661,59 @@ fn capture_costs(app: &mut App) -> String {
         .filter(|l| l.intensity > 0.0 && l.shadow_maps_enabled)
         .count();
     format!(
-        "frame_samples=120\nframe_metric=synchronized_cpu_gpu_ms\nframe_p50_ms={:.3}\nframe_p95_ms={:.3}\nentities={}\nstatic_prop_roots={}\nactive_point_lights={}\nshadowed_point_lights={}\n",
-        millis[59], millis[113], entities, props, lights, shadowed
+        "frame_samples=120\nframe_metric=synchronized_cpu_gpu_ms\nframe_p50_ms={:.3}\nframe_p95_ms={:.3}\nentities={}\nstatic_prop_roots={}\nactive_point_lights={}\nshadowed_point_lights={}\ncandles={}\ncandle_fixture_roots={}\n",
+        millis[59],
+        millis[113],
+        entities,
+        props,
+        lights,
+        shadowed,
+        if candles == 0 { "off" } else { "on" },
+        candles
     )
+}
+
+fn capture_scene_counts(world: &mut World) -> (u32, usize, usize) {
+    // Bevy 0.19.1 forwards entity_count to count_spawned, not allocator len.
+    let entities = world.entity_count();
+    let (props, candles) = world
+        .query::<&static_props::StaticPropRoot>()
+        .iter(world)
+        .fold((0, 0), |(props, candles), root| {
+            use crate::net::StaticPropKind::{FloorCandelabrum, TableCandelabrum, WallSconce};
+            (
+                props + 1,
+                candles
+                    + usize::from(matches!(
+                        root.0.kind,
+                        WallSconce | FloorCandelabrum | TableCandelabrum
+                    )),
+            )
+        });
+    (entities, props, candles)
+}
+
+#[test]
+fn capture_counts_live_entities_and_retained_candles_not_allocator_slots() {
+    use crate::net::{BlockCoord, Facing, StaticPropKind, StaticPropState};
+    let mut world = World::new();
+    let root = |prop_id, kind| {
+        static_props::StaticPropRoot(StaticPropState {
+            prop_id,
+            kind,
+            origin: BlockCoord { x: 0, y: 0, z: 0 },
+            facing: Facing::North,
+            variant: 0,
+        })
+    };
+    let furniture = world.spawn(root(1, StaticPropKind::Bookcase)).id();
+    let candle = world.spawn(root(2, StaticPropKind::WallSconce)).id();
+    let vacant = world.spawn_empty().id();
+    world.despawn(vacant);
+    assert!(world.entities().len() >= 3);
+    assert_eq!(capture_scene_counts(&mut world), (2, 2, 1));
+    world.despawn(candle);
+    assert_eq!(capture_scene_counts(&mut world), (1, 1, 0));
+    world.despawn(furniture);
+    assert_eq!(capture_scene_counts(&mut world), (0, 0, 0));
 }

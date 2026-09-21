@@ -85,6 +85,12 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 		}
 	}
 
+	for _, room := range []struct{ x, floor, z int }{{10, 35, 12}, {20, 29, 32}, {50, 41, 12}, {42, 35, 32}} {
+		if !Solid(s.At(room.x, room.floor+3, room.z)) {
+			t.Fatalf("tower %d lost its interior roof column", room.x)
+		}
+	}
+
 	for facing := Facing(0); facing < 4; facing++ {
 		want := IronGrilleZ
 		if facing%2 == 1 {

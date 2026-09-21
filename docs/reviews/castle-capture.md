@@ -189,29 +189,18 @@ protocol or worldgen version; the geometry deliveries already moved worldgen
 
 ## Furnished snapshot and matched cost capture
 
-The optional game exporter reads the same `.vhc` fixture and its source/digest
-sidecar, obtains the actual capital catalogue through the production static-prop
-index, and encodes an `EntitySnapshot`. The client capture decodes that envelope
-and feeds the production snapshot buffer and static-prop systems. Review turns
-rotate descriptor cell origins and facing together with the exported architecture.
-No duplicate rendering catalogue is maintained by the capture.
+Export the real descriptor snapshot from the same fixture/source:
 
-After exporting the voxel fixture, use the same source commit to export descriptors:
-
-```bash
+```sh
 CASTLE_CAPTURE_FIXTURE=<output>/capital.vhc \
 CASTLE_CAPTURE_SOURCE_COMMIT=$(git rev-parse HEAD) \
 go -C server test ./internal/game -run '^TestExportCastleCaptureSnapshot$' -count=1
 ```
 
-Pass `CASTLE_CAPTURE_SNAPSHOT=<output>/capital.vhc.snapshot` to the client capture.
-`CASTLE_CAPTURE_FURNITURE=off` clears only the decoded descriptor set for the matched
-empty-room baseline. The default consumes every exported descriptor. Fixed views
-include `banquet`, `throne`, `study` and all four tower lookouts. The manifest binds
-the snapshot digest and source commit to the voxel fixture and capture source.
-
-Each report records 120 warmed frames with a GPU wait after each update, reporting
-p50 and p95 synchronized CPU+GPU frame latency, entity count, static-prop root count,
-and active/shadowed point-light counts. This is scoped capture latency, not GPU-only
-timing or full-game FPS. Mesh draw submissions retain their main/shadow/prepass
-scope; they are not inferred from entity counts.
+Pass `CASTLE_CAPTURE_SNAPSHOT=<output>/capital.vhc.snapshot` to the client.
+The production decoder/buffer consumes the server catalogue; review turns rotate
+origins and facing together. `CASTLE_CAPTURE_FURNITURE=off` clears all descriptors.
+Manifests bind snapshot source/digest to the fixture. Costs use 120 warmed,
+GPU-synchronized updates and actual main/shadow/prepass mesh submissions.
+`candles` and `candle_fixture_roots` report retained fixture roots after filtering;
+`lighting` separately controls their renderer and directional shadows.
