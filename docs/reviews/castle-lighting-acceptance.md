@@ -2,9 +2,7 @@
 
 Worldgen 37 completes the existing 63 × 63 × 68 castle with **209 roots**:
 117 furnishings and 92 cosmetic fixtures, below the shared 256-root limit.
-The [room inventory](castle-furniture-placement.md) covers banquet, throne,
-kitchen, council, guard room, library, galleries and four furnished tower rooms.
-Fixtures comprise 82 wall sconces, seven standing candelabra at landings and
+See the [room inventory](castle-furniture-placement.md). Fixtures comprise 82 wall sconces, seven standing candelabra at landings and
 three tabletop candelabra (two banquet, one council). Slots 253–256 remain unused.
 
 Eighteen main-wing windows have 3 × 5 openings through both wall layers, with
@@ -99,10 +97,9 @@ NW lookout and tower study; eight cost views and eight window images complete
 | Audience dais | 692 | 347 | 8 |
 | Bridge, outward and return | 1184 | 593 | 21 |
 
-The 6,865 frames include stair approaches, intermediate landings, curtain corners,
-room entrances and tower arrivals. Inspected next steps and doorway edges remain
-readable; recesses remain dark. Table settings, legs, bookcases, rugs, carved seat
-and candle mounts are recognizable in the fixed player-height views.
+The 6,865 frames cover approaches, landings, corners and arrivals. Inspected
+steps/doorways remain readable, with dark recesses; the fixed views show
+recognizable furniture, table settings and candle mounts.
 
 ## Reproduction
 

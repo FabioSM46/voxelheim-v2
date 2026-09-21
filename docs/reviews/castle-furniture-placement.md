@@ -58,7 +58,5 @@ fast projectiles against thin chair legs while allowing actual gaps.
 
 ## Combined acceptance
 
-[The final furnished and illuminated review](castle-lighting-acceptance.md)
-records production snapshot decoding, player-height room captures, complete night
-walks and matched rendering costs. Its 92 fixtures share this catalogue and bring
-the total to 209 roots. Window and fixture placement remain owned by #1204.
+[Combined acceptance](castle-lighting-acceptance.md) records final room captures,
+night walks and rendering costs, including #1204's 92 fixtures (209 total roots).

@@ -95,13 +95,9 @@ retains its necessary headroom. Preserve the differentiated external silhouettes
 
 ## Windows and candle fixtures
 
-Worldgen 37 provides eighteen 3-by-5 openings across the nine main floors,
-through both wall layers with one grille layer. The NW, SW and SE tower openings
-face south; the NE opening faces north to avoid its wing roof. Headers, roofs,
-piers and stair guards remain intact. The shared catalogue contains 117 furnishings
-and 92 cosmetic candle fixtures (82 wall, seven floor, three table), 209 roots total.
-[Combined visual acceptance](reviews/castle-lighting-acceptance.md) records room
-captures, four-rotation sunlight comparisons, complete night walks and GPU costs.
+Worldgen 37 adds the final windows and 92 candle fixtures to 117 furnishings.
+[Combined acceptance](reviews/castle-lighting-acceptance.md) records placements,
+roof preservation, rotated sunlight, night routes and rendering costs.
 
 ## Delivery and verification
 
