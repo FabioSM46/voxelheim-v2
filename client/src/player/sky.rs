@@ -461,12 +461,25 @@ pub struct SkyClock(Option<Anchor>);
 struct Anchor {
     world_tick: u64,
     at: Instant,
+    #[cfg(test)]
+    frozen_for_capture: bool,
 }
 
 impl SkyClock {
+    #[cfg(test)]
+    pub(crate) fn freeze_for_capture(&mut self, world_tick: u64) {
+        self.anchor(world_tick, Instant::now());
+        self.0.as_mut().unwrap().frozen_for_capture = true;
+    }
+
     /// Records the persisted world time an accepted snapshot carried.
     pub fn anchor(&mut self, world_tick: u64, at: Instant) {
-        self.0 = Some(Anchor { world_tick, at });
+        self.0 = Some(Anchor {
+            world_tick,
+            at,
+            #[cfg(test)]
+            frozen_for_capture: false,
+        });
     }
 
     /// Where the day is at `now`, in ticks, or `None` before the first snapshot.
@@ -501,6 +514,12 @@ impl SkyClock {
             return None;
         }
         let anchor = self.0?;
+        #[cfg(test)]
+        let now = if anchor.frozen_for_capture {
+            anchor.at
+        } else {
+            now
+        };
         let elapsed = now.saturating_duration_since(anchor.at).as_secs_f32();
         // Reduce the integer before converting it to f32. Converting the absolute u64
         // first would eventually lose individual ticks even though one day fits exactly.
@@ -519,6 +538,12 @@ impl SkyClock {
             return None;
         }
         let anchor = self.0?;
+        #[cfg(test)]
+        let now = if anchor.frozen_for_capture {
+            anchor.at
+        } else {
+            now
+        };
         let cycle_ticks = u64::from(day_length_ticks) * LUNAR_CYCLE_DAYS;
         let elapsed_ticks =
             now.saturating_duration_since(anchor.at).as_secs_f64() * f64::from(tick_rate);
@@ -3456,4 +3481,28 @@ mod dome_encloses_the_sky {
             dome - stars
         );
     }
+}
+
+#[test]
+fn capture_clock_freezes_sun_and_moon_then_normal_anchor_resumes() {
+    use std::time::Duration;
+    let mut clock = SkyClock::default();
+    clock.freeze_for_capture(30_000);
+    let at = clock.0.unwrap().at;
+    let later = at + Duration::from_secs(3600);
+    assert_eq!(clock.ticks_at(at, 20, 24_000), Some(6000.));
+    assert_eq!(clock.ticks_at(later, 20, 24_000), Some(6000.));
+    assert_eq!(
+        clock.lunar_phase_at(at, 20, 24_000),
+        clock.lunar_phase_at(later, 20, 24_000)
+    );
+    clock.anchor(30_000, at);
+    assert_eq!(
+        clock.ticks_at(at + Duration::from_secs(1), 20, 24_000),
+        Some(6020.)
+    );
+    assert_ne!(
+        clock.lunar_phase_at(at, 20, 24_000),
+        clock.lunar_phase_at(later, 20, 24_000)
+    );
 }

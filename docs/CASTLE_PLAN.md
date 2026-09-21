@@ -99,9 +99,11 @@ Issue #1202 is delivered in independently verified changes. The five architectur
 implement **both main-wing staircases, the courtyard stair and the complete
 two-wide curtain circuit through four corner lookouts, all four spired tower
 interiors and the audience dais**, together with oriented schematic placement.
-Final renderer evidence follows in a separate acceptance delivery, with its
-server-authored fixture and camera settings. Geometry verification is complete;
-visual acceptance is not claimed by these five architecture changes.
+The sixth delivery adds the shared production renderer harness, server-authored
+fixtures and authoritative gate-to-lookout trace capture. Reproducible camera,
+clock, artifact and provenance contracts are documented in
+[the final capture review](reviews/castle-capture.md). The first five deliveries
+establish geometry; final visual acceptance uses those real client captures.
 
 The main-wing route test drives the real `Player.step` with ordinary walking intent,
 production gravity and no jump input, from the gate up every flight, into each
