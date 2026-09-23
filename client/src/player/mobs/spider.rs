@@ -742,3 +742,6 @@ pub(super) fn posed_meshes(pose_now: &Pose) -> Vec<Mesh> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capture;
