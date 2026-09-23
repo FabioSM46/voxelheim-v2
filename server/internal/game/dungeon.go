@@ -30,11 +30,15 @@ type dungeonEncounters struct {
 	progress           dungeonProgress
 	changes            [][]byte
 	pending            map[*Player]int
+	// descent is the minor encounters: placed groups, triggers and the spider waves
+	// (dungeon_waves.go).
+	descent dungeonDescent
 }
 
 // Construction only, before the manager publishes this session. Both live
 // encounters use the ordinary spawn path exactly once; the open-world director
-// never owns this simulation, and no missing mob is interpreted as a respawn.
+// never owns this simulation, and no missing mob is interpreted as a respawn. The
+// minor-spawn groups are placed here too, on the same terms (dungeon_waves.go).
 func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progress dungeonProgress) error {
 	d := &dungeonEncounters{gate: gate, progress: progress, pending: make(map[*Player]int)}
 	guardian, king, _ := world.InstanceEncounterAnchors(seed)
@@ -57,6 +61,9 @@ func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progr
 		if err != nil {
 			return err
 		}
+	}
+	if err := s.placeDungeonMinorsLocked(seed, d); err != nil {
+		return err
 	}
 	s.dungeon = d
 	s.deathTicks = ticksFor(10*time.Second, uint8(math.Round(1/s.dt)))

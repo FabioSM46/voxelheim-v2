@@ -97,8 +97,10 @@ func newSpawnRNG(worldSeed int64) *rand.Rand {
 // The alternative is re-sorting every mob in the world twenty times a second to
 // discover that nothing happened.
 func (s *Sim) directMobsLocked(tick uint64, players []*Player, mobs []*mob) bool {
+	// A dungeon has no director: its creatures were placed at construction and its
+	// waves are the triggers' (dungeon_waves.go), and nothing here ever refills one.
 	if s.dungeon != nil {
-		return false
+		return s.advanceDungeonDescentLocked(tick, players)
 	}
 	changed := s.removeSpentMobsLocked(players, mobs)
 
