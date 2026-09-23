@@ -1621,6 +1621,20 @@ fn measure_a_spider_horde_in_the_shipped_chamber() {
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_micros(16_667),
     ));
+    // What the camera actually drew, frustum culling included: every spider part the render
+    // world will see this frame. Read on every timed frame rather than once at the end, so a
+    // spider that ran out of view for part of the run fails the measurement it would otherwise
+    // have made cheaper.
+    let on_screen = |app: &mut App| {
+        let world = app.world_mut();
+        world
+            .query::<(&MobVisual, &ViewVisibility)>()
+            .iter(world)
+            .filter(|(visual, visible)| matches!(visual.part, MobPart::Spider(_)) && visible.get())
+            .count()
+    };
+    let whole = HORDE as usize * super::spider::SEGMENT_COUNT;
+    let mut fewest = usize::MAX;
     let mut times = Vec::with_capacity(TIMED_FRAMES);
     for frame in 0..WARM_FRAMES + TIMED_FRAMES {
         if frame % 3 == 0 {
@@ -1634,20 +1648,12 @@ fn measure_a_spider_horde_in_the_shipped_chamber() {
         let time = timed_frame(&mut app);
         if frame >= WARM_FRAMES {
             times.push(time);
+            fewest = fewest.min(on_screen(&mut app));
         }
     }
-    let drawn = {
-        let world = app.world_mut();
-        world
-            .query::<(&MobVisual, &InheritedVisibility)>()
-            .iter(world)
-            .filter(|(visual, visible)| matches!(visual.part, MobPart::Spider(_)) && visible.get())
-            .count()
-    };
     assert_eq!(
-        drawn,
-        HORDE as usize * super::spider::SEGMENT_COUNT,
-        "the whole horde was on screen"
+        fewest, whole,
+        "every part of all thirty spiders was drawn on every timed frame"
     );
     let (p95, row) = summary("spider-horde-30", &times);
     rows.push(row);
