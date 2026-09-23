@@ -140,6 +140,9 @@ type mob struct {
 	// the open world.
 	buried bool
 	leash  *mobLeash
+	// tiered marks one of the dungeon's placed creatures or wave spiders, which carries
+	// the dungeon's health and damage tier over its open-world row (dungeon_balance.go).
+	tiered bool
 }
 
 // mobTap is a session-independent claim on one mob's experience.
@@ -653,12 +656,19 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 
 // attack is the blow this creature commits next, or is committed to now: its species'
 // main attack, or the secondary swipe when the rhythm has turned to it.
+//
+// A creature the dungeon placed strikes at the dungeon's damage tier over its row
+// (dungeon_balance.go); every other creature strikes at its row.
 func (m *mob) attack() mobAttack {
 	def := m.species()
+	a := mobAttack{reach: def.attackRange, damage: def.damage, windup: def.windup, recovery: def.recovery}
 	if m.swiping && def.swipe != (mobAttack{}) {
-		return def.swipe
+		a = def.swipe
 	}
-	return mobAttack{reach: def.attackRange, damage: def.damage, windup: def.windup, recovery: def.recovery}
+	if m.tiered {
+		a.damage = tierScaled(a.damage, dungeonDamageTier)
+	}
+	return a
 }
 
 // attackTicks is [mob.attack]'s windup and recovery at this server's tick rate.

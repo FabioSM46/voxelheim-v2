@@ -112,6 +112,14 @@ func (l *mobLeash) clamp(pos [3]float64, delta, vel *[3]float64) {
 //
 // The caller holds Sim.mu.
 func (s *Sim) placeMinorMobLocked(kind vnet.MobKind, pos [3]float64, zone box, buried bool) (uint64, bool) {
+	return s.placeMinorLocked(kind, pos, zone, buried, false)
+}
+
+// placeMinorLocked is [Sim.placeMinorMobLocked], with tiered deciding whether the
+// creature carries the dungeon's tier (dungeon_balance.go). The tier is part of the
+// placement: it is set, and the health filled to it, on the same statement run that puts
+// the creature in Sim.mobs, before anything else can read the creature.
+func (s *Sim) placeMinorLocked(kind vnet.MobKind, pos [3]float64, zone box, buried, tiered bool) (uint64, bool) {
 	def, registered := mobByKind(kind)
 	if !registered || def.isBoss() {
 		return 0, false
@@ -130,6 +138,10 @@ func (s *Sim) placeMinorMobLocked(kind vnet.MobKind, pos [3]float64, zone box, b
 		return 0, false
 	}
 	m := s.mobs[id]
+	if tiered {
+		m.tiered = true
+		m.health = m.maxHealth()
+	}
 	m.leash = leash
 	if buried {
 		m.buried = true
