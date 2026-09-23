@@ -144,8 +144,10 @@ const TAIL_OVERLAP: f32 = 0.02;
 /// back, rising through straight up to pointing forward. The arc up and over the back every
 /// scorpion carries, with the stinger poised above the body pointing ahead.
 pub(super) const TAIL_REST: [f32; TAIL + 1] = [0.40, 1.15, 1.85, 2.45, 2.95, 3.45];
-/// Added in full once dead: the tail uncurled and lying back along the sand.
-const TAIL_LIMP: [f32; TAIL + 1] = [-0.40, -1.15, -1.75, -2.20, -2.50, -3.15];
+/// Added in full once dead: the tail sagging onto the sand but still curled in over the body,
+/// so the corpse stays inside the box the server collides — a tail straightened out behind it
+/// would overhang by a fifth of the box (review on #1319).
+const TAIL_LIMP: [f32; TAIL + 1] = [-0.45, -1.10, -1.50, -1.40, -1.00, -0.60];
 
 const GAIT_RESPONSE: f32 = 10.0;
 const SPEED_RESPONSE: f32 = 8.0;
@@ -604,8 +606,8 @@ impl Motion {
         let arms = std::array::from_fn(|arm| {
             let twitched = flex.filter(|(which, _)| *which == arm).map_or(0.0, |f| f.1);
             Arm {
-                spread: -0.35 * down,
-                raise: -0.10 * down,
+                spread: 0.15 * down,
+                raise: -0.20 * down,
                 open: 0.35 * twitched,
             }
         });
