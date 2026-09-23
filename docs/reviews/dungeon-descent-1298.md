@@ -29,8 +29,8 @@ Development commands:
 - **`/additem`** gives the #1099 reference iron blade and rusty armour before the portal.
 - **`/immortal`** is on for both boss fights, because the bot does not evade. It is also on for the
   rest of any part of the route that has already cost three deaths.
-- **`/teleport`** is kept only for a steering assist when the bot is stuck. The report counts every
-  use; this run used none.
+- **`/teleport`** places the bot beside the open world's portal before it walks in, and is
+  otherwise only a stuck assist. This run used 2 portal placements and no assists.
 
 ```sh
 go build -o <output-directory>/voxelheimd ./cmd/voxelheimd
