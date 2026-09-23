@@ -23,7 +23,7 @@ func (s *Sim) dungeonCombat() bool {
 
 // Reset only an engaged, surviving dungeon boss when nobody inside is alive.
 // Empty after disconnect is also abandoned combat. Defeated encounters, their
-// corpses, binding/progress and the gate are not part of this transient reset.
+// corpses, binding/progress, the gate and the puzzles are not part of this transient reset.
 // Fresh entity identity prevents an old attack/tap/roster from naming the new pull.
 // Called before the tick can revive a body and again after mobs can kill the last
 // survivor, so neither a one-tick resurrection nor a final blow misses the wipe.

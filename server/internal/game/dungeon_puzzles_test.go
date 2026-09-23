@@ -393,3 +393,35 @@ func TestPuzzleUpdatesQueueBehindAFullOutboundQueue(t *testing.T) {
 		t.Fatal("a delivered backlog was kept")
 	}
 }
+
+// A wipe resets only the engaged boss (resetWipedDungeonLocked): the gate, the puzzles
+// and their state are this instance's progress and survive it — a solved door stays
+// open, a running grille keeps its timer, and the mechanisms keep answering.
+func TestAWipeLeavesThePuzzlesAndTheirDoorsAsTheyWere(t *testing.T) {
+	d := newPuzzleDungeon(t, 2, DefaultTickRate, nil)
+	s := d.s
+	for _, k := range world.InstanceRuneOrder(2) {
+		d.mustUse(d.mechanisms(world.RunePuzzle)[k])
+	}
+	d.mustUse(d.mechanisms(world.GrillePuzzle)[0])
+	gate, puzzles, guardian := s.dungeon.gate, s.dungeon.puzzles, s.dungeon.guardianID
+	s.startBossEncounterLocked(s.mobs[guardian], d.p)
+	d.p.lifeState = vnet.LifeStateDead
+	if !s.resetWipedDungeonLocked() || s.dungeon.guardianID == guardian {
+		t.Fatal("the wipe did not reset the engaged guardian")
+	}
+	if s.dungeon.gate != gate || s.dungeon.puzzles != puzzles {
+		t.Fatal("the wipe replaced the gate or the puzzles")
+	}
+	if !d.doorOpen(world.RunePuzzle) || !d.doorOpen(world.GrillePuzzle) || d.doorOpen(world.ReturnShortcutDoor) {
+		t.Fatal("the wipe moved a door")
+	}
+	d.p.lifeState = vnet.LifeStateAlive
+	if reason, _ := d.use(d.mechanisms(world.RunePuzzle)[0]); reason != vnet.RefusalReasonMechanismLocked {
+		t.Fatalf("a solved stone answered %s after the wipe", reason)
+	}
+	d.tick(ticksFor(GrilleHold, DefaultTickRate))
+	if d.doorOpen(world.GrillePuzzle) {
+		t.Fatal("the grille's timer did not survive the wipe")
+	}
+}
