@@ -267,3 +267,24 @@ func TestDungeonSceneryRemainsImmutableAtEveryRotation(t *testing.T) {
 		}
 	}
 }
+
+// Floor 1 stands on basalt everywhere a body can stand: every air cell of its standing
+// course sits on a basalt floor course, except over the portal frame's rune sill and
+// the chasm's open column. A course left to a room's brick shell, or a gap between two
+// floor fills, fails here.
+func TestFloorOneStandsOnBasaltThroughout(t *testing.T) {
+	const f = dungeonUpperFloor
+	for z := range dungeonDepth {
+		for x := range dungeonWidth {
+			if instanceDungeon.At(x, f, z) != Air {
+				continue
+			}
+			under := instanceDungeon.At(x, f-1, z)
+			sill := z == exitPortalZ && under == RuneStone
+			chasm := x >= chasmX0 && x <= chasmX1 && z >= chasmZ0 && z <= chasmZ1 && under == Air
+			if under != Basalt && !sill && !chasm {
+				t.Fatalf("floor 1 at %d,%d stands on %d, not basalt", x, z, under)
+			}
+		}
+	}
+}
