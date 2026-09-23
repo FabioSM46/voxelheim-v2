@@ -1,29 +1,36 @@
 //! Opt-in GPU review of both first-dungeon bosses in motion inside the shipped chamber.
 //!
-//! The chamber is read at capture time from the server's own drawing,
-//! `server/internal/world/schematic_instance.go`, through the schematic legend into the
-//! client's chunk store, and drawn by the production chunk mesher and terrain material. It is
-//! unrotated, and lit for review by an ambient term and an unshadowed directional light: the
-//! drawing has a roof, and the dungeon's own lighting is not what this reviews.
+//! The chamber is the production dungeon's two boss arenas, read at capture time from the
+//! server's exported instance (see [`Chamber::read`]) into the client's chunk store, and drawn
+//! by the production chunk mesher and terrain material. It is lit for review by an ambient
+//! term and an unshadowed directional light: the arenas have roofs, and the dungeon's own
+//! lighting is not what this reviews.
 //!
 //! Every frame also measures clipping on the CPU: each vertex of the boss's visible meshes
 //! against the chamber's solid voxels and the floor top, written beside the PNGs.
 //!
 //! A second opt-in test measures rendering cost in the same scene: frame times with the GPU
 //! work included, and what each boss draws against the design's authoring budgets.
-use std::path::Path;
 
 use super::*;
 use crate::net::{
     ChunkCoord, EncounterMoveKind, EncounterTimelineInbox, HazardShape, HazardVolume, MovePhase,
     SessionParams,
 };
+use crate::player::dungeon_capture_fixture::DungeonFixture;
 use crate::player::encounters::{self, tests as fixture};
 use crate::world::{ChunkStore, MeshStats, VoxelChunk, WorldPlugin, palette};
 use EncounterMoveKind::*;
 
 const CHUNK: usize = 32;
 const FLOOR_TOP: f32 = 1.0;
+/// The far distance views: sixteen blocks from the boss's anchor, near an arena corner and
+/// off the diagonal, so the monolith on the diagonal does not stand in the sight line. They
+/// were twenty-five blocks down the gallery that joined the two arenas before the dungeon was
+/// redrawn around them; the arenas themselves are unchanged, and sixteen blocks is about as
+/// far as either now lets a player stand from its boss with the boss in view.
+const GUARDIAN_FAR: Vec3 = Vec3::new(6.5, 0.0, 27.0);
+const KING_FAR: Vec3 = Vec3::new(6.5, 0.0, 40.0);
 /// How far inside a voxel a vertex must be to count as clipping it.
 const INSET: f32 = 0.02;
 
@@ -35,48 +42,47 @@ struct Chamber {
 }
 
 impl Chamber {
+    /// Both shipped arenas, cut out of the production dungeon (a drawn-state
+    /// `DUNGEON_CAPTURE_FIXTURE`, exported by `server/internal/world/dungeon_capture_test.go`)
+    /// and set in the frame this review has always used: the guardian's arena at the front
+    /// with its centre on (16.5, 14.5), the king's behind it with its centre on (16.5, 52.5),
+    /// floor top y = 1, ceiling course y = 9. Each is its drawing turned half round about the
+    /// vertical — a rotation, never a mirror — so a monolith, a wall and the reach to it stand
+    /// where they stand in the dungeon, and neither arena is resized.
+    ///
+    /// **The gallery that once joined them is gone from the dungeon, and it is not drawn
+    /// back here.** The two arenas meet wall to wall at z = 33, which is why the distance
+    /// views stand inside an arena rather than down a gallery.
     fn read() -> Self {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../server/internal/world/schematic_instance.go");
-        let source = std::fs::read_to_string(&path).expect("the shipped chamber drawing");
-        let mut layers: Vec<Vec<String>> = Vec::new();
-        let mut rows: Option<Vec<String>> = None;
-        for line in source.lines().map(str::trim) {
-            if line.starts_with("[]string{ // y=") {
-                rows = Some(Vec::new());
-            } else if let Some(current) = rows.as_mut() {
-                if let Some(row) = line.strip_prefix('"').and_then(|l| l.strip_suffix("\",")) {
-                    current.push(row.to_owned());
-                } else if line.starts_with('}') {
-                    layers.push(rows.take().unwrap());
-                }
-            }
-        }
-        let (height, depth, width) = (layers.len(), layers[0].len(), layers[0][0].len());
-        assert_eq!(height, 10, "the chamber drawing has ten layers");
-        let mut blocks = vec![palette::AIR; width * height * depth];
-        for (y, layer) in layers.iter().enumerate() {
-            for (z, row) in layer.iter().enumerate() {
-                for (x, rune) in row.chars().enumerate() {
-                    // The subset of the server's schematicLegend this drawing uses; the
-                    // block-palette parity test pins those names to the client's ids.
-                    blocks[(y * depth + z) * width + x] = match rune {
-                        '_' => palette::AIR,
-                        'b' => palette::BASALT,
-                        'K' => palette::BLACK_BRICK,
-                        'k' => palette::BLACK_BRICK_WORN,
-                        'U' => palette::RUNE_STONE,
-                        'v' => palette::PORTAL_VEIL,
-                        'O' => palette::PORTAL_HEART,
-                        other => panic!("rune {other:?} is outside this capture's legend"),
+        let path = std::env::var("DUNGEON_CAPTURE_FIXTURE").expect("a drawn dungeon fixture");
+        let data = std::fs::read(path).expect("the dungeon capture fixture");
+        let fixture = DungeonFixture::parse(
+            &data,
+            &[&[palette::AIR][..], &palette::PALETTE[..]].concat(),
+        )
+        .expect("validated server-authored fixture");
+        assert!(
+            !fixture.opened,
+            "the fights are reviewed with the doors and the trapdoor as drawn"
+        );
+        let size = [34, 10, 69];
+        let mut blocks = vec![palette::AIR; size[0] * size[1] * size[2]];
+        for y in 0..size[1] {
+            for z in 0..size[2] {
+                for x in 0..size[0] {
+                    let (dx, dz) = (33 - x as i64, z as i64);
+                    // The guardian's floor course is the drawing's y = 50 and its centre
+                    // (17, 87); the king's floor course is y = 0 and its centre (17, 67).
+                    let block = if z < 33 {
+                        fixture.drawing_block(dx, y as i64 + 50, 101 - dz)
+                    } else {
+                        fixture.drawing_block(dx, y as i64, 119 - dz)
                     };
+                    blocks[(y * size[2] + z) * size[0] + x] = block;
                 }
             }
         }
-        Self {
-            size: [width, height, depth],
-            blocks,
-        }
+        Self { size, blocks }
     }
 
     fn block(&self, x: usize, y: usize, z: usize) -> crate::world::BlockId {
@@ -601,7 +607,7 @@ fn chamber_app(chamber: &Chamber) -> (App, Entity, Handle<Image>) {
 }
 
 #[test]
-#[ignore = "requires a render adapter and the server source; writes arena PNGs and a clipping CSV to the temporary directory"]
+#[ignore = "requires a render adapter and a drawn DUNGEON_CAPTURE_FIXTURE; writes arena PNGs and a clipping CSV to the temporary directory"]
 fn capture_bosses_in_the_shipped_chamber() {
     use MovePhase::{Channel, Recovery, Release, Telegraph};
 
@@ -674,8 +680,8 @@ fn capture_bosses_in_the_shipped_chamber() {
         &mut app,
         &chamber,
         guardian,
-        "idle-25",
-        Vec3::new(16.5, 0.0, 39.5) + eye,
+        "idle-16",
+        GUARDIAN_FAR + eye,
         home + Vec3::Y * 0.9,
     );
 
@@ -887,8 +893,8 @@ fn capture_bosses_in_the_shipped_chamber() {
         &mut app,
         &chamber,
         guardian,
-        "jaws-prep-25",
-        Vec3::new(16.5, 0.0, 39.5) + eye,
+        "jaws-prep-16",
+        GUARDIAN_FAR + eye,
         home + Vec3::Y * 0.9,
     );
     // Death beside the monolith.
@@ -958,8 +964,8 @@ fn capture_bosses_in_the_shipped_chamber() {
         &mut app,
         &chamber,
         king,
-        "idle-25",
-        Vec3::new(16.5, 0.0, 27.5) + eye,
+        "idle-16",
+        KING_FAR + eye,
         throne + Vec3::Y * 1.4,
     );
     // Gait and a turn toward the monolith at (24, 60).
@@ -1140,8 +1146,8 @@ fn capture_bosses_in_the_shipped_chamber() {
         &mut app,
         &chamber,
         king,
-        "final-25",
-        Vec3::new(16.5, 0.0, 27.5) + eye,
+        "final-16",
+        KING_FAR + eye,
         throne + Vec3::Y * 1.4,
     );
     // Death beside the monolith.
@@ -1377,7 +1383,7 @@ fn hold(
 }
 
 #[test]
-#[ignore = "requires a render adapter and the server source; times frames and writes a CSV and PNGs to the temporary directory"]
+#[ignore = "requires a render adapter and a drawn DUNGEON_CAPTURE_FIXTURE; times frames and writes a CSV and PNGs to the temporary directory"]
 fn measure_rendering_cost_in_the_shipped_chamber() {
     use MovePhase::{Channel, Recovery, Release, Telegraph};
 
@@ -1544,7 +1550,7 @@ fn measure_rendering_cost_in_the_shipped_chamber() {
 /// adapter the run reports; the CSV beside the bosses' records all three scenes so a
 /// reviewer can read the horde's cost against the boss scenes rather than in isolation.
 #[test]
-#[ignore = "requires a render adapter and the server source; times frames and writes a CSV to the temporary directory"]
+#[ignore = "requires a render adapter and a drawn DUNGEON_CAPTURE_FIXTURE; times frames and writes a CSV to the temporary directory"]
 fn measure_a_spider_horde_in_the_shipped_chamber() {
     const HORDE: u64 = 30;
     const BUDGET_MS: f64 = 1000.0 / 60.0;

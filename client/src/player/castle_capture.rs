@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 #[path = "castle_capture_draw_counts.rs"]
 mod draw_counts;
+#[path = "dungeon_capture.rs"]
+mod dungeon;
 #[path = "castle_capture_fixture.rs"]
 mod fixture;
 use fixture::CastleFixture;
