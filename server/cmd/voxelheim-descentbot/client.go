@@ -164,7 +164,12 @@ func join(ctx context.Context, addr, fingerprint, name string, credential []byte
 			}
 			var welcome vnet.ServerWelcome
 			welcome.Init(table.Bytes, table.Pos)
+			// The id is read here, before join returns and before the reader goroutine
+			// exists, and never written again: the party's allies are built from it.
 			c.entityID = welcome.EntityId()
+			if c.entityID == 0 {
+				return nil, errors.New("the welcome named no entity id")
+			}
 			c.worldSeed = welcome.WorldSeed()
 			return c, conn.SetDeadline(time.Time{})
 		case vnet.PayloadServerReject:
