@@ -146,7 +146,54 @@ type mobDefinition struct {
 	// spawn.go say so by not asking this field. Loot is the reward for the kill; a world
 	// that paid it out for having existed would be a world where waiting is a strategy.
 	loot []lootRoll
+
+	// armour is the share of every player-authored blow this species' hide turns aside,
+	// in percentage points of [ArmourScale] — the worn multiplier a player's armour
+	// applies to a creature's blow, pointed the other way. Zero is the ordinary answer:
+	// flesh, fur and dead skin take a blade at its full worth. See [mob.armoured], the
+	// one place it is spent.
+	armour uint16
+
+	// swipe is a second, lighter attack this species alternates with the one above, or
+	// the zero value for a species that has one attack. The main attack is always the
+	// first one committed, so a creature with a heavy blow opens with it; after every
+	// landed or whiffed swing the next is the other one. Alternation rather than a
+	// choice by distance, because a telegraph a player can learn is a rhythm, and one
+	// chosen from a range they cannot see is not.
+	swipe mobAttack
+
+	// emergeRange is how close a live player must come, body to body and measured from
+	// where the creature would stand once risen, before a buried one breaks the surface.
+	// Zero for a species that never lies buried; see dungeon_minor.go for the state.
+	//
+	// emergence is how long rising takes, spent as the recovery that precedes its first
+	// attack: the wire has no emerging member and Recovery already says "cannot attack
+	// until this expires", which is exactly what a creature still shaking off the sand is.
+	emergeRange float64
+	emergence   time.Duration
+
+	// dungeonOnly says this species exists only where an instance places it. The open
+	// world's director never offers one, whatever the hour — see [spawnableSpecies].
+	// Like nocturnal, a property of the creature rather than of the spawn rule.
+	dungeonOnly bool
 }
+
+// mobAttack is one attack's four numbers, the shape the main attack's fields have on the
+// row itself. Used for a species' secondary attack; see mobDefinition.swipe.
+type mobAttack struct {
+	reach    float64
+	damage   uint16
+	windup   time.Duration
+	recovery time.Duration
+}
+
+// minorLoot is the ordinary minor loot table: what every lesser creature of the descent
+// leaves, one bone and nothing else. Shared by name so the minor rows cannot drift apart,
+// and deliberately without silver — money in this world comes off the draugr, and
+// TestSilverIsReservedCurrencyDroppedOnlyByDraugr holds that line for every row. A bone
+// is the generic remains every other creature already yields, so the descent's minor
+// kills feed the same economy the surface does rather than inventing a new item.
+var minorLoot = []lootRoll{{item: ItemBone, min: 1, max: 1}}
 
 type mobRank uint8
 
@@ -391,6 +438,100 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 			{item: ItemBone, min: 3, max: 5},
 		},
 	},
+
+	// The cave spider — the descent's swarm, and the vargr's rule shrunk to fit a burrow.
+	//
+	// **Its 5.0 speed is above [WalkSpeed] of 4.3**, which is the criterion: nobody walks
+	// away from a spider wave, you turn and cut. It stays under the vargr's 5.4, so the
+	// surface's fastest hunter is still the fastest thing in the game. Everything else
+	// pays for coming in numbers: 20 health dies to one rusty swing (25) or one iron one
+	// (40), to two arrows (15) and to three orbs (8), so a wave is a count of blows
+	// rather than a fight per spider.
+	//
+	// The bite is quick and light — 4 damage behind a 300 ms windup and a 600 ms
+	// recovery. The shortest telegraph in the game, under the vargr's 400, and that is
+	// what the cheap damage buys: one spider is a nuisance, five together are why the
+	// cave is dangerous. 1.4 reach is a mouth, well under [SwordReach], so holding the
+	// edge of your own reach keeps them off you one at a time.
+	//
+	// **Its body is 0.9 wide and 0.6 tall**, and both numbers are the cave's geometry:
+	// under a block wide, so a spider fits the one-block burrows a wave pours out of, and
+	// far under a player's height, so no ceiling a player can walk under stops one. The
+	// client's body row mirrors these two numbers.
+	//
+	// 14 blocks of awareness — narrower than the draugr's 16, because the cave is dark
+	// and close and a wave is triggered, not noticed. 6 experience is a deer's 5 and one
+	// more for biting back: many kills, each worth little. Dungeon-only, and not
+	// nocturnal: a cave has no sky.
+	vnet.MobKindCaveSpider: {
+		rank:        mobRankNormal,
+		maxHealth:   20,
+		experience:  6,
+		speed:       5.0,
+		aggroRange:  14.0,
+		attackRange: 1.4,
+		damage:      4,
+		windup:      300 * time.Millisecond,
+		recovery:    600 * time.Millisecond,
+		body:        body{width: 0.9, height: 0.6},
+		nocturnal:   false,
+		loot:        minorLoot,
+		dungeonOnly: true,
+	},
+
+	// The scorpion — the spider's opposite, and the sand hall's ambush.
+	//
+	// **Its 2.6 speed is the slowest in the game**, under the Draugr king's 3.0: a
+	// scorpion is never chased away from, it is walked around. What it has instead is a
+	// shell. **40 points of armour** leave sixty percent of every blow, the player's worn
+	// multiplier pointed the other way: an iron swing lands for 24 rather than 40 and a
+	// rusty one for 15 rather than 25, so its 72 health is three iron swings or five rusty
+	// ones — one and two more than the same health would cost unarmoured. Arrows (9) and
+	// orbs (4) are poor against it on purpose: the shell is a reason to close.
+	//
+	// **The sting is the heavy blow and it is readable**: 18 damage, the third heaviest
+	// in the registry behind the two bosses, behind an 1100 ms windup that is the
+	// longest of any normal species and inside the approved design's 0.9–1.5 s band for
+	// a signal. 2.2 reach is the arched tail, still under [SwordReach]. A 1400 ms
+	// recovery is the opening a player earns by reading it.
+	//
+	// **The pincer swipe is the other half of the rhythm**: 7 damage behind 450 ms at 1.5
+	// reach, with a 700 ms recovery. Sting, swipe, sting — the heavy blow always opens,
+	// so the first thing out of the sand is the one a player can see coming.
+	//
+	// **Its body is 1.3 wide and 0.6 tall** — low and wide, a vargr's width and a half
+	// at a spider's height. The client's body row mirrors these two numbers.
+	//
+	// It lies buried until a live player comes within **5 blocks**, and rises over **800
+	// ms** before it may strike — see dungeon_minor.go. 10 blocks of awareness once up:
+	// wider than the ambush, so a scorpion that rose for one player keeps the fight
+	// going with the party around them. 25 experience is above the vargr's 20: slower
+	// than anything, but it takes longer to kill and hits harder than anything that is
+	// not a boss.
+	vnet.MobKindScorpion: {
+		rank:        mobRankNormal,
+		maxHealth:   72,
+		experience:  25,
+		speed:       2.6,
+		aggroRange:  10.0,
+		attackRange: 2.2,
+		damage:      18,
+		windup:      1100 * time.Millisecond,
+		recovery:    1400 * time.Millisecond,
+		body:        body{width: 1.3, height: 0.6},
+		nocturnal:   false,
+		loot:        minorLoot,
+		armour:      40,
+		swipe: mobAttack{
+			reach:    1.5,
+			damage:   7,
+			windup:   450 * time.Millisecond,
+			recovery: 700 * time.Millisecond,
+		},
+		emergeRange: 5.0,
+		emergence:   800 * time.Millisecond,
+		dungeonOnly: true,
+	},
 }
 
 // mobByKind is one species' row, and whether the kind is one this server knows.
@@ -448,6 +589,11 @@ func spawnableSpecies(night bool) []vnet.MobKind {
 		if def.isBoss() {
 			continue
 		}
+		// A dungeon-only row is the same sentence as a boss one, said of a lesser
+		// creature: an instance places it, and the dark around a moving player never does.
+		if def.dungeonOnly {
+			continue
+		}
 		if def.nocturnal && !night {
 			continue
 		}
@@ -461,6 +607,12 @@ func spawnableSpecies(night bool) []vnet.MobKind {
 type mobTicks struct {
 	windup   uint32
 	recovery uint32
+
+	// The secondary attack's pair, zero for a species without one, and the rise from the
+	// sand, zero for a species that never lies buried.
+	swipeWindup   uint32
+	swipeRecovery uint32
+	emergence     uint32
 }
 
 // mobTimingsFor converts every registered species' telegraph and recovery at this
@@ -477,10 +629,18 @@ func mobTimingsFor(tickRate uint8) map[vnet.MobKind]mobTicks {
 			timings[kind] = mobTicks{}
 			continue
 		}
-		timings[kind] = mobTicks{
+		t := mobTicks{
 			windup:   ticksFor(def.windup, tickRate),
 			recovery: ticksFor(def.recovery, tickRate),
 		}
+		if def.swipe != (mobAttack{}) {
+			t.swipeWindup = ticksFor(def.swipe.windup, tickRate)
+			t.swipeRecovery = ticksFor(def.swipe.recovery, tickRate)
+		}
+		if def.emergeRange > 0 {
+			t.emergence = ticksFor(def.emergence, tickRate)
+		}
+		timings[kind] = t
 	}
 	return timings
 }

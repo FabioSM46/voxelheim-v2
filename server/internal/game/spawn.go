@@ -616,6 +616,11 @@ func (s *Sim) spotIsClearLocked(pos [3]float64, arriving body) bool {
 		}
 	}
 	for _, m := range s.mobs {
+		// A buried creature is invisible to every other creature's logic, this one's
+		// included: it occupies sand, not the spot above it.
+		if m.buried {
+			continue
+		}
 		if boxDistance(spot, m.species().body.boxAt(m.pos)) < MobSpawnSeparation {
 			return false
 		}

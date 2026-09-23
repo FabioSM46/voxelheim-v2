@@ -167,6 +167,32 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		if !def.passive && def.damage >= PlayerMaxHealth {
 			t.Errorf("%s takes %d of a level-one player's %d health in one blow", kind, def.damage, PlayerMaxHealth)
 		}
+
+		// The descent's columns. A shell below the scale, or the subtraction underflows;
+		// a swipe complete or absent, and held to the main attack's own relationships; a
+		// rise stated as a range and a span together, on a creature that fights once up.
+		if def.armour >= ArmourScale {
+			t.Errorf("%s has %d armour against a scale of %d, which erases every blow", kind, def.armour, ArmourScale)
+		}
+		if swipe := def.swipe; swipe != (mobAttack{}) {
+			if def.passive || swipe.reach <= 0 || swipe.damage == 0 || swipe.windup <= 0 || swipe.recovery <= 0 {
+				t.Errorf("%s carries a half-described swipe %+v (passive=%v)", kind, swipe, def.passive)
+			}
+			if swipe.reach > def.aggroRange || swipe.reach >= SwordReach || swipe.damage >= PlayerMaxHealth {
+				t.Errorf("%s swipes %v blocks for %d, outside what its main attack is held to", kind, swipe.reach, swipe.damage)
+			}
+		}
+		if (def.emergeRange > 0) != (def.emergence > 0) {
+			t.Errorf("%s rises for a player within %v blocks over %v: a burial needs both", kind, def.emergeRange, def.emergence)
+		}
+		if def.emergeRange > 0 && def.body.height > burialDepth {
+			t.Errorf("%s lies buried and stands %v tall, above the %v-block burial depth: its body would show above the sand",
+				kind, def.body.height, burialDepth)
+		}
+		if def.emergeRange > 0 && (def.passive || def.isBoss() || !def.dungeonOnly) {
+			t.Errorf("%s lies buried and is passive=%v boss=%v dungeonOnly=%v; only an instance's hostile minor creature may",
+				kind, def.passive, def.isBoss(), def.dungeonOnly)
+		}
 	}
 }
 
@@ -206,10 +232,9 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 // they turn out to need, which is not this one.
 //
 // Horse is the same staged-contract exception: #705 reserves the wire member while the
-// dependent authoritative issue owns its registry row. CaveSpider and Scorpion are the
-// same exception again: #1287 puts them on the wire for the first dungeon descent, and
-// their stats, behaviour and loot belong to the later issues that place them. The guard
-// remains exact — these four named members and no wildcard.
+// dependent authoritative issue owns its registry row. The guard remains exact — these
+// two named members and no wildcard. CaveSpider and Scorpion were exempt too, from the
+// V46 contract until #1291 gave both their rows; they are ordinary members now.
 func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 	t.Parallel()
 
@@ -220,7 +245,7 @@ func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 			if registered {
 				t.Error("MobKind.Unknown is registered, and it is the value an absent field decodes to")
 			}
-		case vnet.MobKindVillager, vnet.MobKindHorse, vnet.MobKindCaveSpider, vnet.MobKindScorpion:
+		case vnet.MobKindVillager, vnet.MobKindHorse:
 			if registered {
 				t.Errorf("%s has a director row before its authoritative producer owns one", kind)
 			}
@@ -389,7 +414,9 @@ func TestTheRegistryDecidesWhichSpeciesMaySpawnWhen(t *testing.T) {
 		// than about the clock — TestTheOpenWorldDirectorNeverOffersABoss asks it
 		// directly. Skipped here so the two rules stay separate: this one is about the
 		// dark, and a fixed encounter in a sealed room has nothing to do with the dark.
-		if def.isBoss() {
+		// A dungeon-only row is skipped for the same reason, and
+		// TestTheOpenWorldNeverOffersADungeonOnlySpecies asks it directly.
+		if def.isBoss() || def.dungeonOnly {
 			continue
 		}
 		if !contains(byNight, kind) {
@@ -439,8 +466,8 @@ func contains(kinds []vnet.MobKind, want vnet.MobKind) bool {
 // Every species' telegraph survives every tick rate the server accepts.
 //
 // The rule ticksFor exists for, asked of the whole table: a rate that rounded a windup
-// away would make that attack unreactable rather than fast, and the vargr's 400 ms is
-// the shortest one in the game.
+// away would make that attack unreactable rather than fast, and the cave spider's 300 ms
+// is the shortest one in the game.
 func TestEverySpeciesTelegraphSurvivesEveryTickRate(t *testing.T) {
 	t.Parallel()
 

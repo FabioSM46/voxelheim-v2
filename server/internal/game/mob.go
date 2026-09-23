@@ -128,6 +128,18 @@ type mob struct {
 	// streamed cube. Reset to zero the moment anybody can see it again, and the
 	// director removes it once it passes MobDespawnGrace — see spawn.go.
 	unseenTicks uint32
+
+	// swiping says the next attack this creature commits — or the one it is winding up
+	// now — is its species' secondary swipe rather than its main blow. Always false for
+	// a species without one. See [mob.attack].
+	swiping bool
+
+	// buried and leash are the dungeon's two additions to the machine; see
+	// dungeon_minor.go, which owns both. A buried creature lies under the surface and is
+	// nobody's target; a leashed one never hunts or walks outside its zone. Both zero in
+	// the open world.
+	buried bool
+	leash  *mobLeash
 }
 
 // mobTap is a session-independent claim on one mob's experience.
@@ -313,6 +325,12 @@ func (s *Sim) advanceMobsLocked(tick uint64, players []*Player) []*mob {
 // shared hostile machine below, which is what stops a species arriving unable to fight
 // while the rest of its repertoire is being written.
 func (m *mob) step(s *Sim, players []*Player, tick uint64) {
+	// A buried creature has no physics and no pursuit: it lies where it was placed until
+	// somebody comes close enough to bring it up. See dungeon_minor.go.
+	if m.buried {
+		m.stepBuried(s, players)
+		return
+	}
 	switch {
 	case m.species().passive:
 		m.stepPassive(s.terrain, players)
@@ -326,6 +344,11 @@ func (m *mob) step(s *Sim, players []*Player, tick uint64) {
 			// would be unreadable — the player who reacted to it is not the one it hit.
 			target := huntable(players, m.target)
 			if target != nil && boxDistance(m.species().body.boxAt(m.pos), target.box()) > m.species().aggroRange {
+				target = nil
+			}
+			// A target that left the zone is lost mid-telegraph, exactly as one that left
+			// the aggro range is: the leash is a boundary on the hunt, not on the step.
+			if target != nil && !m.leash.holds(target.pos) {
 				target = nil
 			}
 			m.stepWindup(s, target)
@@ -430,6 +453,11 @@ func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 		}
 		distance := boxDistance(def.body.boxAt(m.pos), p.box())
 		if distance > def.aggroRange {
+			continue
+		}
+		// Somebody standing outside a leashed creature's zone is not prey, whatever they
+		// did to it: this is what stops a hunt following a player back past a checkpoint.
+		if !m.leash.holds(p.pos) {
 			continue
 		}
 		if p.entityID == m.target {
@@ -610,11 +638,36 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		return
 	}
 
-	s.landMobBlowLocked(m, target, m.species().damage)
+	attack := m.attack()
+	s.landMobBlowLocked(m, target, attack.damage)
 	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
-	m.actionTicks = s.mobTimings[m.kind].recovery
+	_, m.actionTicks = m.attackTicks(s)
+	// The rhythm turns over on the swing, not on the hit: a whiffed sting is still a
+	// sting, and the swipe comes next either way.
+	if m.species().swipe != (mobAttack{}) {
+		m.swiping = !m.swiping
+	}
+}
+
+// attack is the blow this creature commits next, or is committed to now: its species'
+// main attack, or the secondary swipe when the rhythm has turned to it.
+func (m *mob) attack() mobAttack {
+	def := m.species()
+	if m.swiping && def.swipe != (mobAttack{}) {
+		return def.swipe
+	}
+	return mobAttack{reach: def.attackRange, damage: def.damage, windup: def.windup, recovery: def.recovery}
+}
+
+// attackTicks is [mob.attack]'s windup and recovery at this server's tick rate.
+func (m *mob) attackTicks(s *Sim) (windup, recovery uint32) {
+	t := s.mobTimings[m.kind]
+	if m.swiping && m.species().swipe != (mobAttack{}) {
+		return t.swipeWindup, t.swipeRecovery
+	}
+	return t.windup, t.recovery
 }
 
 // landMobBlowLocked is the one path a creature's own blow takes against a player.
@@ -722,7 +775,7 @@ func (m *mob) stepRecovery(target *Player) {
 // beginWindup commits to a swing.
 func (m *mob) beginWindup(s *Sim) {
 	m.action = vnet.MobActionWindup
-	m.actionTicks = s.mobTimings[m.kind].windup
+	m.actionTicks, _ = m.attackTicks(s)
 	m.vel[0], m.vel[2] = 0, 0
 }
 
@@ -747,7 +800,7 @@ func (m *mob) inReach(t Terrain, target *Player) bool {
 	def := m.species()
 	body := def.body.boxAt(m.pos)
 	prey := target.box()
-	if boxDistance(body, prey) > def.attackRange {
+	if boxDistance(body, prey) > m.attack().reach {
 		return false
 	}
 	return clearLineOfSight(t, boxCentre(body), boxCentre(prey))
@@ -851,6 +904,9 @@ func (m *mob) physics(s *Sim) {
 	m.vel[1] = max(m.vel[1]-Gravity*s.dt, -TerminalFallSpeed)
 
 	delta := [3]float64{m.vel[0] * s.dt, m.vel[1] * s.dt, m.vel[2] * s.dt}
+	// The leash trims the step before the collision sees it, so whatever is left is a move
+	// the collision has actually approved. See [mobLeash.clamp].
+	m.leash.clamp(m.pos, &delta, &m.vel)
 	pos, blocked := moveAndCollide(s.terrain, m.species().body, m.pos, delta)
 	m.pos = pos
 	m.onGround = blocked[1] && delta[1] <= 0

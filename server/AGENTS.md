@@ -1604,8 +1604,8 @@ numbers from that table rather than from constants of their own.
   simulated — so no number describing one exists on this side at all.
 - **The two timings are per species and still converted per server.** `Sim.mobTimings` is
   `mobTimingsFor(tickRate)`, built once at construction beside every other duration
-  `NewSim` turns into ticks. The vargr's 400 ms telegraph is the shortest in the game, and
-  `ticksFor` never rounds one to zero.
+  `NewSim` turns into ticks. The cave spider's 300 ms bite is the shortest telegraph in the
+  game, and `ticksFor` never rounds one to zero.
 - **The registry is not sent to clients**, exactly as `itemRegistry` is not. A snapshot
   carries the kind, the position, the health and each creature's *own* maximum — that last
   one used to be a single constant, which would have drawn a full-health vargr at 35 of 60.
@@ -1614,6 +1614,36 @@ numbers from that table rather than from constants of their own.
   a snapshot carrying one. That is the fail-closed rule working as designed, and drawing a
   vargr is the separate issue that owns it — the server half is finished first because the
   contract was reserved first.
+
+## The descent's lesser creatures: shell, rhythm, burial and leash
+
+`CaveSpider` and `Scorpion` (#1291) are rows like any other, and four columns plus two pieces
+of per-creature state are everything they add. `internal/game/dungeon_minor.go` owns the
+burial and the leash.
+
+- **`dungeonOnly` is a column, not a check on where the director runs.** `spawnableSpecies`
+  skips such a row for the reason it skips a boss: an instance places it, and the dark around
+  a moving player never does. The director also returns early in an instance simulation, so
+  both halves of "only in a dungeon" hold independently.
+- **`armour` is the worn multiplier pointed the other way**, spent once in
+  `creditMobDamageLocked` — the one path player-authored damage takes — before threat, tap
+  or kill read the number, and never below one point of a blow that connected.
+- **`swipe` is a second attack that alternates with the main one.** The main attack always
+  opens, so a scorpion's first blow is the readable sting; after every swing, landed or
+  whiffed, `mob.swiping` turns over. A rhythm rather than a choice by distance, because a
+  player can learn a rhythm.
+- **Burial has no wire member, and none was added.** A buried creature is sent as `Idle` with
+  its standing position one block under the surface it will rise to, so its whole body is
+  inside the sand; no creature above ground is ever inside a solid block, so that is the
+  client's signal. Rising lifts it onto the surface in `Recovery` for the row's `emergence`,
+  which is Recovery's own meaning: it cannot attack until that expires. While buried it is
+  skipped by the swing search, the projectile search, the damage path and the spawn
+  separation, and it has no physics.
+- **A leash is a zone, not a distance from home.** `placeMinorMobLocked` gives a creature a
+  box; no player outside it is prey, whatever threat they hold, and the horizontal step is
+  trimmed *before* the collision so the creature stops at the boundary. That is what keeps a
+  hunt from following a player back up past a checkpoint or out through a door the moment it
+  opens. Vertical movement stays the terrain's.
 
 ## A boss answers the levels of the party that pulled it
 

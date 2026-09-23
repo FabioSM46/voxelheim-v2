@@ -332,9 +332,9 @@ func TestTheNightBringsEveryDirectorPlaceableSpecies(t *testing.T) {
 
 	seen := h.speciesOverPasses(200)
 	for kind, def := range mobRegistry {
-		if def.isBoss() {
+		if def.isBoss() || def.dungeonOnly {
 			if seen[kind] != 0 {
-				t.Errorf("two hundred passes of night produced %d %s, and the director places no boss", seen[kind], kind)
+				t.Errorf("two hundred passes of night produced %d %s, and the director places neither a boss nor a dungeon-only species", seen[kind], kind)
 			}
 			continue
 		}

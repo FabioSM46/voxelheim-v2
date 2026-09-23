@@ -329,9 +329,14 @@ func (p *Player) resolveAttackLocked() {
 // offline-award path. Threat and boss participation remain live-session concerns.
 // The caller holds Sim.mu.
 func (s *Sim) creditMobDamageLocked(p *Player, target *mob, damage uint16) {
-	if target == nil || damage == 0 || target.health == 0 {
+	// A buried creature is nobody's target: whatever reached it — a stray blade, an arrow
+	// into the sand — lands on nothing, and in particular cannot tap it or start a hunt.
+	if target == nil || damage == 0 || target.health == 0 || target.buried {
 		return
 	}
+	// The species' shell, once, before anything counts the blow: threat, the tap's claim
+	// and the kill all read what actually came off, not what the blade was worth.
+	damage = target.armoured(damage)
 
 	if p != nil {
 		if s.onlineLocked(p) {
@@ -561,7 +566,7 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 	// Sorted, so two mobs at the same distance resolve by identity rather than by
 	// whichever the map happened to yield first.
 	for _, m := range s.sortedMobsLocked() {
-		if m.health == 0 {
+		if m.health == 0 || m.buried {
 			continue
 		}
 		body := m.species().body.boxAt(m.pos)
@@ -623,4 +628,20 @@ func boxCentre(b box) [3]float64 {
 		(b.min[1] + b.max[1]) / 2,
 		(b.min[2] + b.max[2]) / 2,
 	}
+}
+
+// armoured is what a player-authored blow is worth against this creature's shell: the
+// species' armour points removed from it, against the same [ArmourScale] a player's worn
+// armour is read against when the blow runs the other way.
+//
+// **A blow that connects always lands for something**, the rule [Sim.landMobBlowLocked]
+// keeps for players: a shell that could turn an orb into nothing would make a weapon
+// useless against a species rather than weak against it. The registry sweep keeps every
+// row's armour below the scale, so the subtraction cannot underflow.
+func (m *mob) armoured(damage uint16) uint16 {
+	armour := m.species().armour
+	if armour == 0 || damage == 0 {
+		return damage
+	}
+	return max(uint16(uint32(damage)*uint32(ArmourScale-armour)/uint32(ArmourScale)), 1)
 }
