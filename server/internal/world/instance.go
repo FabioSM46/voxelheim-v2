@@ -30,6 +30,20 @@ type instanceLayout struct {
 	// interior reports whether an unrotated drawing cell may be edited. nil means the
 	// generic rule: air or a cobweb the drawing placed, and nothing else.
 	interior func(lx, ly, lz int) bool
+	// originY is the world level of the drawing's bottom course.
+	originY int64
+	// overlay is what a seed changes in the drawing: cells written over it after it is
+	// placed, in the drawing's own frame. nil changes nothing.
+	overlay func(seed int64) []drawnCell
+	// floorGate lays the progression gate flat — a trapdoor in the floor course the
+	// gate anchor stands in — rather than upright across a passage.
+	floorGate bool
+}
+
+// drawnCell is one block at one cell of a drawing's own frame.
+type drawnCell struct {
+	x, y, z int
+	block   Block
 }
 
 // chamberLayout is the two-arena drawing with its authored headroom rule.
@@ -50,7 +64,7 @@ func instanceEditableCell(b Block) bool { return b == Air || b == Cobweb }
 func (l instanceLayout) placement(seed int64) Building {
 	// A fixed drawing, quarter-turned by the seed. Negative seeds are converted
 	// explicitly so this selection is identical on every integer architecture.
-	return centreSchematic(BuildingRuin, 0, l.drawing, 0, 0, 0, Facing(uint64(seed)&3))
+	return centreSchematic(BuildingRuin, 0, l.drawing, 0, 0, l.originY, Facing(uint64(seed)&3))
 }
 
 func instancePlacement(seed int64) Building { return chamberLayout.placement(seed) }
@@ -87,6 +101,15 @@ func (l instanceLayout) generate(seed int64, coord Coord) *Chunk {
 				if block := l.drawing.At(lx, ly, lz); block != keepTerrain {
 					chunk.Set(x, y, z, rotateSchematicBlock(block, facing))
 				}
+			}
+		}
+	}
+	if l.overlay != nil {
+		for _, cell := range l.overlay(seed) {
+			rx, rz := rotateCell(cell.x, cell.z, l.drawing.W, l.drawing.D, facing)
+			wx, wy, wz := b.OriginX+int64(rx), b.OriginY+int64(cell.y), b.OriginZ+int64(rz)
+			if ChunkOf(wx, wy, wz) == coord {
+				chunk.Set(Local(wx), Local(wy), Local(wz), rotateSchematicBlock(cell.block, facing))
 			}
 		}
 	}
@@ -189,4 +212,12 @@ func InstanceEncounterAnchors(seed int64) (guardian, king, gate PlacedAnchor) {
 		}
 	}
 	return
+}
+
+// InstanceDungeonAnchors is every slot the dungeon generated from seed holds, in world
+// block coordinates and in the drawing's declaration order: checkpoints, minor-spawn
+// slots, mechanisms and door cells as well as the named slots above. The slice is a
+// copy; turning it is the placement's job, never the caller's.
+func InstanceDungeonAnchors(seed int64) []PlacedAnchor {
+	return instancePlacement(seed).Anchors
 }
