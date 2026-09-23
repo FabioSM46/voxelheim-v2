@@ -107,7 +107,7 @@ func (l *mobLeash) clamp(pos [3]float64, delta, vel *[3]float64) {
 //
 // Refused — nothing is created — for a kind the registry does not hold, for a boss (the
 // two bosses have their own placement, see dungeon.go), for burial of a species that
-// never lies buried, and for a standing position outside its own zone, which would be a
+// never lies buried or is taller than [burialDepth], and for a standing position outside its own zone, which would be a
 // creature that could never hunt anybody.
 //
 // The caller holds Sim.mu.
@@ -116,7 +116,9 @@ func (s *Sim) placeMinorMobLocked(kind vnet.MobKind, pos [3]float64, zone box, b
 	if !registered || def.isBoss() {
 		return 0, false
 	}
-	if buried && def.emergeRange <= 0 {
+	// A body taller than the burial depth would stand partly above the sand, breaking
+	// the one signal a client reads burial from: a body wholly inside solid terrain.
+	if buried && (def.emergeRange <= 0 || def.body.height > burialDepth) {
 		return 0, false
 	}
 	leash := &mobLeash{zone: zone}

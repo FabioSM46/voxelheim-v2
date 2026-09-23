@@ -551,3 +551,32 @@ func TestTheLeashClampTrimsOnlyOutwardSteps(t *testing.T) {
 		t.Error("an unleashed creature is outside a zone it does not have")
 	}
 }
+
+// A committed swipe lands only inside the swipe's own reach. The landing re-check is the
+// same [mob.inReach] the commit asked, and it reads the attack the rhythm is on — so a
+// player who backs off past 1.5 blocks during the telegraph, while still inside the
+// sting's 2.2, is not hit.
+func TestACommittedSwipeLandsOnlyInsideItsOwnReach(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	id := h.spawnMobAt(vnet.MobKindScorpion, [3]float32{0.5, 64, 2.0})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	h.sim.mobs[id].swiping = true
+	h.sim.mu.Unlock()
+	h.step()
+	if m, _ := h.mobState(id); m.action != vnet.MobActionWindup || !m.swiping {
+		t.Fatalf("the scorpion is %s swiping=%v, want winding up the swipe", m.action, m.swiping)
+	}
+
+	// Back off to a 2.0-block gap: outside the swipe, inside the sting.
+	gap := 2.0
+	h.standAt(player, [3]float64{0.5, 64, 2.0 - scorpionRow.body.width/2 - PlayerWidth/2 - gap})
+	h.advance(int(h.sim.mobTimings[vnet.MobKindScorpion].swipeWindup) + 1)
+
+	if got := h.vitals(player).Health; got != PlayerMaxHealth {
+		t.Errorf("a swipe committed at 1.5 blocks landed for %d on a player %v blocks away", PlayerMaxHealth-got, gap)
+	}
+}

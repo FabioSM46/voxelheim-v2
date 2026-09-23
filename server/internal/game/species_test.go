@@ -185,6 +185,10 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		if (def.emergeRange > 0) != (def.emergence > 0) {
 			t.Errorf("%s rises for a player within %v blocks over %v: a burial needs both", kind, def.emergeRange, def.emergence)
 		}
+		if def.emergeRange > 0 && def.body.height > burialDepth {
+			t.Errorf("%s lies buried and stands %v tall, above the %v-block burial depth: its body would show above the sand",
+				kind, def.body.height, burialDepth)
+		}
 		if def.emergeRange > 0 && (def.passive || def.isBoss() || !def.dungeonOnly) {
 			t.Errorf("%s lies buried and is passive=%v boss=%v dungeonOnly=%v; only an instance's hostile minor creature may",
 				kind, def.passive, def.isBoss(), def.dungeonOnly)
