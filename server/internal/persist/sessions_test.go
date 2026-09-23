@@ -37,6 +37,9 @@ func runsFixture() []SessionRecord {
 				{PlayerID: identity.PlayerID{1, 2, 3}, CharacterID: 4},
 				{PlayerID: identity.PlayerID{9, 9, 9, 9}, CharacterID: 18_446_744_073_709_551_615},
 			},
+			Checkpoints:   3,
+			SolvedPuzzles: []uint8{1, 3},
+			ClearedGroups: []uint8{0, 1, 2, 3, 5, 4},
 		},
 		{
 			ID:             8_000_000_009,
@@ -45,6 +48,8 @@ func runsFixture() []SessionRecord {
 			ExpiresUnix:    1_773_532_800,
 			DefeatedBosses: []vnet.MobKind{vnet.MobKindVargrGuardian},
 			Bound:          []SessionCharacter{{PlayerID: identity.PlayerID{7}, CharacterID: 1}},
+			Checkpoints:    1,
+			SolvedPuzzles:  []uint8{1},
 		},
 		{
 			ID:          2,
@@ -159,6 +164,8 @@ func TestSessionStoreRefusesMoreThanTheFormatHolds(t *testing.T) {
 		{"sessions", tooMany},
 		{"defeated encounters", []SessionRecord{{ID: 1, ExpiresUnix: 1, DefeatedBosses: make([]vnet.MobKind, MaxDefeatedBosses+1)}}},
 		{"bound characters", []SessionRecord{{ID: 1, ExpiresUnix: 1, Bound: make([]SessionCharacter, MaxBoundCharacters+1)}}},
+		{"solved puzzles", []SessionRecord{{ID: 1, ExpiresUnix: 1, SolvedPuzzles: make([]uint8, MaxRouteProgress+1)}}},
+		{"cleared groups", []SessionRecord{{ID: 1, ExpiresUnix: 1, ClearedGroups: make([]uint8, MaxRouteProgress+1)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := store.Save(tc.records); !errors.Is(err, ErrTooManySessions) {
@@ -256,6 +263,17 @@ func TestSessionStoreRefusesACorruptFile(t *testing.T) {
 			binary.LittleEndian.PutUint16(b[sessionsHeaderSize+41:sessionsHeaderSize+43], MaxBoundCharacters+1)
 			return rechecksum(b)
 		}, "one entry can hold"},
+		{"an entry claiming more solved puzzles than one may hold", func(b []byte) []byte {
+			b[sessionsHeaderSize+44] = MaxRouteProgress + 1
+			return rechecksum(b)
+		}, "one entry can hold"},
+		{"an entry claiming more cleared groups than are there", func(b []byte) []byte {
+			// The last entry, which has no lists at all, claiming one cleared group: under
+			// the cap and past the end of the file, so the fit check counts the two
+			// progress lists as well as the older two.
+			b[len(b)-world.ChecksumSize-sessionEntryHeadSize+45] = 1
+			return rechecksum(b)
+		}, "do not fit in the remaining"},
 		{"an entry claiming more defeated encounters than one may hold", func(b []byte) []byte {
 			b[sessionsHeaderSize+40] = MaxDefeatedBosses + 1
 			return rechecksum(b)
@@ -340,5 +358,91 @@ func TestSessionStoreSweepsATemporaryLeftByACrash(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != sessionsFileName {
 		t.Fatalf("the world directory holds %v, want only %s", entries, sessionsFileName)
+	}
+}
+
+// legacySessionsFile lays records out in the v1 layout by hand — the entry ending at its
+// bound list — which is what a world saved before #1294 holds on its disk. Written byte
+// by byte rather than through the encoder, so what is pinned is the old build's output
+// and not this build's idea of it.
+func legacySessionsFile(records []SessionRecord) []byte {
+	body := 0
+	for _, rec := range records {
+		body += legacySessionEntryHeadSize + len(rec.DefeatedBosses) + len(rec.Bound)*sessionBoundSize
+	}
+	buf := world.NewRecord(sessionsHeaderSize, body, sessionsMagic, legacySessionsVersion)
+	binary.LittleEndian.PutUint32(buf[offSessionCount:offSessionCount+4], uint32(len(records)))
+	at := sessionsHeaderSize
+	for _, rec := range records {
+		binary.LittleEndian.PutUint64(buf[at:at+8], rec.ID)
+		binary.LittleEndian.PutUint64(buf[at+8:at+16], uint64(rec.Seed))
+		binary.LittleEndian.PutUint64(buf[at+16:at+24], uint64(rec.Ruin[0]))
+		binary.LittleEndian.PutUint64(buf[at+24:at+32], uint64(rec.Ruin[1]))
+		binary.LittleEndian.PutUint64(buf[at+32:at+40], uint64(rec.ExpiresUnix))
+		buf[at+40] = byte(len(rec.DefeatedBosses))
+		binary.LittleEndian.PutUint16(buf[at+41:at+43], uint16(len(rec.Bound)))
+		at += legacySessionEntryHeadSize
+		for _, kind := range rec.DefeatedBosses {
+			buf[at] = byte(kind)
+			at++
+		}
+		for _, who := range rec.Bound {
+			copy(buf[at:at+identity.IDSize], who.PlayerID[:])
+			binary.LittleEndian.PutUint64(buf[at+identity.IDSize:at+sessionBoundSize], who.CharacterID)
+			at += sessionBoundSize
+		}
+	}
+	world.PutChecksum(buf)
+	return buf
+}
+
+// A v1 file — every world saved before the route progress existed — loads with every
+// run intact and no progress at all, and the next save writes it back in this build's
+// layout with nothing lost. That is the migration: an old run's party still has the
+// whole route ahead of it, which is exactly what empty lists and no checkpoint say.
+func TestSessionStoreMigratesAVersionOneFile(t *testing.T) {
+	t.Parallel()
+
+	legacy := runsFixture()
+	for i := range legacy {
+		legacy[i].Checkpoints, legacy[i].SolvedPuzzles, legacy[i].ClearedGroups = 0, nil, nil
+	}
+	store := openRuns(t, t.TempDir())
+	if err := os.WriteFile(store.Path(), legacySessionsFile(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.Load()
+	if err != nil || !found {
+		t.Fatalf("a v1 file answered %v found=%v", err, found)
+	}
+	if !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("v1 load = %#v, want %#v", got, legacy)
+	}
+
+	if err := store.Save(got); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := binary.LittleEndian.Uint32(data[4:8]); v != SessionsVersion {
+		t.Fatalf("the migrated file was written as version %d, want %d", v, SessionsVersion)
+	}
+	again, _, err := store.Load()
+	if err != nil || !reflect.DeepEqual(again, legacy) {
+		t.Fatalf("the migrated file reloaded as %#v, %v", again, err)
+	}
+
+	// A truncated v1 file is still refused in its own layout, not read as a v2 prefix.
+	broken := legacySessionsFile(legacy)
+	broken = broken[:len(broken)-world.ChecksumSize-1]
+	broken = append(broken, make([]byte, world.ChecksumSize)...)
+	world.PutChecksum(broken)
+	if err := os.WriteFile(store.Path(), broken, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(); !errors.Is(err, world.ErrCorruptStore) {
+		t.Fatalf("a truncated v1 file loaded: %v", err)
 	}
 }

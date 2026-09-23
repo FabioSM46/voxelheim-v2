@@ -53,6 +53,8 @@ func (s *RewardStore) OverlaySessions(saved []SessionRecord, now int64, content 
 		}
 		rec.Bound = append([]SessionCharacter(nil), rec.Bound...)
 		rec.DefeatedBosses = append(rec.DefeatedBosses[:0:0], rec.DefeatedBosses...)
+		rec.SolvedPuzzles = slices.Clone(rec.SolvedPuzzles)
+		rec.ClearedGroups = slices.Clone(rec.ClearedGroups)
 		byKey[key] = RestoredRewardSession{Session: rec}
 	}
 	seen := make(map[rewardRunIdentity]bool)
@@ -85,6 +87,12 @@ func (s *RewardStore) OverlaySessions(saved []SessionRecord, now int64, content 
 		if prior.Session.ID != 0 {
 			rec.ID = prior.Session.ID
 		}
+		// The route progress lives only in sessions.bin: the journal records what the
+		// run killed and owes, never where its party stands. Without this a run the
+		// journal knows about would come back with its doors shut and its halls full.
+		rec.Checkpoints = prior.Session.Checkpoints
+		rec.SolvedPuzzles = slices.Clone(prior.Session.SolvedPuzzles)
+		rec.ClearedGroups = slices.Clone(prior.Session.ClearedGroups)
 		byKey[key] = RestoredRewardSession{Generation: run.Generation, Session: rec}
 	}
 	if len(byKey) > MaxSavedSessions {

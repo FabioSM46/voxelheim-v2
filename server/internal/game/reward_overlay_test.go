@@ -1,6 +1,7 @@
 package game
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -78,8 +79,10 @@ func TestRewardOverlayRestoresRemappedRunsThroughRealManager(t *testing.T) {
 			t.Fatal("stale saved defeat overrode durable progress")
 		}
 		loadDungeon(t, live)
+		// The restored route is raised to what the defeats prove (DungeonRoute.impliedBy).
 		expected := dungeonProgressFrom(records[i].DefeatedBosses)
-		if live.Sim.dungeon.progress != expected || dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
+		expected.route = DungeonRoute{}.impliedBy(expected)
+		if !reflect.DeepEqual(live.Sim.dungeon.progress, expected) || dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
 			t.Fatal("dead boss respawned during real restoration")
 		}
 		_, _, gate := world.InstanceEncounterAnchors(live.Seed)

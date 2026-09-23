@@ -906,7 +906,7 @@ func restoreSessions(instances *game.InstanceManager, store *persist.SessionStor
 }
 
 // savedSessionOf is the one mapping from a stored run to the manager's. game and persist
-// do not import each other, so this is where the six fields cross, one at a time, beside
+// do not import each other, so this is where the seven fields cross, one at a time, beside
 // the reward generation the journal associates with the run.
 func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSession {
 	bound := make([]game.InstanceCharacter, len(rec.Bound))
@@ -920,7 +920,10 @@ func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSess
 		ExpiresUnix:    rec.ExpiresUnix,
 		DefeatedBosses: rec.DefeatedBosses,
 		Bound:          bound,
-		Generation:     generation,
+		Route: game.DungeonRoute{
+			Checkpoints: rec.Checkpoints, SolvedPuzzles: rec.SolvedPuzzles, ClearedGroups: rec.ClearedGroups,
+		},
+		Generation: generation,
 	}
 }
 
@@ -1430,7 +1433,7 @@ func (s *server) saveSessionsLoop(ctx context.Context) error {
 }
 
 // flushSessions writes every saved dungeon run: which run, which seed, which ruin, when
-// it resets, what it has put down and who owes it.
+// it resets, what it has put down, who owes it and how far down the route it has come.
 //
 // The capture and the write are separate here as everywhere else in this file:
 // InstanceManager.SavedSessions takes the manager's lock, copies, and releases it; every
@@ -1458,6 +1461,9 @@ func (s *server) flushSessions() {
 			ExpiresUnix:    run.ExpiresUnix,
 			DefeatedBosses: run.DefeatedBosses,
 			Bound:          bound,
+			Checkpoints:    run.Route.Checkpoints,
+			SolvedPuzzles:  run.Route.SolvedPuzzles,
+			ClearedGroups:  run.Route.ClearedGroups,
 		}
 	}
 	if err := s.runs.Save(records); err != nil {

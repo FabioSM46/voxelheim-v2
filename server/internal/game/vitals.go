@@ -439,8 +439,13 @@ const respawnSettlementOffset = 3
 // The caller holds sim.mu.
 func (p *Player) respawnPositionLocked() [3]float64 {
 	if p.sim.dungeon != nil {
+		// A dungeon death comes back at the furthest checkpoint the party has reached,
+		// and in place before anybody has descended — never at an open-world home.
+		if checkpoint, reached := p.sim.dungeonCheckpointLocked(); reached {
+			return checkpoint
+		}
 		return p.pos
-	} // Dungeon recovery is in place, not at an open-world home.
+	}
 	if home, standing := p.sim.tentOfLocked(p.playerID); standing {
 		anchor := home.anchorVoxel()
 		return [3]float64{

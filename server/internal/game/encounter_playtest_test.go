@@ -348,6 +348,11 @@ func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
 		if !killed {
 			t.Fatal("the guardian survived the setup kill")
 		}
+		// A party at the king has walked the whole route, so every checkpoint is reached
+		// and a death comes back on the landing above the arena's stair (#1294).
+		s.mu.Lock()
+		s.dungeon.checkpoints.reached = len(s.dungeon.checkpoints.anchors)
+		s.mu.Unlock()
 		pt.step()
 	}
 

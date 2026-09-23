@@ -13,7 +13,7 @@ func TestAnInstanceStreamsTheDungeonsSconces(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		manager := instanceTestManager(t, 20, 1)
 		manager.mu.Lock()
-		raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil)
+		raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil, DungeonRoute{})
 		manager.mu.Unlock()
 		if err != nil {
 			t.Fatal(err)
