@@ -68,18 +68,17 @@ func TestYawTowardMatchesTheServersBasis(t *testing.T) {
 	}
 }
 
-func TestTheSoloSiegeIsTwentySpiders(t *testing.T) {
-	if got := expectedSpiders(1); got != 20 {
-		t.Fatalf("a party of one faces %d spiders, want 1+2+2 four times over", got)
-	}
-	if got := expectedSpiders(4); got != 60 {
-		t.Fatalf("a party of four faces %d spiders, want 60", got)
+func TestTheSoloSiegeIsTwelvePacksOfThree(t *testing.T) {
+	for members, want := range map[int]int{1: 36, 2: 36, 3: 36, 4: 48, 5: 60} {
+		if got := expectedSpiders(members); got != want {
+			t.Fatalf("a party of %d faces %d spiders, want %d", members, got, want)
+		}
 	}
 }
 
 func TestTheHumanEstimateReplacesOnlyTheBossFights(t *testing.T) {
 	got := humanEstimate(20*time.Minute, 5*time.Minute, 6*time.Minute)
-	want := 9*time.Minute + time.Duration(578.1*float64(time.Second))
+	want := 9*time.Minute + time.Duration(1618.65*float64(time.Second))
 	if d := got - want; d < -time.Millisecond || d > time.Millisecond {
 		t.Fatalf("estimate %v, want %v", got, want)
 	}

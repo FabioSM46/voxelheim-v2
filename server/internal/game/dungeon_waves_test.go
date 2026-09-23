@@ -12,8 +12,8 @@ import (
 // that fire once, and the cave's three spider waves.
 
 // dungeonPlacedMinors is how many creatures a fresh dungeon holds besides its bosses:
-// the four floor-1 groups of four and the sand hall's eight scorpions.
-const dungeonPlacedMinors = 16 + 8
+// the four floor-1 groups and the sand hall's scorpions, each a pack of the largest size.
+const dungeonPlacedMinors = 5 * dungeonPackMax
 
 // dungeonBossCount is how many boss-rank creatures a simulation holds.
 func dungeonBossCount(s *Sim) int {
@@ -69,9 +69,9 @@ func TestDungeonPlacesEveryMinorSlotOnceLeashedToItsZone(t *testing.T) {
 			n      int
 			buried bool
 		}{
-			0: {vnet.MobKindDraugr, 4, false}, 1: {vnet.MobKindDraugr, 4, false},
-			2: {vnet.MobKindVargr, 4, false}, 3: {vnet.MobKindVargr, 4, false},
-			world.SandBuriedGroup: {vnet.MobKindScorpion, 8, true},
+			0: {vnet.MobKindDraugr, 5, false}, 1: {vnet.MobKindDraugr, 5, false},
+			2: {vnet.MobKindVargr, 5, false}, 3: {vnet.MobKindVargr, 5, false},
+			world.SandBuriedGroup: {vnet.MobKindScorpion, 5, true},
 		}
 		for group, w := range want {
 			ids := desc.groups[group]
@@ -161,13 +161,13 @@ func spidersOf(t *testing.T, s *Sim, ids []uint64) [][3]float64 {
 }
 
 // The first three waves come on the interval with nobody killing anything, and the fourth
-// is held: fifteen spiders are out, the cap.
+// is held: three packs of five are out, fifteen spiders, the cap.
 func TestTheFirstSpiderWavesComeInOrderFromTheBurrowsUpToTheCap(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		s := newWavesSim(t, seed)
-		// A full party, which meets every wave at its full size (dungeon_balance.go).
+		// A full party, which meets every wave as a pack of five (dungeon_balance.go).
 		cave := triggerCentre(t, s, world.CaveTrigger)
-		party := []*Player{delver(7, cave), delver(8, cave), delver(9, cave), delver(10, cave)}
+		party := partyAt(5, cave)
 		interval := uint64(ticksFor(spiderWaveInterval, 20))
 		burrows := map[[3]float64]bool{}
 		for _, b := range s.dungeon.descent.waves.burrows {
@@ -182,7 +182,7 @@ func TestTheFirstSpiderWavesComeInOrderFromTheBurrowsUpToTheCap(t *testing.T) {
 				released[tick] = len(s.dungeon.descent.groups[world.CaveBurrowGroup]) - before
 			}
 		}
-		want := map[uint64]int{start: 4, start + interval: 5, start + 2*interval: 6}
+		want := map[uint64]int{start: 5, start + interval: 5, start + 2*interval: 5}
 		if fmt.Sprint(released) != fmt.Sprint(want) {
 			t.Fatalf("seed %d: waves released %v, want %v", seed, released, want)
 		}
@@ -313,14 +313,15 @@ func TestADungeonGroupIsClearedOnlyWhenEveryMemberIsDead(t *testing.T) {
 // spiders, the population sits exactly at its ceiling and every snapshot within budget.
 func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 	// The largest snapshot one viewer may be sent here: the whole cave's population in
-	// view, the other three players and their vitals, well inside one ordinary frame.
+	// view at a party of five — three packs of five spiders, the cap — the other four
+	// players and their vitals, well inside one ordinary frame.
 	const snapshotBudget = 8 << 10
 
 	s := newWavesSim(t, 1)
 	cave := triggerCentre(t, s, world.CaveTrigger)
 	sizes := map[uint64]int{}
 	latest := map[uint64][]byte{}
-	for i := range uint64(4) {
+	for i := range uint64(5) {
 		id := 900 + i
 		spawn := [3]float32{float32(cave[0]) + float32(i%2), float32(cave[1]), float32(cave[2]) + float32(i/2)}
 		p, err := s.Join(id, testPlayerID(id), fmt.Sprintf("Delver %d", i), spawn, testAppearance(), nil, func([]byte) bool { return true })
@@ -353,7 +354,7 @@ func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 	}
 	// What was measured has the waves in it: every spider is in every viewer's view.
 	for id, frame := range latest {
-		if seen := newestSnapshot(t, &dropSink{frames: [][]byte{frame}}).MobsLength(); seen < 4+5+6 {
+		if seen := newestSnapshot(t, &dropSink{frames: [][]byte{frame}}).MobsLength(); seen < spiderWaveCap {
 			t.Fatalf("viewer %d saw %d creatures at the peak, fewer than the waves", id, seen)
 		}
 	}
@@ -366,8 +367,8 @@ func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 			t.Fatalf("tick %d: %d creatures, over the ceiling %d", tick, n, dungeonMobCeiling)
 		}
 	}
-	if len(sizes) != 4 {
-		t.Fatalf("%d of four viewers were sent a snapshot", len(sizes))
+	if len(sizes) != 5 {
+		t.Fatalf("%d of five viewers were sent a snapshot", len(sizes))
 	}
 	for id, size := range sizes {
 		if size > snapshotBudget {
@@ -381,7 +382,7 @@ func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 // comes on the next tick.
 func TestAWaveWaitsWhileTheCapIsFull(t *testing.T) {
 	s := newWavesSim(t, 0)
-	party := partyAt(4, triggerCentre(t, s, world.CaveTrigger))
+	party := partyAt(5, triggerCentre(t, s, world.CaveTrigger))
 	interval := uint64(ticksFor(spiderWaveInterval, 20))
 	tick := uint64(1)
 	for ; tick < 1+3*interval; tick++ {
@@ -396,8 +397,8 @@ func TestAWaveWaitsWhileTheCapIsFull(t *testing.T) {
 			t.Fatalf("a wave came at tick %d past the cap", tick)
 		}
 	}
-	// Four die, which is room for the fourth wave of four.
-	for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup][:4] {
+	// Five die, which is room for the fourth pack of five.
+	for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup][:5] {
 		m := s.mobs[id]
 		s.damageMobLocked(m, m.health)
 	}
@@ -424,7 +425,7 @@ func TestTheDungeonsCreaturesCarryItsTier(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != dungeonPlacedMinors+spiderWaveSizes[0] {
+	if checked != dungeonPlacedMinors+dungeonPackSize(4) {
 		t.Fatalf("checked %d creatures", checked)
 	}
 	wild := &mob{kind: vnet.MobKindDraugr}

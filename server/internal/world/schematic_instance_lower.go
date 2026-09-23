@@ -98,9 +98,11 @@ var caveBurrows = [...][2]int{{2, 66}, {2, 76}, {32, 64}, {32, 78}, {8, 84}, {26
 var (
 	sandDunes  = [...]Box{{2, 10, 6, 10, 10, 12}, {22, 10, 5, 31, 10, 11}, {2, 10, 26, 9, 10, 34}, {21, 10, 25, 31, 10, 33}, {12, 10, 11, 20, 10, 15}}
 	sandCrests = [...]Box{{3, 11, 8, 8, 11, 10}, {24, 11, 7, 29, 11, 9}, {3, 11, 28, 7, 11, 32}, {23, 11, 27, 28, 11, 31}}
-	// sandBuried are the scorpions' slots: one on each dune's crest or top, and three
-	// on the flat floor — two of them in the lane the twin-lever runner crosses.
-	sandBuried = [...][3]int{{5, 12, 9}, {26, 12, 8}, {5, 12, 30}, {25, 12, 29}, {16, 11, 13}, {9, 10, 20}, {24, 10, 21}, {17, 10, 33}}
+	// sandBuried are the scorpions' slots: one pack of the largest size, five (#1332).
+	// A smaller pack keeps the first declared, so the order is the design: the two in
+	// the lane the twin-lever runner crosses and the one on the middle dune are every
+	// pack's, and two opposite crests are what a party of four and five add.
+	sandBuried = [...][3]int{{9, 10, 20}, {24, 10, 21}, {16, 11, 13}, {5, 12, 9}, {25, 12, 29}}
 	// sandPillars are the hall's four sandstone pillars, two by two, floor to ceiling.
 	sandPillars = [...][2]int{{11, 15}, {22, 15}, {11, 28}, {22, 28}}
 )

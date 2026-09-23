@@ -48,7 +48,7 @@ func lowerSlotsOf(t *testing.T, seed int64) lowerSlots {
 			out.king = a
 		}
 	}
-	if len(out.checkpoints) != 3 || len(out.burrows) != 6 || len(out.buried) != 8 || len(out.twinLevers) != 2 ||
+	if len(out.checkpoints) != 3 || len(out.burrows) != 6 || len(out.buried) != 5 || len(out.twinLevers) != 2 ||
 		len(out.grille) != 9 || len(out.sandDoor) != 9 || len(out.triggers) != 2 {
 		t.Fatalf("seed %d: lower slots %+v", seed, out)
 	}

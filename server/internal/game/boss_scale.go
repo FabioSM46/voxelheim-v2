@@ -17,7 +17,7 @@ import "math"
 //     same party with the same blades fight longer for having levelled, which is the one
 //     direction a fight-length target cannot survive. So each member brings the species'
 //     per-member health — [mobDefinition.maxHealth] — and the boss arrives with that times
-//     the members, up to [bossScaleMaxMembers].
+//     the members, clamped to three to five ([dungeonMembers]).
 //   - **Damage follows the level, through the same curve a level gives a player.** A blow is
 //     scaled by the party's mean of `maxHealthFor(level) / PlayerMaxHealth`, so a boss blow
 //     costs a member the same share of their health at level 30 as the registry prices it at
@@ -35,24 +35,48 @@ import "math"
 // disconnected before the pull and returns during it is not counted; the fight they return
 // to is the one the others pulled.
 
-// bossScaleMaxMembers is how many members a boss's health grows for.
+// How many members a dungeon is sized for (#1332).
 //
-// The approved design and the #1037 measurement both describe parties of one to four, and
-// [MaxPartySize] admits a fifth. A fifth member adds no health: the fight is shorter for
-// them, which is the direction a party that brought more people should expect. **They still
-// count toward the damage mean**, deliberately: a blow's scale answers the health of whoever
-// it lands on, and a fifth member is struck like the other four, so a party of four at level
-// one and a fifth at thirty is hit at 129% rather than at 100%. It is also
-// the bound that keeps [protocol.MobState]'s uint16 health honest —
-// `TestBossHealthFitsTheWireAtEveryScale` holds every boss row's per-member health times this
-// under the wire's ceiling.
-const bossScaleMaxMembers = 4
+// **A dungeon is group content, made for parties of three to five.** The repository owner
+// decided it on 2026-09-23, after the #1298 bot could clear the first dungeon solo only
+// under `/immortal`: a party of one or two meets the dungeon sized for three, and finishing
+// it that way is the balance saying no. Entry is not refused below three — the numbers are
+// the refusal, and TestASoloDelverDiesBeforeKillingAnything is where they are held to it.
+//
+//   - **Three is the floor.** Every boss is sized for at least three members' health, and
+//     every lesser group is a pack of at least three (dungeon_balance.go). One player
+//     therefore does three members' work against three members' blows; the #1099 stander,
+//     which swings as fast as energy allows and never steps aside, dies to either boss and
+//     to one pack long before it can finish them.
+//   - **Five is the ceiling, and it is [MaxPartySize].** A party cannot be larger, so the
+//     scale never has a member it does not count: every member adds their share of health,
+//     which is what keeps a fight the same length for three, four and five.
+//   - **Every member present still counts toward the damage mean**, one or five: a blow's
+//     scale answers the health of whoever it lands on, and the clamp decides only how many
+//     shares of health there are.
+//
+// The bound it keeps is the wire's: [protocol.MobState] carries health as a uint16, and
+// `TestBossHealthFitsTheWireAtEveryScale` holds every boss row's per-member health times
+// [bossScaleMaxMembers] under its ceiling.
+const (
+	bossScaleMinMembers = 3
+	bossScaleMaxMembers = MaxPartySize
+)
+
+// dungeonMembers is how many members a party of n is sized as: n clamped to
+// [bossScaleMinMembers, bossScaleMaxMembers]. The boss's health and the lesser creatures'
+// pack size both read it, so the two agree about who is in the room; the layout's side of
+// the pack is held to [dungeonPackMax] slots by the construction check in
+// placeDungeonMinorsLocked.
+func dungeonMembers(n int) int {
+	return min(max(n, bossScaleMinMembers), bossScaleMaxMembers)
+}
 
 // bossScale is what one pull decided about a boss. The zero value is the registry row itself,
 // which is what an encounter created by hand in a test reads as.
 type bossScale struct {
 	// members is how many characters the boss's health was sized for, in
-	// 1..bossScaleMaxMembers.
+	// bossScaleMinMembers..bossScaleMaxMembers.
 	members uint16
 
 	// maxHealth is the species' per-member health times members.
@@ -76,13 +100,20 @@ func levelDamagePercent(level uint16) uint16 {
 
 // bossScaleFor is the scale a boss of this species takes from a party with these levels.
 //
-// Levels outside 1..[MaxLevel] are clamped into it, and an empty list is a party of one at
-// level one: a boss is only ever pulled by somebody, so the empty case is a caller's defect
-// and the answer that cannot make a fight harder is the one to give it.
+// Levels outside 1..[MaxLevel] are clamped into it. The member count is [dungeonMembers] of
+// the list's length, so an empty list is the smallest party the scale knows, at the
+// registry's blow. **No production path reaches it**: the one caller,
+// [Sim.startBossEncounterLocked], returns early on a nil puller, and both of its callers
+// pass a player of this simulation — the attacker (combat.go) or the target a boss chose
+// from the players it can see (mob.go) — so [Sim.bossScaleLevelsLocked] always holds at
+// least that player. Three rather than one is also the safe answer if one ever did: since
+// #1332 a party of three is the easiest boss the dungeon has, and a smaller default would
+// bring back the solo-sized boss the owner removed rather than a softer version of the
+// dungeon's own.
 //
 // Integer arithmetic throughout, so the same party is the same boss on every run.
 func bossScaleFor(def mobDefinition, levels []uint16) bossScale {
-	members := uint16(min(max(len(levels), 1), bossScaleMaxMembers))
+	members := uint16(dungeonMembers(len(levels)))
 	scale := bossScale{
 		members:       members,
 		maxHealth:     uint16(min(uint32(def.maxHealth)*uint32(members), math.MaxUint16)),

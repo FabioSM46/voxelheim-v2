@@ -53,8 +53,9 @@ const (
 	// went from 562.9 s with the costs waived to 1312.9 s with them, and the Vargr
 	// Guardian from 343.4 s to 840.8 s. Every hit, escape and wipe assertion still holds
 	// over the longer fight; only the clock ran out. Whether a solo starter-kit King
-	// should take twenty-two minutes is a balance question for the owner, not for this
-	// constant.
+	// should take twenty-two minutes was a balance question for the owner, not for this
+	// constant — answered on #1332: a lone player meets the king sized for three, and the
+	// same reader takes 1588.9 s at the rows #1332 set, still inside this limit.
 	playtestLimitSeconds = 1800
 
 	// playtestMargin is the room a reader keeps between its body and a believed boundary,
@@ -886,7 +887,8 @@ func playtestTouches(regions []protocol.HazardVolume, body box) bool {
 // TestFirstDungeonReadersEscapeEveryAnnouncedRegion is the always-run half of the
 // measurement. A reader perceiving the fight through its own frames — at no delay, at 250 and
 // 400 ms of delay, and through 200 ms stalls every second — kills both bosses solo in the
-// starter kit and as a party of four in iron without a single hit: no schedule in either
+// starter kit (against bosses sized for three since #1332, so the longest fights the harness
+// plays) and as a party of four in iron without a single hit: no schedule in either
 // fight announced a region, a combination or a pulse sequence its walking target could not
 // leave in time under those conditions. The review record names the conditions that fail.
 func TestFirstDungeonReadersEscapeEveryAnnouncedRegion(t *testing.T) {
@@ -1074,7 +1076,7 @@ func TestFirstDungeonPlaytestRefereeCatchesWhatItClaims(t *testing.T) {
 }
 
 // TestFirstDungeonPlaytest is the full measurement matrix: every party size from one to
-// four, every entry kit, both policies, then a delay and loss sweep. It is a measurement,
+// five (one and two meet the bosses sized for three, #1332), every entry kit, both policies, then a delay and loss sweep. It is a measurement,
 // not a gate — it fails only when the harness breaks — and it reports otherwise.
 //
 //	cd server && VOXELHEIM_PLAYTEST=1 VOXELHEIM_PLAYTEST_DIR=<review-output> \
@@ -1086,7 +1088,7 @@ func TestFirstDungeonPlaytest(t *testing.T) {
 	var results []playtestResult
 	for _, boss := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
 		for _, kit := range []playtestKit{kitRusty, kitLeather, kitIron} {
-			for party := 1; party <= 4; party++ {
+			for party := 1; party <= MaxPartySize; party++ {
 				for _, policy := range []playtestPolicy{policyReader, policyStander} {
 					results = append(results, runPlaytest(t, playtestConfig{boss: boss, party: party, kit: kit, policy: policy}))
 				}

@@ -345,7 +345,7 @@ func TestAKilledBossStopsAnnouncing(t *testing.T) {
 	}
 
 	h.sim.mu.Lock()
-	h.sim.damageMobLocked(h.sim.mobs[boss], mobRegistry[vnet.MobKindVargrGuardian].maxHealth)
+	h.sim.damageMobLocked(h.sim.mobs[boss], h.sim.mobs[boss].health)
 	h.sim.mu.Unlock()
 
 	before := len(announcedTimelines(t, out.all()))

@@ -317,16 +317,21 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// below is read against the draugr's 60 health and the two blades in itemRegistry,
 	// which is what every other row here is priced against.
 	//
-	// **10,500 health is what each member of the party brings, not what the boss has.** The
-	// pull multiplies it by the members inside the run, up to four, and never by their
-	// levels or their equipment — see boss_scale.go, which owns the rule and argues it. At 720
-	// for any party the #1037 harness measured every fight between 3.9 and 32.5 seconds
-	// against the approved design's three to four minutes (docs/reviews/dungeon-combat-1037.md).
-	// The number is calibrated with that harness rather than chosen: at 8,800 per member the
-	// iron readers of one to four averaged 176 seconds, kill time follows health almost
-	// linearly, and 210 seconds — the middle of the target — asks for 10,500.
-	// docs/reviews/boss-balance-1099.md records the result and its spread. The length still
-	// comes from the moves: no telegraph, recovery or opening was shortened to reach it.
+	// **4,200 health is what each member of the party brings, not what the boss has.** The
+	// pull multiplies it by the members inside the run, clamped to three to five, and never
+	// by their levels or their equipment — see boss_scale.go, which owns the rule and argues
+	// it. At 720 for any party the #1037 harness measured every fight between 3.9 and 32.5
+	// seconds against the approved design's three to four minutes
+	// (docs/reviews/dungeon-combat-1037.md); #1099 then calibrated 10,500 from the same
+	// harness, when a swing cost nothing. **#1127's energy economy moved that number and
+	// #1332 moves it back to the target**: a swing costs 25 of a reserve refilling 12.5 a
+	// second, so a reader lands one iron blow every two seconds rather than every 0.6, and
+	// 10,500 measured 524.6, 526.1 and 519.2 seconds for three, four and five iron readers —
+	// 0.050 seconds per point of per-member health, kill time following health linearly.
+	// 210 seconds, the middle of the target, asks for 4,200.
+	// dungeon_route_estimate_test.go's energyReaderKills records the kills at this number.
+	// The length still comes from the moves: no telegraph, recovery or opening was
+	// shortened to reach it.
 	//
 	// **Its 4.0 speed is under [WalkSpeed] of 4.3, and that is the criterion rather than
 	// a coincidence.** The field vargr is 5.4 — *above* a player, which is the whole
@@ -356,7 +361,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// to say about one that is placed rather than spawned.
 	vnet.MobKindVargrGuardian: {
 		rank:        mobRankBoss,
-		maxHealth:   10500,
+		maxHealth:   4200,
 		experience:  120,
 		speed:       4.0,
 		aggroRange:  24.0,
@@ -384,13 +389,15 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// draugr, because the design places it second and nothing about it should read as a
 	// repeat of the first fight.
 	//
-	// **16,383 health is what each member brings**, on the guardian's rule. It is the largest
-	// per-member health whose four-member total fits the uint16 the wire carries health in,
-	// and that bound is what decided it rather than the measurement: at 16,000 the iron
-	// readers of one to four averaged 301 seconds, and the middle of the approved design's
-	// five to six minutes would ask for about 17,550 — over the wire's ceiling for a party of
-	// four. So a full party kills the king a little under five minutes and a solo player a
-	// little under six; docs/reviews/boss-balance-1099.md records both.
+	// **6,600 health is what each member brings**, on the guardian's rule. #1099 set 16,383,
+	// the largest per-member health whose four-member total fit the uint16 the wire carries
+	// health in; #1332 changes both halves of that. A party of five is now counted, so the
+	// bound is a fifth of the wire's ceiling, 13,107 — and under #1127's energy economy
+	// 16,383 measured 816.7 and 814.7 seconds for three and four iron readers, over thirteen
+	// minutes against the approved design's five to six. Kill time follows health at 0.050
+	// seconds a point, as the guardian's does, so the middle of the target, 330 seconds,
+	// asks for 6,600 — and five times 6,600 is 33,000, half the wire's ceiling, so the
+	// target is reached at every party size for the first time.
 	// TestBossHealthFitsTheWireAtEveryScale holds the bound.
 	//
 	// **Its 3.0 speed is the slowest hostile row in the game**, under the field draugr's
@@ -416,7 +423,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// Not nocturnal, for the guardian's reason: a sealed hall has no sky.
 	vnet.MobKindDraugrKing: {
 		rank:        mobRankBoss,
-		maxHealth:   16383,
+		maxHealth:   6600,
 		experience:  200,
 		speed:       3.0,
 		aggroRange:  24.0,

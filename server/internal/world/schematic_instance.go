@@ -79,12 +79,14 @@ const (
 // order, and [InstanceRuneOrder] names stones by their position in it.
 var runeStoneXs = [4]int{10, 13, 21, 24}
 
-// Minor-spawn groups on floor 1, four slots each; how many are filled for a party is
-// the balance issue's number, not this drawing's. Groups 0 and 1 stand in the first
-// hall (the draugr), 2 and 3 in the second (the vargr).
+// Minor-spawn groups on floor 1, five slots each: a pack of the largest size (#1332).
+// How many are filled for a party is the balance's number, not this drawing's — but a
+// smaller pack keeps the first slots declared, so the order is: the hall's two sides and
+// its middle for every pack, then the two between for a party of four and five. Groups
+// 0 and 1 stand in the first hall (the draugr), 2 and 3 in the second (the vargr).
 var (
 	upperSpawnGroups = [...]struct{ z, group int }{{22, 0}, {28, 1}, {42, 2}, {48, 3}}
-	upperSpawnXs     = [4]int{13, 15, 19, 21}
+	upperSpawnXs     = [5]int{13, 21, 17, 15, 19}
 )
 
 var instanceDungeon = buildDungeon()

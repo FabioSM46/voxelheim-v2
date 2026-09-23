@@ -1658,8 +1658,11 @@ level of every character inside the simulation, computes `bossScaleFor` once and
   health (`maxHealthFor`) and nothing else. A blow is the blade's damage at the same cadence at
   every level, so a per-member share that grew with level would make the same party fight longer
   for having levelled. Each member brings `mobDefinition.maxHealth`, which on a boss row is the
-  per-member health, up to `bossScaleMaxMembers` (4). A fifth member adds no health, and four
-  times every boss row must fit the wire's uint16 (`TestBossHealthFitsTheWireAtEveryScale`).
+  per-member health, times the members clamped to `[bossScaleMinMembers, bossScaleMaxMembers]`
+  — three to five (#1332). A dungeon is group content: a party of one or two meets a boss sized
+  for three, and the dungeon's lesser packs read the same clamp (`dungeonMembers`,
+  `dungeon_balance.go`). Five times every boss row must fit the wire's uint16
+  (`TestBossHealthFitsTheWireAtEveryScale`).
 - **Damage follows level through the same curve.** Every move's blow is multiplied by the party's
   mean of `maxHealthFor(level) / PlayerMaxHealth`, from 100% at level 1 to 245% at `MaxLevel`. A
   boss blow therefore costs a member the same share of their health at any level. The mean is over
@@ -1678,8 +1681,10 @@ level of every character inside the simulation, computes `bossScaleFor` once and
   its pull keeps the share it had lost.
 - **Fight length is measured, not asserted.** The per-member health on each boss row is calibrated
   with the #1037 harness against the approved design's 3–4 minute Vargr and 5–6 minute Draugr
-  targets. `docs/reviews/boss-balance-1099.md` records the before and after kill times and their
-  spread. A change to a boss row, a move's recovery or the blades is a change to fight length, and
+  targets. `docs/reviews/boss-balance-1099.md` records the #1099 calibration; it predates the
+  energy economy, and the rows were re-set on #1332 from the same harness under energy
+  (`energyReaderKills` in `dungeon_route_estimate_test.go`, reproduced by the opt-in
+  `TestTheRouteBossKillsAreTheHarnesss`). A change to a boss row, a move's recovery or the blades is a change to fight length, and
   that record is what to re-run.
 
 ## The hostile ledger, and why armour earns attention at the blow

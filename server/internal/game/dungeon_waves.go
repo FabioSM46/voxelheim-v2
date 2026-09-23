@@ -24,8 +24,8 @@ import (
 //
 // Which species a group holds is the room's: the first hall is the draugr's, the
 // second the vargr's, and the sand hall's scorpions lie buried. Every slot is filled;
-// how many of them a smaller party meets is decided when the party first steps into the
-// group's zone (dungeon_balance.go).
+// how many of them a party meets — a pack of three to five — is decided when the party
+// first steps into the group's zone (dungeon_balance.go).
 //
 // # Triggers
 //
@@ -50,9 +50,10 @@ import (
 // web curtain across the neck beyond it, so the trigger is the one start the waves
 // need (world.TestTheCaveTriggerComesBeforeTheWebCurtain pins the order).
 
-// spiderWaveSizes is how many spiders each wave brings for a full party, in order: the
-// original three waves' rising four, five and six, four times over (dungeon_balance.go).
-var spiderWaveSizes = [...]int{4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6}
+// spiderWaveCount is how many waves the cave brings. Each is a pack of three to five
+// spiders sized to the party inside as it comes out ([dungeonPackSize]); the count is
+// what sets the siege's length (dungeon_balance.go).
+const spiderWaveCount = 12
 
 const (
 	// spiderWaveInterval is the longest a wave waits after the previous one began.
@@ -61,17 +62,19 @@ const (
 	// when that is sooner than the interval.
 	spiderWaveBreather = 40 * time.Second
 	// spiderWaveCap is the most spiders out at once: a wave that would put more out waits
-	// until enough have died. It is the original three waves together, which is the
-	// population the snapshot budget was measured with.
-	spiderWaveCap = 4 + 5 + 6
+	// until enough have died. Three of the largest packs — fifteen, the population the
+	// snapshot budget was first measured with (#1294), and the same number now that a
+	// wave is a pack of at most five (#1332).
+	spiderWaveCap = 3 * dungeonPackMax
 )
 
 // dungeonMobCeiling is the most creatures one dungeon instance can ever hold at once:
-// the two bosses, every placed slot and the most spiders ever out together. The bound is
+// the two bosses, every placed slot — four hall groups and the sand hall, each of
+// [dungeonPackMax] slots — and the most spiders ever out together. The bound is
 // structural rather than a cap applied at run time — nothing else ever creates a creature
 // here, and the waves hold at [spiderWaveCap] — and
 // TestTheDungeonHoldsItsMobAndSnapshotBudget pins it.
-const dungeonMobCeiling = 2 + 16 + 8 + spiderWaveCap
+const dungeonMobCeiling = 2 + 5*dungeonPackMax + spiderWaveCap
 
 // dungeonGroupSpecies is which species stands in each placed group's slots.
 var dungeonGroupSpecies = map[int]struct {
@@ -180,10 +183,22 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 			max: [3]float64{float64(max(c[0].X, c[1].X) + 1), float64(max(c[0].Y, c[1].Y) + 1), float64(max(c[0].Z, c[1].Z) + 1)},
 		}})
 	}
+	// Every placed group the run has not cleared holds exactly one pack of the largest size.
+	// The balance sizes a boss for up to [dungeonPackMax] members and a pack to match, so a
+	// layout that declared fewer slots would under-spawn a full party's halls in silence;
+	// it refuses the instance instead, as a slot that cannot be filled does.
+	for group := range dungeonGroupSpecies {
+		if d.progress.route.cleared(group) {
+			continue
+		}
+		if n := len(desc.groups[group]); n != dungeonPackMax {
+			return fmt.Errorf("game: dungeon minor group %d holds %d slots, want a pack of %d", group, n, dungeonPackMax)
+		}
+	}
 	// A restored run whose cave was cleared has had every wave: the schedule is spent
 	// and the cavern's trigger has nothing left to start.
 	if d.progress.route.cleared(world.CaveBurrowGroup) {
-		desc.waves.started, desc.waves.next = true, len(spiderWaveSizes)
+		desc.waves.started, desc.waves.next = true, spiderWaveCount
 		for i := range desc.triggers {
 			if desc.triggers[i].index == world.CaveTrigger {
 				desc.triggers[i].fired = true
@@ -243,7 +258,7 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 			}
 		}
 	}
-	if !w.started || w.next >= len(spiderWaveSizes) {
+	if !w.started || w.next >= spiderWaveCount {
 		return changed
 	}
 	rate := uint8(math.Round(1 / s.dt))
@@ -255,7 +270,7 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 		return changed
 	}
 	// Overdue but held: the next wave waits for enough of the spiders out to die.
-	if s.spidersOutLocked()+minorShare(spiderWaveSizes[w.next], len(players)) > spiderWaveCap {
+	if s.spidersOutLocked()+dungeonPackSize(len(players)) > spiderWaveCap {
 		return changed
 	}
 	w.current = s.releaseSpiderWaveLocked(w.next, len(players))
@@ -268,19 +283,18 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 // releaseSpiderWaveLocked brings wave n out of the burrows for a party of members, each
 // spider from the next burrow in turn after where the previous wave left off, so the
 // waves come from every wall rather than always the same holes. The wave is the party's
-// share of its full size (dungeon_balance.go), decided as it comes out.
+// pack (dungeon_balance.go), decided as it comes out.
 func (s *Sim) releaseSpiderWaveLocked(n, members int) []uint64 {
 	desc := &s.dungeon.descent
 	w := &desc.waves
 	if len(w.burrows) == 0 {
 		return nil
 	}
-	first := 0
-	for _, size := range spiderWaveSizes[:n] {
-		first += size
-	}
+	// Each wave starts a full pack's burrows on from the previous one, whatever size the
+	// packs were, so the rotation does not depend on who was inside.
+	first := n * dungeonPackMax
 	zone := desc.zones[world.CaveBurrowGroup]
-	size := minorShare(spiderWaveSizes[n], members)
+	size := dungeonPackSize(members)
 	wave := make([]uint64, 0, size)
 	for i := range size {
 		burrow := w.burrows[(first+i)%len(w.burrows)]
@@ -326,7 +340,7 @@ func (s *Sim) dungeonGroupClearedLocked(group int) bool {
 		return false
 	}
 	desc := &s.dungeon.descent
-	if group == world.CaveBurrowGroup && desc.waves.next < len(spiderWaveSizes) {
+	if group == world.CaveBurrowGroup && desc.waves.next < spiderWaveCount {
 		return false
 	}
 	return s.allDeadLocked(desc.groups[group])

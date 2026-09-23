@@ -80,7 +80,11 @@ func TestVargrFrenzyThresholdIsAnnouncedOnceAndSurvivesHealing(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	p, out := h.join(1, [3]float32{.5, 64, .5})
 	id := pullGuardian(t, h, [3]float64{.5, 64, -40.5}, p)
-	full := mobRegistry[vnet.MobKindVargrGuardian].maxHealth
+	// The pull's ceiling, not the row's: a solo pull meets the guardian sized for three
+	// (#1332), and the stage threshold is a share of that.
+	h.sim.mu.Lock()
+	full := h.sim.mobs[id].maxHealth()
+	h.sim.mu.Unlock()
 	threshold := uint16(uint32(full) * 55 / 100)
 	for _, tc := range []struct {
 		health uint16
@@ -206,7 +210,7 @@ func TestDiscardedFrenzyCannotLeakIntoTheNextPull(t *testing.T) {
 	}
 	fresh := pullGuardian(t, h, [3]float64{.5, 64, -2.5}, p)
 	m := h.sim.mobs[fresh]
-	if m.encounter.id <= encounterID || m.encounter.phase != 1 || m.health != m.species().maxHealth || len(m.encounter.cooldowns) != 0 || len(m.encounter.lastUsed) != 0 || len(m.encounter.moves) != 0 {
+	if m.encounter.id <= encounterID || m.encounter.phase != 1 || m.health != m.maxHealth() || len(m.encounter.cooldowns) != 0 || len(m.encounter.lastUsed) != 0 || len(m.encounter.moves) != 0 {
 		t.Fatal("new pull inherited the prior encounter's progression or selection state")
 	}
 	preferMove(h, fresh, vnet.EncounterMoveKindPrisonerClaws)
