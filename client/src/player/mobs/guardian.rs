@@ -178,6 +178,7 @@ pub(super) fn visuals(
         king_parts: None,
         guardian_parts: Some(parts),
         spider_parts: None,
+        scorpion_parts: None,
     }
 }
 
