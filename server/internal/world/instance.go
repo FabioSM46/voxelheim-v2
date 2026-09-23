@@ -191,6 +191,15 @@ func (l instanceLayout) editable(seed, x, y, z int64) bool {
 	if !ok {
 		return false
 	}
+	// The seed's overlay is part of the generated dungeon, so its cells are judged by
+	// what the overlay wrote there rather than by the drawing underneath.
+	if l.overlay != nil {
+		for _, cell := range l.overlay(seed) {
+			if cell.x == lx && cell.y == ly && cell.z == lz {
+				return instanceEditableCell(cell.block)
+			}
+		}
+	}
 	if l.interior != nil {
 		return l.interior(lx, ly, lz)
 	}

@@ -40,7 +40,7 @@ func tallLayout(t *testing.T) instanceLayout {
 // — its drawing sits 35 courses below that — a five-by-five shaft from its floor down
 // into a lower room, and a trapdoor gate over the shaft that straddles the x = 0 chunk
 // boundary. Its overlay writes one lit rune into the upper room's wall at a column the
-// seed chooses.
+// seed chooses, and a worn block into the air in front of it.
 func descentLayout(t *testing.T) instanceLayout {
 	t.Helper()
 	s := NewSection(21, 44, 21).
@@ -55,7 +55,10 @@ func descentLayout(t *testing.T) instanceLayout {
 		originY:   -35,
 		floorGate: true,
 		overlay: func(seed int64) []drawnCell {
-			return []drawnCell{{3 + int(uint64(seed)%13), 37, 19, RuneStoneLit}}
+			// A rune over the wall, and a worn block standing in the room's air. The
+			// second is not a rune, so the cache's rune protection does not cover it.
+			k := 3 + int(uint64(seed)%13)
+			return []drawnCell{{k, 37, 19, RuneStoneLit}, {k, 36, 16, BlackBrickWorn}}
 		},
 	}
 }
@@ -396,6 +399,32 @@ func TestInstanceDungeonAnchorsIsACopyOfThePlacement(t *testing.T) {
 		got[0].X += 1000
 		if reflect.DeepEqual(got, InstanceDungeonAnchors(seed)) {
 			t.Fatalf("seed %d: a caller's edit reached the layout", seed)
+		}
+	}
+}
+
+// An overlay block is scenery like the drawing's own: one written into a cell the
+// drawing left as air refuses edits, while the air beside it still takes them. Runes
+// are refused by the cache whatever the rule says, so the fixture's block here is not
+// one: this asserts the layout's own edit rule.
+func TestAnOverlayBlockOverAirIsNotEditable(t *testing.T) {
+	l := descentLayout(t)
+	ctx := context.Background()
+	for seed := int64(0); seed < 4; seed++ {
+		cache := l.cache(seed, 1, 256)
+		b := l.placement(seed)
+		cell := l.overlay(seed)[1]
+		if l.drawing.At(cell.x, cell.y, cell.z) != Air {
+			t.Fatalf("seed %d: the fixture's second overlay block is not over air", seed)
+		}
+		rx, rz := rotateCell(cell.x, cell.z, l.drawing.W, l.drawing.D, b.Facing)
+		x, y, z := b.OriginX+int64(rx), b.OriginY+int64(cell.y), b.OriginZ+int64(rz)
+		if err := cache.Apply(ctx, x, y, z, Air, nil); !errors.Is(err, ErrImmutableShell) {
+			t.Fatalf("seed %d: the overlay block over air was edited: %v", seed, err)
+		}
+		rx, rz = rotateCell(cell.x, cell.z-1, l.drawing.W, l.drawing.D, b.Facing)
+		if err := cache.Apply(ctx, b.OriginX+int64(rx), y, b.OriginZ+int64(rz), Planks, nil); err != nil {
+			t.Fatalf("seed %d: the air beside the overlay block refused a placement: %v", seed, err)
 		}
 	}
 }
