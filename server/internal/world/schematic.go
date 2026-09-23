@@ -67,6 +67,22 @@ const (
 	AnchorInstanceGuardian
 	AnchorInstanceKing
 	AnchorInstanceGate
+
+	// The first dungeon's slots, appended after the two-arena set. Each carries an
+	// [Anchor.Index] saying which group it belongs to, because a dungeon has many of
+	// each and the packages that read them must tell the groups apart:
+	//
+	//   - Checkpoint: a respawn slot standing in air; Index orders them.
+	//   - MinorSpawn: one placed minor mob standing in air; Index is its group.
+	//   - Trigger: one corner of a trigger volume, in air. Exactly two share an
+	//     Index — the zone — and the volume is the box they span, inclusive.
+	//   - Mechanism: a lever or rune cell; Index is its puzzle.
+	//   - Door: one cell of a door a puzzle opens; Index is that puzzle.
+	AnchorInstanceCheckpoint
+	AnchorInstanceMinorSpawn
+	AnchorInstanceTrigger
+	AnchorInstanceMechanism
+	AnchorInstanceDoor
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -106,16 +122,28 @@ func (a AnchorKind) String() string {
 		return "instance king"
 	case AnchorInstanceGate:
 		return "instance gate"
+	case AnchorInstanceCheckpoint:
+		return "instance checkpoint"
+	case AnchorInstanceMinorSpawn:
+		return "instance minor spawn"
+	case AnchorInstanceTrigger:
+		return "instance trigger"
+	case AnchorInstanceMechanism:
+		return "instance mechanism"
+	case AnchorInstanceDoor:
+		return "instance door"
 	default:
 		return "no anchor"
 	}
 }
 
 // Anchor is one slot in a schematic's own frame: a coordinate inside the drawing,
-// before any rotation or placement.
+// before any rotation or placement. Index groups the dungeon anchors that come in
+// sets (see [AnchorInstanceCheckpoint] and after); every other kind leaves it zero.
 type Anchor struct {
 	X, Y, Z int
 	Kind    AnchorKind
+	Index   int
 }
 
 // Schematic is one building, as voxels.
@@ -306,22 +334,51 @@ func mustSchematic(anchors []Anchor, layers ...[]string) *Schematic {
 	}
 
 	s := &Schematic{W: w, H: h, D: d, Voxels: voxels, Anchors: anchors}
-	for _, a := range anchors {
-		if a.X < 0 || a.X >= w || a.Y < 0 || a.Y >= h || a.Z < 0 || a.Z >= d {
-			panic("schematic anchor outside the drawing")
-		}
-		if a.Kind == AnchorRuinArch || a.Kind == AnchorInstanceExit {
-			// A unique, non-solid heart carries the crossing coordinate.
-			if s.At(a.X, a.Y, a.Z) != PortalHeart {
-				panic("portal anchor is not a portal heart")
-			}
-			continue
-		}
-		if s.At(a.X, a.Y, a.Z) != Air {
-			panic("schematic anchor in a cell that is not air")
-		}
+	if msg := anchorProblem(s); msg != "" {
+		panic(msg)
 	}
 	return s
+}
+
+// anchorProblem names the first anchor that stands somewhere its kind may not, or
+// returns "". Literal drawings and code-built sections share this one rule.
+func anchorProblem(s *Schematic) string {
+	corners := make(map[int]int)
+	for _, a := range s.Anchors {
+		if a.X < 0 || a.X >= s.W || a.Y < 0 || a.Y >= s.H || a.Z < 0 || a.Z >= s.D {
+			return "schematic anchor outside the drawing"
+		}
+		cell := s.At(a.X, a.Y, a.Z)
+		switch a.Kind {
+		case AnchorRuinArch, AnchorInstanceExit:
+			// A unique, non-solid heart carries the crossing coordinate.
+			if cell != PortalHeart {
+				return "portal anchor is not a portal heart"
+			}
+		case AnchorInstanceMechanism:
+			if !Mechanism(cell) {
+				return "mechanism anchor is not a lever or a rune"
+			}
+		case AnchorInstanceDoor:
+			// A door cell is whatever the closed door is drawn as; only void is wrong.
+			if cell == keepTerrain {
+				return "door anchor outside the drawn mass"
+			}
+		default:
+			if a.Kind == AnchorInstanceTrigger {
+				corners[a.Index]++
+			}
+			if cell != Air {
+				return "schematic anchor in a cell that is not air"
+			}
+		}
+	}
+	for _, n := range corners {
+		if n != 2 {
+			return "trigger volume without exactly two corners"
+		}
+	}
+	return ""
 }
 
 // rotatedFootprint is a schematic's extent after a quarter turn: the two horizontal
@@ -382,6 +439,7 @@ func rotateSchematicBlock(block Block, facing Facing) Block {
 type PlacedAnchor struct {
 	X, Y, Z int64
 	Kind    AnchorKind
+	Index   int
 }
 
 // Building is one placed schematic.
@@ -422,10 +480,11 @@ func centreSchematic(kind BuildingKind, variant uint8, schematic *Schematic, plo
 	for _, a := range schematic.Anchors {
 		rx, rz := rotateCell(a.X, a.Z, schematic.W, schematic.D, facing)
 		b.Anchors = append(b.Anchors, PlacedAnchor{
-			X:    b.OriginX + int64(rx),
-			Y:    b.OriginY + int64(a.Y),
-			Z:    b.OriginZ + int64(rz),
-			Kind: a.Kind,
+			X:     b.OriginX + int64(rx),
+			Y:     b.OriginY + int64(a.Y),
+			Z:     b.OriginZ + int64(rz),
+			Kind:  a.Kind,
+			Index: a.Index,
 		})
 	}
 	return b

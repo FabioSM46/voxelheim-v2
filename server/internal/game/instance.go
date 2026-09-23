@@ -230,7 +230,9 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 // persisted".
 func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin, defeated []vnet.MobKind) (*instanceSession, error) {
 	progress := dungeonProgressFrom(defeated)
-	chunks, gate := world.NewGatedInstanceCache(seed, world.DefaultWorkers, 72, progress.guardian)
+	// Sized to the layout's whole envelope, so a taller or wider dungeon grows the
+	// cache with it rather than evicting chunks a party is standing in.
+	chunks, gate := world.NewGatedInstanceCache(seed, world.DefaultWorkers, world.InstanceChunkEnvelope(seed), progress.guardian)
 	sim, err := NewSim(m.tickRate, m.viewDistance, seed, NewCacheTerrain(chunks), chunks, m.mintEntityID, m.log, m.options...)
 	if err != nil {
 		return nil, err
