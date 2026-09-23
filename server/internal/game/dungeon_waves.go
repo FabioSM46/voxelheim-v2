@@ -35,10 +35,11 @@ import (
 //
 // # Spider waves
 //
-// Three waves, each from the burrows in turn, [spiderWaveInterval] apart — or
+// Twelve waves, each from the burrows in turn, [spiderWaveInterval] apart — or
 // [spiderWaveBreather] after the previous wave's last spider dies, when that is
-// sooner, so a party that clears a wave quickly is not left waiting but always gets a
-// breath. A wipe — somebody inside and every one of them dead — puts the waves back to
+// sooner — and never while the wave would put more than [spiderWaveCap] spiders out at
+// once. The cave is a siege the party holds rather than a room it crosses: the numbers
+// and why they are these are in dungeon_balance.go. A wipe — somebody inside and every one of them dead — puts the waves back to
 // before the first, with the cavern's trigger armed again (dungeon_wipe.go). An
 // instance with nobody in it is not a wipe: a party that has disconnected has not lost,
 // so the schedule only pauses, and an overdue wave comes out on the first tick somebody
@@ -49,22 +50,28 @@ import (
 // web curtain across the neck beyond it, so the trigger is the one start the waves
 // need (world.TestTheCaveTriggerComesBeforeTheWebCurtain pins the order).
 
-// spiderWaveSizes is how many spiders each wave brings, in order.
-var spiderWaveSizes = [...]int{4, 5, 6}
+// spiderWaveSizes is how many spiders each wave brings for a full party, in order: the
+// original three waves' rising four, five and six, four times over (dungeon_balance.go).
+var spiderWaveSizes = [...]int{4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6}
 
 const (
 	// spiderWaveInterval is the longest a wave waits after the previous one began.
-	spiderWaveInterval = 25 * time.Second
+	spiderWaveInterval = 45 * time.Second
 	// spiderWaveBreather is how long after a wave's last spider dies the next begins,
 	// when that is sooner than the interval.
-	spiderWaveBreather = 5 * time.Second
+	spiderWaveBreather = 40 * time.Second
+	// spiderWaveCap is the most spiders out at once: a wave that would put more out waits
+	// until enough have died. It is the original three waves together, which is the
+	// population the snapshot budget was measured with.
+	spiderWaveCap = 4 + 5 + 6
 )
 
 // dungeonMobCeiling is the most creatures one dungeon instance can ever hold at once:
-// the two bosses, every placed slot and every spider of every wave alive together. The
-// bound is structural rather than a cap applied at run time — nothing else ever
-// creates a creature here — and TestTheDungeonHoldsItsMobAndSnapshotBudget pins it.
-const dungeonMobCeiling = 2 + 16 + 8 + 4 + 5 + 6
+// the two bosses, every placed slot and the most spiders ever out together. The bound is
+// structural rather than a cap applied at run time — nothing else ever creates a creature
+// here, and the waves hold at [spiderWaveCap] — and
+// TestTheDungeonHoldsItsMobAndSnapshotBudget pins it.
+const dungeonMobCeiling = 2 + 16 + 8 + spiderWaveCap
 
 // dungeonGroupSpecies is which species stands in each placed group's slots.
 var dungeonGroupSpecies = map[int]struct {
@@ -150,7 +157,7 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 			if !known || a.Index >= len(desc.zones) {
 				return fmt.Errorf("game: dungeon minor group %d has no species or zone", a.Index)
 			}
-			id, made := s.placeMinorMobLocked(species.kind, anchorStanding(a), desc.zones[a.Index], species.buried)
+			id, made := s.placeTieredMinorLocked(species.kind, anchorStanding(a), desc.zones[a.Index], species.buried)
 			if !made {
 				return fmt.Errorf("game: could not place dungeon minor %s in group %d", species.kind, a.Index)
 			}
@@ -247,6 +254,10 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 	if tick < w.due {
 		return changed
 	}
+	// Overdue but held: the next wave waits for enough of the spiders out to die.
+	if s.spidersOutLocked()+minorShare(spiderWaveSizes[w.next], len(players)) > spiderWaveCap {
+		return changed
+	}
 	w.current = s.releaseSpiderWaveLocked(w.next, len(players))
 	w.cleared = false
 	w.next++
@@ -273,7 +284,7 @@ func (s *Sim) releaseSpiderWaveLocked(n, members int) []uint64 {
 	wave := make([]uint64, 0, size)
 	for i := range size {
 		burrow := w.burrows[(first+i)%len(w.burrows)]
-		id, made := s.placeMinorMobLocked(vnet.MobKindCaveSpider, anchorStanding(burrow), zone, false)
+		id, made := s.placeTieredMinorLocked(vnet.MobKindCaveSpider, anchorStanding(burrow), zone, false)
 		if !made {
 			s.log.Error("could not release a cave spider", "wave", n)
 			continue
@@ -282,6 +293,17 @@ func (s *Sim) releaseSpiderWaveLocked(n, members int) []uint64 {
 	}
 	desc.groups[world.CaveBurrowGroup] = append(desc.groups[world.CaveBurrowGroup], wave...)
 	return wave
+}
+
+// spidersOutLocked is how many of the waves' spiders are alive.
+func (s *Sim) spidersOutLocked() int {
+	n := 0
+	for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup] {
+		if s.mobs[id] != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // allDeadLocked reports whether none of ids is alive any more. A killed creature
@@ -297,7 +319,7 @@ func (s *Sim) allDeadLocked(ids []uint64) bool {
 }
 
 // dungeonGroupClearedLocked reports whether every creature of a minor-spawn group is
-// dead — for the cave's burrows, only once all three waves have come out. The seam the
+// dead — for the cave's burrows, only once every wave has come out. The seam the
 // persistence issue records cleared groups from.
 func (s *Sim) dungeonGroupClearedLocked(group int) bool {
 	if s.dungeon == nil {

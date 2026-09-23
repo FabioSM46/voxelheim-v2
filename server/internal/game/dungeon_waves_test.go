@@ -160,7 +160,9 @@ func spidersOf(t *testing.T, s *Sim, ids []uint64) [][3]float64 {
 	return out
 }
 
-func TestThreeSpiderWavesComeInOrderFromTheBurrows(t *testing.T) {
+// The first three waves come on the interval with nobody killing anything, and the fourth
+// is held: fifteen spiders are out, the cap.
+func TestTheFirstSpiderWavesComeInOrderFromTheBurrowsUpToTheCap(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		s := newWavesSim(t, seed)
 		// A full party, which meets every wave at its full size (dungeon_balance.go).
@@ -332,8 +334,8 @@ func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 		}
 	}
 
-	// Every wave out before the first spider can reach anybody: the schedule is pulled
-	// forward so the largest population is the one measured.
+	// Every wave the cap lets out before the first spider can reach anybody: the schedule
+	// is pulled forward so the largest population is the one measured.
 	peak := 0
 	for tick := uint64(1); tick <= 20; tick++ {
 		s.mu.Lock()
@@ -373,4 +375,71 @@ func TestTheDungeonHoldsItsMobAndSnapshotBudget(t *testing.T) {
 		}
 	}
 	t.Logf("largest snapshots: %v", sizes)
+}
+
+// Past the cap a wave waits, overdue, until enough of the spiders out have died; then it
+// comes on the next tick.
+func TestAWaveWaitsWhileTheCapIsFull(t *testing.T) {
+	s := newWavesSim(t, 0)
+	party := partyAt(4, triggerCentre(t, s, world.CaveTrigger))
+	interval := uint64(ticksFor(spiderWaveInterval, 20))
+	tick := uint64(1)
+	for ; tick < 1+3*interval; tick++ {
+		s.advanceDungeonDescentLocked(tick, party)
+	}
+	w := &s.dungeon.descent.waves
+	if w.next != 3 || s.spidersOutLocked() != spiderWaveCap {
+		t.Fatalf("%d waves and %d spiders out, want 3 and the cap", w.next, s.spidersOutLocked())
+	}
+	for ; tick < 1+10*interval; tick++ {
+		if s.advanceDungeonDescentLocked(tick, party) {
+			t.Fatalf("a wave came at tick %d past the cap", tick)
+		}
+	}
+	// Four die, which is room for the fourth wave of four.
+	for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup][:4] {
+		m := s.mobs[id]
+		s.damageMobLocked(m, m.health)
+	}
+	if !s.advanceDungeonDescentLocked(tick, party) || w.next != 4 || s.spidersOutLocked() != spiderWaveCap {
+		t.Fatalf("the held wave did not come when there was room: %d waves, %d out", w.next, s.spidersOutLocked())
+	}
+}
+
+// Every placed creature and every wave spider carries the dungeon's tier; the rows, and a
+// creature the open world spawns, do not.
+func TestTheDungeonsCreaturesCarryItsTier(t *testing.T) {
+	s := newWavesSim(t, 1)
+	s.advanceDungeonDescentLocked(1, partyAt(4, triggerCentre(t, s, world.CaveTrigger)))
+	checked := 0
+	for _, m := range s.mobs {
+		if m.species().isBoss() {
+			continue
+		}
+		def := m.species()
+		// Widened on this side, so a wrap in the production multiply would show here.
+		if !m.tiered || uint32(m.health) != uint32(def.maxHealth)*uint32(dungeonHealthTier) || m.maxHealth() != m.health ||
+			uint32(m.attack().damage) != uint32(def.damage)*uint32(dungeonDamageTier) {
+			t.Fatalf("a dungeon %s is not at the tier: %+v", m.kind, m)
+		}
+		checked++
+	}
+	if checked != dungeonPlacedMinors+spiderWaveSizes[0] {
+		t.Fatalf("checked %d creatures", checked)
+	}
+	wild := &mob{kind: vnet.MobKindDraugr}
+	if row, _ := mobByKind(vnet.MobKindDraugr); wild.maxHealth() != row.maxHealth || wild.attack().damage != row.damage {
+		t.Fatal("an open-world draugr carries the dungeon's tier")
+	}
+}
+
+// A tier over a row that would pass the uint16 ceiling clamps to it rather than wrapping.
+func TestATierNeverWrapsItsRow(t *testing.T) {
+	for _, tc := range []struct{ value, tier, want uint16 }{
+		{72, 4, 288}, {16383, 4, 65532}, {16384, 4, 65535}, {60000, 2, 65535}, {0, 4, 0},
+	} {
+		if got := tierScaled(tc.value, tc.tier); got != tc.want {
+			t.Fatalf("tierScaled(%d, %d) = %d, want %d", tc.value, tc.tier, got, tc.want)
+		}
+	}
 }
