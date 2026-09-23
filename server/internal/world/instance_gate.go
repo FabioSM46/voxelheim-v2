@@ -13,13 +13,14 @@ type InstanceGate struct {
 }
 
 func NewGatedInstanceCache(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
-	return chamberLayout.gated(seed, workers, capacity, open)
+	return dungeonLayout.gated(seed, workers, capacity, open)
 }
 
-// gated places a five-wide, five-tall door centred on the layout's gate anchor, its
-// bottom course on the anchor's level. The cells are world coordinates, so a door
-// that straddles a chunk boundary in any direction — vertical included — is patched
-// into every chunk it touches.
+// gated places a five-by-five door centred on the layout's gate anchor: upright, its
+// bottom course on the anchor's level, or — for a floorGate layout — flat, a trapdoor
+// filling the anchor's own course. The cells are world coordinates, so a door that
+// straddles a chunk boundary in any direction — vertical included — is patched into
+// every chunk it touches.
 func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
 	c := l.cache(seed, workers, capacity)
 	// Exactly one gate anchor, or the layout is a programming error: a missing one
@@ -41,8 +42,12 @@ func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Ca
 		dx, dz = 0, 1
 	}
 	for offset := int64(-2); offset <= 2; offset++ {
-		for y := centre.Y; y <= centre.Y+4; y++ {
-			g.cells = append(g.cells, PlacedAnchor{X: centre.X + dx*offset, Y: y, Z: centre.Z + dz*offset, Kind: AnchorInstanceGate})
+		for across := int64(-2); across <= 2; across++ {
+			cell := PlacedAnchor{X: centre.X + dx*offset, Y: centre.Y + across + 2, Z: centre.Z + dz*offset, Kind: AnchorInstanceGate}
+			if l.floorGate {
+				cell = PlacedAnchor{X: centre.X + offset, Y: centre.Y, Z: centre.Z + across, Kind: AnchorInstanceGate}
+			}
+			g.cells = append(g.cells, cell)
 		}
 	}
 	c.instanceGate = g

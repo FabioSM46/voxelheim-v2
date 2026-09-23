@@ -36,11 +36,44 @@ func tallLayout(t *testing.T) instanceLayout {
 	return instanceLayout{drawing: drawing}
 }
 
+// descentLayout is a synthetic drop: an upper room whose floor course is world y = 0
+// — its drawing sits 35 courses below that — a five-by-five shaft from its floor down
+// into a lower room, and a trapdoor gate over the shaft that straddles the x = 0 chunk
+// boundary. Its overlay writes one lit rune into the upper room's wall at a column the
+// seed chooses, and a worn block into the air in front of it.
+func descentLayout(t *testing.T) instanceLayout {
+	t.Helper()
+	s := NewSection(21, 44, 21).
+		CarveRoom(Box{2, 1, 2, 18, 5, 18}, Basalt).
+		CarveRoom(Box{2, 36, 2, 18, 40, 18}, BlackBrick).
+		FillFloor(2, 2, 18, 18, 35, Basalt).
+		CarveShaft(8, 8, 12, 12, 6, 35, BlackBrick).
+		Anchor(AnchorInstanceArrival, 4, 36, 4, 0).
+		Anchor(AnchorInstanceGate, 10, 35, 10, 0)
+	return instanceLayout{
+		drawing:   mustBuildSection(t, s),
+		originY:   -35,
+		floorGate: true,
+		overlay: func(seed int64) []drawnCell {
+			// A rune over the wall, and a worn block standing in the room's air. The
+			// second is not a rune, so the cache's rune protection does not cover it.
+			k := 3 + int(uint64(seed)%13)
+			return []drawnCell{{k, 37, 19, RuneStoneLit}, {k, 36, 16, BlackBrickWorn}}
+		},
+	}
+}
+
 // Every chunk of the envelope, generated independently, agrees with a direct
 // placement of the drawing voxel for voxel — across X, Y and Z chunk boundaries and
-// at all four rotations. Nothing outside the drawing is anything but void.
+// at all four rotations, raised or lowered by the layout's origin and with its
+// seed's overlay laid over it. Nothing outside the drawing is anything but void.
 func TestATallLayoutGeneratesIdenticallyAcrossChunkBoundaries(t *testing.T) {
-	l := tallLayout(t)
+	for name, l := range map[string]instanceLayout{"tall": tallLayout(t), "descent": descentLayout(t)} {
+		t.Run(name, func(t *testing.T) { checkLayoutGeneration(t, l) })
+	}
+}
+
+func checkLayoutGeneration(t *testing.T, l instanceLayout) {
 	for seed := int64(0); seed < 4; seed++ {
 		b := l.placement(seed)
 		lo, hi := l.chunkBounds(seed)
@@ -60,6 +93,15 @@ func TestATallLayoutGeneratesIdenticallyAcrossChunkBoundaries(t *testing.T) {
 					want[[3]int64{b.OriginX + int64(rx), b.OriginY + int64(y), b.OriginZ + int64(rz)}] = rotateSchematicBlock(block, b.Facing)
 				}
 			}
+		}
+		if l.overlay != nil {
+			for _, cell := range l.overlay(seed) {
+				rx, rz := rotateCell(cell.x, cell.z, l.drawing.W, l.drawing.D, b.Facing)
+				want[[3]int64{b.OriginX + int64(rx), b.OriginY + int64(cell.y), b.OriginZ + int64(rz)}] = cell.block
+			}
+		}
+		if b.OriginY != l.originY {
+			t.Fatalf("seed %d: the drawing's bottom is at y %d, want %d", seed, b.OriginY, l.originY)
 		}
 
 		seen := 0
@@ -261,23 +303,24 @@ func firstAnchor(l instanceLayout, seed int64, kind AnchorKind) PlacedAnchor {
 	return PlacedAnchor{}
 }
 
-// The envelope a game sizes its cache from is the chamber's 72 chunks today, and it
-// counts every chunk the layout's Contains accepts.
+// The envelope a game sizes its cache from is the dungeon's 120 chunks today — two by
+// four by three chunks of drawing and a halo of one — and it counts every chunk the
+// layout's Contains accepts.
 func TestTheInstanceEnvelopeCountsEveryContainedChunk(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
-		lo, hi := chamberLayout.chunkBounds(seed)
+		lo, hi := dungeonLayout.chunkBounds(seed)
 		n := 0
 		for x := lo.X - 3; x <= hi.X+3; x++ {
 			for y := lo.Y - 3; y <= hi.Y+3; y++ {
 				for z := lo.Z - 3; z <= hi.Z+3; z++ {
-					if chamberLayout.containsChunk(seed, Coord{X: x, Y: y, Z: z}) {
+					if dungeonLayout.containsChunk(seed, Coord{X: x, Y: y, Z: z}) {
 						n++
 					}
 				}
 			}
 		}
-		if got := InstanceChunkEnvelope(seed); got != n || got != 72 {
-			t.Errorf("seed %d: envelope %d, contained %d, want 72", seed, got, n)
+		if got := InstanceChunkEnvelope(seed); got != n || got != 120 {
+			t.Errorf("seed %d: envelope %d, contained %d, want 120", seed, got, n)
 		}
 	}
 }
@@ -299,5 +342,111 @@ func TestAGatedLayoutWithoutExactlyOneGateAnchorPanics(t *testing.T) {
 			}()
 			l.gated(0, 1, 8, false)
 		}()
+	}
+}
+
+// A floor gate is a flat five-by-five in the gate anchor's own course: shut, it is
+// floor a body stands on and no edit removes, straddling a chunk boundary into both
+// chunks; open, it is the shaft's mouth.
+func TestAFloorGateIsATrapdoorInTheAnchorsCourse(t *testing.T) {
+	l := descentLayout(t)
+	ctx := context.Background()
+	for seed := int64(0); seed < 4; seed++ {
+		cache, gate := l.gated(seed, 1, 256, false)
+		centre := firstAnchor(l, seed, AnchorInstanceGate)
+		if centre.Y != 0 || len(gate.cells) != 25 {
+			t.Fatalf("seed %d: gate at %+v with %d cells", seed, centre, len(gate.cells))
+		}
+		read := func(p PlacedAnchor) Block {
+			chunk, _, err := cache.Get(ctx, ChunkOf(p.X, p.Y, p.Z))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return chunk.At(Local(p.X), Local(p.Y), Local(p.Z))
+		}
+		columns := make(map[int32]bool)
+		for _, p := range gate.cells {
+			columns[ChunkOf(p.X, p.Y, p.Z).X] = true
+			if p.Y != centre.Y || max(p.X-centre.X, centre.X-p.X) > 2 || max(p.Z-centre.Z, centre.Z-p.Z) > 2 {
+				t.Fatalf("seed %d: trapdoor cell %+v is not in the anchor's five by five", seed, p)
+			}
+			if read(p) != BlackBrick {
+				t.Fatalf("seed %d: shut trapdoor cell %+v holds %d", seed, p, read(p))
+			}
+			if err := cache.Apply(ctx, p.X, p.Y, p.Z, Air, nil); !errors.Is(err, ErrImmutableShell) {
+				t.Fatalf("seed %d: a trapdoor cell was edited: %v", seed, err)
+			}
+		}
+		if len(columns) != 2 {
+			t.Fatalf("seed %d: the trapdoor spans chunk columns %v, want two", seed, columns)
+		}
+		gate.Open()
+		for _, p := range gate.cells {
+			if read(p) != Air || read(PlacedAnchor{X: p.X, Y: p.Y - 10, Z: p.Z}) != Air {
+				t.Fatalf("seed %d: the open trapdoor at %+v is not the shaft's mouth", seed, p)
+			}
+		}
+	}
+}
+
+// The public anchor list is the placement's, in declaration order, and a copy.
+func TestInstanceDungeonAnchorsIsACopyOfThePlacement(t *testing.T) {
+	for seed := int64(0); seed < 4; seed++ {
+		got := InstanceDungeonAnchors(seed)
+		if !reflect.DeepEqual(got, instancePlacement(seed).Anchors) {
+			t.Fatalf("seed %d: anchors differ from the placement", seed)
+		}
+		got[0].X += 1000
+		if reflect.DeepEqual(got, InstanceDungeonAnchors(seed)) {
+			t.Fatalf("seed %d: a caller's edit reached the layout", seed)
+		}
+	}
+}
+
+// An overlay block is scenery like the drawing's own: one written into a cell the
+// drawing left as air refuses edits, while the air beside it still takes them. Runes
+// are refused by the cache whatever the rule says, so the fixture's block here is not
+// one: this asserts the layout's own edit rule.
+func TestAnOverlayBlockOverAirIsNotEditable(t *testing.T) {
+	l := descentLayout(t)
+	ctx := context.Background()
+	for seed := int64(0); seed < 4; seed++ {
+		cache := l.cache(seed, 1, 256)
+		b := l.placement(seed)
+		cell := l.overlay(seed)[1]
+		if l.drawing.At(cell.x, cell.y, cell.z) != Air {
+			t.Fatalf("seed %d: the fixture's second overlay block is not over air", seed)
+		}
+		rx, rz := rotateCell(cell.x, cell.z, l.drawing.W, l.drawing.D, b.Facing)
+		x, y, z := b.OriginX+int64(rx), b.OriginY+int64(cell.y), b.OriginZ+int64(rz)
+		if err := cache.Apply(ctx, x, y, z, Air, nil); !errors.Is(err, ErrImmutableShell) {
+			t.Fatalf("seed %d: the overlay block over air was edited: %v", seed, err)
+		}
+		rx, rz = rotateCell(cell.x, cell.z-1, l.drawing.W, l.drawing.D, b.Facing)
+		if err := cache.Apply(ctx, b.OriginX+int64(rx), y, b.OriginZ+int64(rz), Planks, nil); err != nil {
+			t.Fatalf("seed %d: the air beside the overlay block refused a placement: %v", seed, err)
+		}
+	}
+}
+
+// When an overlay writes one cell twice, the last write is both what generates and
+// what the edit rule judges.
+func TestTheLastOverlayWriteToACellWinsForGenerationAndEdits(t *testing.T) {
+	l := descentLayout(t)
+	l.overlay = func(int64) []drawnCell {
+		return []drawnCell{{4, 36, 16, BlackBrickWorn}, {4, 36, 16, Air}, {6, 36, 16, Air}, {6, 36, 16, BlackBrickWorn}}
+	}
+	for seed := int64(0); seed < 4; seed++ {
+		b := l.placement(seed)
+		for _, want := range []drawnCell{{4, 36, 16, Air}, {6, 36, 16, BlackBrickWorn}} {
+			rx, rz := rotateCell(want.x, want.z, l.drawing.W, l.drawing.D, b.Facing)
+			x, y, z := b.OriginX+int64(rx), b.OriginY+int64(want.y), b.OriginZ+int64(rz)
+			if got := l.generate(seed, ChunkOf(x, y, z)).At(Local(x), Local(y), Local(z)); got != want.block {
+				t.Fatalf("seed %d: generated %d at %+v, want the last write %d", seed, got, want, want.block)
+			}
+			if l.editable(seed, x, y, z) != instanceEditableCell(want.block) {
+				t.Fatalf("seed %d: the edit rule judged %+v by an earlier write", seed, want)
+			}
+		}
 	}
 }

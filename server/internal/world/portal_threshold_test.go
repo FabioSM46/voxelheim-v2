@@ -92,7 +92,7 @@ func TestInstanceExitThresholdFollowsTheChamberTurn(t *testing.T) {
 			t.Fatalf("seed %d: heart %v, exit anchor %+v", seed, got.Heart, exit)
 		}
 		b := instancePlacement(seed)
-		checkThreshold(t, got, portalVoxels(b, instanceChamber))
+		checkThreshold(t, got, portalVoxels(b, instanceDungeon))
 		for _, cell := range got.Cells {
 			chunk := GenerateInstance(seed, ChunkOf(cell[0], cell[1], cell[2]))
 			if !Portal(chunk.At(Local(cell[0]), Local(cell[1]), Local(cell[2]))) {

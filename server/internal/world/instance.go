@@ -2,7 +2,7 @@ package world
 
 // InstanceAnchors returns independent copies of the two standing slots in world
 // block coordinates. Consumers place feet at Y and centre X/Z in the named cell.
-// The same seed rotation places both the chamber and its anchors.
+// The same seed rotation places both the dungeon and its anchors.
 func InstanceAnchors(seed int64) (arrival, exit PlacedAnchor) {
 	b := instancePlacement(seed)
 	for _, anchor := range b.Anchors {
@@ -30,17 +30,31 @@ type instanceLayout struct {
 	// interior reports whether an unrotated drawing cell may be edited. nil means the
 	// generic rule: air or a cobweb the drawing placed, and nothing else.
 	interior func(lx, ly, lz int) bool
+	// originY is the world level of the drawing's bottom course.
+	originY int64
+	// overlay is what a seed changes in the drawing: cells written over it after it is
+	// placed, in the drawing's own frame and in slice order, so a later cell for the
+	// same coordinate wins. nil changes nothing.
+	overlay func(seed int64) []drawnCell
+	// floorGate lays the progression gate flat — a trapdoor in the floor course the
+	// gate anchor stands in — rather than upright across a passage.
+	floorGate bool
 }
 
-// chamberLayout is the two-arena drawing with its authored headroom rule.
-var chamberLayout = instanceLayout{
-	drawing: instanceChamber,
-	interior: func(lx, ly, lz int) bool {
-		// No shell, ornament, ceiling, or void cell is editable. Air above a real
-		// floor is ephemeral player space, including the connected gallery.
-		return ly > 0 && instanceEditableCell(instanceChamber.At(lx, ly, lz)) && instanceChamber.At(lx, 0, lz) != Air &&
-			((ly < 9 && (lz < 28 || lz > 36)) || ly < 6)
-	},
+// drawnCell is one block at one cell of a drawing's own frame.
+type drawnCell struct {
+	x, y, z int
+	block   Block
+}
+
+// dungeonLayout is the first dungeon: the upper halls, the chasm and the pool, with
+// the seed's rune inscription laid over the drawing and floor 1 on world y = 1.
+var dungeonLayout = instanceLayout{
+	drawing:   instanceDungeon,
+	interior:  dungeonEditable,
+	originY:   1 - dungeonUpperFloor,
+	overlay:   runeInscription,
+	floorGate: true,
 }
 
 // instanceEditableCell is the one drawing content an edit may replace: open air, or
@@ -50,17 +64,17 @@ func instanceEditableCell(b Block) bool { return b == Air || b == Cobweb }
 func (l instanceLayout) placement(seed int64) Building {
 	// A fixed drawing, quarter-turned by the seed. Negative seeds are converted
 	// explicitly so this selection is identical on every integer architecture.
-	return centreSchematic(BuildingRuin, 0, l.drawing, 0, 0, 0, Facing(uint64(seed)&3))
+	return centreSchematic(BuildingRuin, 0, l.drawing, 0, 0, l.originY, Facing(uint64(seed)&3))
 }
 
-func instancePlacement(seed int64) Building { return chamberLayout.placement(seed) }
+func instancePlacement(seed int64) Building { return dungeonLayout.placement(seed) }
 
 // GenerateInstance is a pure generator for the dungeon.
 // Outside its shell every voxel is Air (void), never open-world terrain. The
 // drawing straddles X/Z chunk boundaries so the ordinary chunk compositor and
 // streamer can use it without a special representation.
 func GenerateInstance(seed int64, coord Coord) *Chunk {
-	return chamberLayout.generate(seed, coord)
+	return dungeonLayout.generate(seed, coord)
 }
 
 // generate fills one chunk by mapping each of its voxels back into the unrotated
@@ -90,6 +104,15 @@ func (l instanceLayout) generate(seed int64, coord Coord) *Chunk {
 			}
 		}
 	}
+	if l.overlay != nil {
+		for _, cell := range l.overlay(seed) {
+			rx, rz := rotateCell(cell.x, cell.z, l.drawing.W, l.drawing.D, facing)
+			wx, wy, wz := b.OriginX+int64(rx), b.OriginY+int64(cell.y), b.OriginZ+int64(rz)
+			if ChunkOf(wx, wy, wz) == coord {
+				chunk.Set(Local(wx), Local(wy), Local(wz), rotateSchematicBlock(cell.block, facing))
+			}
+		}
+	}
 	return chunk
 }
 
@@ -99,7 +122,7 @@ func (l instanceLayout) generate(seed int64, coord Coord) *Chunk {
 // halo of void for rendering the outside faces. Streamers should use Contains to
 // skip everything else; Get refuses it even if a body escapes through another bug.
 func NewInstanceCache(seed int64, workers, capacity int) *Cache {
-	return chamberLayout.cache(seed, workers, capacity)
+	return dungeonLayout.cache(seed, workers, capacity)
 }
 
 func (l instanceLayout) cache(seed int64, workers, capacity int) *Cache {
@@ -113,7 +136,7 @@ func (l instanceLayout) cache(seed int64, workers, capacity int) *Cache {
 // resident: its shell's chunks plus the one-chunk halo of void around them. A cache
 // sized to it never evicts a chunk a party can see.
 func InstanceChunkEnvelope(seed int64) int {
-	lo, hi := chamberLayout.chunkBounds(seed)
+	lo, hi := dungeonLayout.chunkBounds(seed)
 	return int(hi.X-lo.X+3) * int(hi.Y-lo.Y+3) * int(hi.Z-lo.Z+3)
 }
 
@@ -142,7 +165,7 @@ func (l instanceLayout) containsChunk(seed int64, coord Coord) bool {
 // finite bounds before converting to int so hostile coordinates cannot overflow
 // on the server's 32-bit builds.
 func instanceLocal(seed, x, y, z int64) (int, int, int, bool) {
-	return chamberLayout.local(seed, x, y, z)
+	return dungeonLayout.local(seed, x, y, z)
 }
 
 func (l instanceLayout) local(seed, x, y, z int64) (int, int, int, bool) {
@@ -161,13 +184,27 @@ func (l instanceLayout) localIn(b Building, x, y, z int64) (int, int, int, bool)
 }
 
 func instanceInterior(seed, x, y, z int64) bool {
-	return chamberLayout.editable(seed, x, y, z)
+	return dungeonLayout.editable(seed, x, y, z)
 }
 
 func (l instanceLayout) editable(seed, x, y, z int64) bool {
 	lx, ly, lz, ok := l.local(seed, x, y, z)
 	if !ok {
 		return false
+	}
+	// The seed's overlay is part of the generated dungeon, so its cells are judged by
+	// what the overlay wrote there rather than by the drawing underneath — the last
+	// write to a cell, as in generate, so the two never judge different blocks.
+	if l.overlay != nil {
+		written, found := Air, false
+		for _, cell := range l.overlay(seed) {
+			if cell.x == lx && cell.y == ly && cell.z == lz {
+				written, found = cell.block, true
+			}
+		}
+		if found {
+			return instanceEditableCell(written)
+		}
 	}
 	if l.interior != nil {
 		return l.interior(lx, ly, lz)
@@ -189,4 +226,12 @@ func InstanceEncounterAnchors(seed int64) (guardian, king, gate PlacedAnchor) {
 		}
 	}
 	return
+}
+
+// InstanceDungeonAnchors is every slot the dungeon generated from seed holds, in world
+// block coordinates and in the drawing's declaration order: checkpoints, minor-spawn
+// slots, mechanisms and door cells as well as the named slots above. The slice is a
+// copy; turning it is the placement's job, never the caller's.
+func InstanceDungeonAnchors(seed int64) []PlacedAnchor {
+	return instancePlacement(seed).Anchors
 }
