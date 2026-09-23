@@ -51,6 +51,10 @@ func TestUnspeakableRefusesWhatCannotBeAHello(t *testing.T) {
 			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(44), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
+		"V45 cannot name the descent's creatures or its mechanisms": {
+			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(45), "Eivor"),
+			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
+		},
 		"immediately previous protocol": {
 			frame:  protocol.EncodeClientHello(vnet.ProtocolVersionCurrent-1, "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,

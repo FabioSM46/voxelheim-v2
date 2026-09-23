@@ -397,15 +397,18 @@ mod tests {
     /// wildcard arm, so a new kind does not compile here until it has been given one.
     const fn expected_tone(kind: MobKind) -> Option<Tone> {
         match kind {
-            MobKind::Draugr | MobKind::Vargr | MobKind::VargrGuardian | MobKind::DraugrKing => {
-                Some(Tone::Hostile)
-            }
+            MobKind::Draugr
+            | MobKind::Vargr
+            | MobKind::VargrGuardian
+            | MobKind::DraugrKing
+            | MobKind::CaveSpider
+            | MobKind::Scorpion => Some(Tone::Hostile),
             MobKind::Deer => Some(Tone::Passive),
             MobKind::Villager | MobKind::Horse => None,
         }
     }
 
-    const KINDS: [MobKind; 7] = [
+    const KINDS: [MobKind; 9] = [
         MobKind::Draugr,
         MobKind::Vargr,
         MobKind::Deer,
@@ -413,6 +416,8 @@ mod tests {
         MobKind::Horse,
         MobKind::VargrGuardian,
         MobKind::DraugrKing,
+        MobKind::CaveSpider,
+        MobKind::Scorpion,
     ];
 
     #[test]

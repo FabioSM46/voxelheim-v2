@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 23;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 24;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 24] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 25] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -42,6 +42,7 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 24] = [
     RefusedAction::CrossPortal,
     RefusedAction::Energy,
     RefusedAction::MoveInventory,
+    RefusedAction::UseMechanism,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -124,9 +125,12 @@ impl RefusedAction {
     /// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
     /// inventory the player already holds is still the complete answer.
     pub const MoveInventory: Self = Self(23);
+    /// A `MechanismUseRequest` that moved nothing. No lever flipped and no rune lit; the
+    /// blocks the player can see are still the complete answer.
+    pub const UseMechanism: Self = Self(24);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 23;
+    pub const ENUM_MAX: u8 = 24;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -152,6 +156,7 @@ impl RefusedAction {
         Self::CrossPortal,
         Self::Energy,
         Self::MoveInventory,
+        Self::UseMechanism,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -180,6 +185,7 @@ impl RefusedAction {
             Self::CrossPortal => Some("CrossPortal"),
             Self::Energy => Some("Energy"),
             Self::MoveInventory => Some("MoveInventory"),
+            Self::UseMechanism => Some("UseMechanism"),
             _ => None,
         }
     }

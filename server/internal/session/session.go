@@ -1728,6 +1728,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadAttackRequest,
 		vnet.PayloadBlockRequest,
 		vnet.PayloadDrawRequest,
+		vnet.PayloadMechanismUseRequest,
 		vnet.PayloadPlaceStructureRequest,
 		vnet.PayloadRemoveStructureRequest,
 		vnet.PayloadCraftRequest,
@@ -2196,6 +2197,24 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 					return fmt.Errorf("session: send draw refusal: %w", sErr)
 				}
 			}
+		}
+		return nil
+
+	case vnet.PayloadMechanismUseRequest:
+		if player == nil || msg.MechanismUse == nil {
+			log.Debug("mechanism use arrived with no player to attribute it to; discarding")
+			return nil
+		}
+		request := *msg.MechanismUse
+		refusal := mechanismRefusal(request)
+		log.Debug("refusing mechanism use",
+			"code", refusal.Reason.String(),
+			"pos", request.Pos,
+			"has_pos", request.HasPos,
+			"client_tick", request.ClientTick,
+		)
+		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+			return fmt.Errorf("session: send mechanism refusal: %w", sErr)
 		}
 		return nil
 
@@ -3082,6 +3101,27 @@ func attackRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
 		action = vnet.RefusedActionEnergy
 	}
 	return protocol.ActionRefused{Action: action, Reason: reason}
+}
+
+// mechanismRefusal is the answer to every MechanismUseRequest this server can receive
+// today. **No block is a mechanism yet**: levers and rune stones arrive with the dungeon's
+// world and mechanism issues, and until then every named cell answers NotAMechanism. It is
+// still a refusal rather than silence, because a lever that does nothing when pulled is
+// indistinguishable from a click that missed.
+//
+// A request that named no cell is MalformedNoAnchor instead, and carries no anchor: the
+// origin is a real cell, and echoing one the client never sent would point the player's
+// answer at a place nobody named.
+func mechanismRefusal(request protocol.MechanismUseRequest) protocol.ActionRefused {
+	if !request.HasPos {
+		return protocol.ActionRefused{Action: vnet.RefusedActionUseMechanism, Reason: vnet.RefusalReasonMalformedNoAnchor}
+	}
+	return protocol.ActionRefused{
+		Action:    vnet.RefusedActionUseMechanism,
+		Reason:    vnet.RefusalReasonNotAMechanism,
+		Anchor:    request.Pos,
+		HasAnchor: true,
+	}
 }
 
 // blockRefusal names the action a block press refusal is answered under. The only one a

@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 59] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 61] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -73,6 +73,8 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 59] = [
     RefusalReason::EntryOfferUnknown,
     RefusalReason::NotEnoughEnergy,
     RefusalReason::HandsOccupied,
+    RefusalReason::NotAMechanism,
+    RefusalReason::MechanismLocked,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -261,6 +263,15 @@ impl RefusalReason {
     /// A two-handed weapon and an off-hand item cannot be worn together. Paired with
     /// `RefusedAction.MoveInventory`. The player can take off one of them.
     pub const HandsOccupied: Self = Self(54);
+    /// The named cell holds no lever, rune stone or other block a player may use. Paired
+    /// with `RefusedAction.UseMechanism`. An ordinary answer rather than a defect: the
+    /// block may have changed between the click and its arrival.
+    pub const NotAMechanism: Self = Self(55);
+    /// The named mechanism belongs to a puzzle that is sealed or already solved, and does
+    /// not move. Paired with `RefusedAction.UseMechanism`. Named for mechanisms rather
+    /// than plain `Locked`, because this enum is shared by every action and a bare word
+    /// would read as an answer about doors, chests or accounts.
+    pub const MechanismLocked: Self = Self(56);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -332,6 +343,8 @@ impl RefusalReason {
         Self::EntryOfferUnknown,
         Self::NotEnoughEnergy,
         Self::HandsOccupied,
+        Self::NotAMechanism,
+        Self::MechanismLocked,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -395,6 +408,8 @@ impl RefusalReason {
             Self::EntryOfferUnknown => Some("EntryOfferUnknown"),
             Self::NotEnoughEnergy => Some("NotEnoughEnergy"),
             Self::HandsOccupied => Some("HandsOccupied"),
+            Self::NotAMechanism => Some("NotAMechanism"),
+            Self::MechanismLocked => Some("MechanismLocked"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

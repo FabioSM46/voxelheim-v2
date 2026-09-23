@@ -11,13 +11,13 @@ pub const ENUM_MIN_MOB_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_KIND: u8 = 7;
+pub const ENUM_MAX_MOB_KIND: u8 = 9;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_KIND: [MobKind; 8] = [
+pub const ENUM_VALUES_MOB_KIND: [MobKind; 10] = [
     MobKind::Unknown,
     MobKind::Draugr,
     MobKind::Vargr,
@@ -26,6 +26,8 @@ pub const ENUM_VALUES_MOB_KIND: [MobKind; 8] = [
     MobKind::Horse,
     MobKind::VargrGuardian,
     MobKind::DraugrKing,
+    MobKind::CaveSpider,
+    MobKind::Scorpion,
 ];
 
 /// What kind of creature a `MobState` describes.
@@ -85,9 +87,31 @@ impl MobKind {
     /// one bump for the pair, because a receiver that can name one boss and not the
     /// other is a receiver that ends the session halfway through the dungeon.
     pub const DraugrKing: Self = Self(7);
+    /// A cave spider: the swarming creature of the descent's dark cave, met in numbers
+    /// rather than alone. A species of its own and not a small `Vargr` — the wire says
+    /// which creature the server placed, and a receiver that drew a spider as a wolf
+    /// would draw the wrong body, play the wrong voice and price the wrong fight.
+    ///
+    /// Appended rather than inserted, for the reason every member above is: a
+    /// renumbering would draw one creature where the server said another, and no
+    /// compiler would object.
+    ///
+    /// It moves `ProtocolVersion.Current`, and the argument is `VargrGuardian`'s
+    /// verbatim: `MobState.kind` is **refused** when it names a member the receiver
+    /// cannot speak, never dropped, so a V45 client meeting one would end the session
+    /// rather than the value. See `common.fbs`, where V46 is written out.
+    pub const CaveSpider: Self = Self(8);
+    /// A scorpion: the creature buried in the descent's sand zone. A different species
+    /// from `CaveSpider` on the same terms the two bosses are different species from
+    /// their field kin — what crosses the wire is which creature the server placed.
+    ///
+    /// Appended, never inserted, and it rides the same V46 bump as the member above —
+    /// one bump for the pair, because a receiver that can name the cave's creature and
+    /// not the sand's is a receiver that ends the session one zone further down.
+    pub const Scorpion: Self = Self(9);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 7;
+    pub const ENUM_MAX: u8 = 9;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Draugr,
@@ -97,6 +121,8 @@ impl MobKind {
         Self::Horse,
         Self::VargrGuardian,
         Self::DraugrKing,
+        Self::CaveSpider,
+        Self::Scorpion,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -109,6 +135,8 @@ impl MobKind {
             Self::Horse => Some("Horse"),
             Self::VargrGuardian => Some("VargrGuardian"),
             Self::DraugrKing => Some("DraugrKing"),
+            Self::CaveSpider => Some("CaveSpider"),
+            Self::Scorpion => Some("Scorpion"),
             _ => None,
         }
     }

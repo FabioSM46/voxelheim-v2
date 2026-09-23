@@ -333,8 +333,10 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	// have every swing dropped if that version bump were omitted.
 	// V45 activates solid castle furnishings: refuse V44 peers that could decode
 	// their descriptors without rendering these authoritative obstacles.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 45 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 45", got)
+	// V46 appends MobKind.CaveSpider and Scorpion, which MobState.kind refuses when it
+	// cannot name them, and MechanismUseRequest, which a V45 server cannot name.
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 46 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 46", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -423,6 +425,9 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 		// V44's bow draw, client -> server. A V43 server cannot name the tag and closes
 		// the session, so it carries the bump with AttackRequest.slot's new meaning.
 		vnet.PayloadDrawRequest,
+		// V46's mechanism use, client -> server. A V45 server cannot name the tag and
+		// closes the session. Its answers are BlockUpdate and ActionRefused, both older.
+		vnet.PayloadMechanismUseRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2838,6 +2843,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.CrossPortal":   {byte(vnet.RefusedActionCrossPortal), 21},
 		"RefusedAction.Energy":        {byte(vnet.RefusedActionEnergy), 22},
 		"RefusedAction.MoveInventory": {byte(vnet.RefusedActionMoveInventory), 23},
+		// V46's mechanism use: a lever that does not move is answered, not silent.
+		"RefusedAction.UseMechanism": {byte(vnet.RefusedActionUseMechanism), 24},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2852,8 +2859,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 24 {
-		t.Errorf("RefusedAction has %d members, want 24 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 25 {
+		t.Errorf("RefusedAction has %d members, want 25 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2921,7 +2928,11 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"NotEnoughEnergy": {byte(vnet.RefusalReasonNotEnoughEnergy), 53},
 		// V44's one, appended inside the low group: the player's own equipment answered
 		// a legal move no, and taking one item off is the thing they can do.
-		"HandsOccupied":     {byte(vnet.RefusalReasonHandsOccupied), 54},
+		"HandsOccupied": {byte(vnet.RefusalReasonHandsOccupied), 54},
+		// V46's two, appended inside the low group: a mechanism request is well formed
+		// whatever cell it names, and both answers are about the world.
+		"NotAMechanism":     {byte(vnet.RefusalReasonNotAMechanism), 55},
+		"MechanismLocked":   {byte(vnet.RefusalReasonMechanismLocked), 56},
 		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2931,8 +2942,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 59 {
-		t.Errorf("RefusalReason has %d members, want 59 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 61 {
+		t.Errorf("RefusalReason has %d members, want 61 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -3447,6 +3458,10 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// which is the whole reason this enum appends.
 		"MobKind.VargrGuardian": {byte(vnet.MobKindVargrGuardian), 6},
 		"MobKind.DraugrKing":    {byte(vnet.MobKindDraugrKing), 7},
+		// V46's pair, appended after DraugrKing = 7: the descent's cave and sand species.
+		// MobState.kind refuses a member it cannot name, so they share one bump.
+		"MobKind.CaveSpider": {byte(vnet.MobKindCaveSpider), 8},
+		"MobKind.Scorpion":   {byte(vnet.MobKindScorpion), 9},
 		// Appended after Forge = 2.
 		"StructureKind.Campfire": {byte(vnet.StructureKindCampfire), 3},
 		// Appended after Tent = 4.
@@ -3498,8 +3513,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		// Six since V25's Villager, which was the one member of this enum whose arrival
 		// moved ProtocolVersion.Current on its own — until V34 appended two more that
-		// did it together.
-		"MobKind":       {len(vnet.EnumNamesMobKind), 8},
+		// did it together, and V46 two more after them.
+		"MobKind":       {len(vnet.EnumNamesMobKind), 10},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 8},
 		"RecipeID":      {len(vnet.EnumNamesRecipeID), 25},
 	} {

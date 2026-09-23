@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 45;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 46;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -362,10 +362,25 @@ impl ProtocolVersion {
     /// V45: the capital now activates solid furnishings. V42-V44 decoded their
     /// descriptors before the renderer existed; reject those peers rather than
     /// exposing invisible authoritative obstacles.
-    pub const Current: Self = Self(45);
+    ///
+    /// V46: the first dungeon descent. Two changes owe the bump and one number covers both.
+    /// `MobKind.CaveSpider` and `MobKind.Scorpion` travel server -> client inside
+    /// `MobState.kind`, whose decoder **refuses** a member it cannot name — V34's argument
+    /// for the two bosses, and `Villager`'s at V25 before it: a V45 client would handshake
+    /// cleanly and end the session the first time a spider entered view. And
+    /// `MechanismUseRequest` is a client -> server union member a V45 server cannot name,
+    /// so it closes the session instead of dropping the frame — `DrawRequest`'s argument at
+    /// V44. The two species are one bump for the reason the two bosses were: a receiver
+    /// that could name the cave's creature and not the sand's would lose the session one
+    /// zone further down. The rest owes nothing alone: `RefusedAction.UseMechanism`,
+    /// `RefusalReason.NotAMechanism` and `RefusalReason.MechanismLocked` ride inside an
+    /// `ActionRefused`, whose decoders are total. Mechanism *state* adds nothing to the
+    /// contract — levers, lit runes and doors are blocks, and a block changing is the
+    /// existing `BlockUpdate`.
+    pub const Current: Self = Self(46);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 45;
+    pub const ENUM_MAX: u16 = 46;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
