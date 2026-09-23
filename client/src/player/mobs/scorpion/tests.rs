@@ -878,3 +878,67 @@ fn a_buried_scorpion_in_the_snapshot_shows_only_its_mound() {
         "the rig lies in the sand under its mound"
     );
 }
+
+/// The sand hall on a budget: a dozen scorpions share one set of meshes and one material, so
+/// the renderer batches them rather than paying per scorpion, and together they draw no more
+/// than one boss's authoring budget — sand included.
+#[test]
+fn a_hall_of_scorpions_shares_its_meshes_and_stays_on_budget() {
+    let mut app = super::super::tests::headless();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
+    let hall = |tick: u32| {
+        (0..12)
+            .map(|index| {
+                let mut one = scorpion(60 + index, index as f32 * 2.0, MobAction::Chase);
+                one.pos[2] = tick as f32 * 0.05;
+                one
+            })
+            .collect::<Vec<_>>()
+    };
+    for tick in 1..=10 {
+        deliver(&mut app, tick, hall(tick));
+        for _ in 0..3 {
+            app.update();
+        }
+    }
+    let world = app.world_mut();
+    let mut query = world.query::<(&MobVisual, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
+    let parts: Vec<_> = query
+        .iter(world)
+        .filter(|(visual, _, _)| matches!(visual.part, MobPart::Scorpion(_)))
+        .map(|(_, mesh, material)| (mesh.0.id(), material.0.id()))
+        .collect();
+    assert_eq!(parts.len(), 12 * SEGMENT_COUNT);
+    let meshes: std::collections::HashSet<_> = parts.iter().map(|part| part.0).collect();
+    let materials: std::collections::HashSet<_> = parts.iter().map(|part| part.1).collect();
+    assert_eq!(
+        meshes.len(),
+        SEGMENT_COUNT - GRAINS + 1,
+        "one mesh set, one grain mesh"
+    );
+    assert_eq!(
+        materials.len(),
+        1,
+        "one chitin-and-sand material, whatever the count"
+    );
+    let assets = app.world().resource::<Assets<Mesh>>();
+    let triangles = |id| {
+        assets
+            .get(id)
+            .and_then(|mesh: &Mesh| mesh.indices())
+            .map_or(0, |indices| indices.len() / 3)
+    };
+    let per_scorpion: usize = (0..SEGMENT_COUNT)
+        .map(|part| {
+            let segment = SEGMENTS[part];
+            let visuals = app.world().resource::<MobVisuals>();
+            let parts = visuals.scorpion.scorpion_parts.as_ref().unwrap();
+            triangles(parts[index(segment)].1.id())
+        })
+        .sum();
+    assert!(
+        12 * per_scorpion <= 12_000,
+        "twelve scorpions draw {} triangles",
+        12 * per_scorpion
+    );
+}
