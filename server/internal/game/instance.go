@@ -230,7 +230,7 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 // persisted".
 func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin, defeated []vnet.MobKind, route DungeonRoute) (*instanceSession, error) {
 	progress := dungeonProgressFrom(defeated)
-	progress.route = route.clone()
+	progress.route = route.impliedBy(progress)
 	// Sized to the layout's whole envelope, so a taller or wider dungeon grows the
 	// cache with it rather than evicting chunks a party is standing in.
 	chunks, gate := world.NewGatedInstanceCache(seed, world.DefaultWorkers, world.InstanceChunkEnvelope(seed), progress.guardian)

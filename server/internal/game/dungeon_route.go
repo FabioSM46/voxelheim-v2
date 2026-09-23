@@ -75,6 +75,41 @@ func (r DungeonRoute) clone() DungeonRoute {
 	return r
 }
 
+// impliedBy is an independent copy of a restored route, raised to what the run's
+// defeated bosses prove it had done.
+//
+// **A defeat the journal holds is proof of progress the route may not have.** The reward
+// journal can restore a run sessions.bin never recorded — the store is flushed on the
+// autosave interval and the journal within a second of a kill, so a crash between the two
+// leaves a defeat with no route beside it — and a v1 file carries no route at all. Such a
+// run would otherwise come back with its king dead and his shortcut open, and every door
+// he stood behind shut. The layout makes two inferences exact:
+//
+//   - the guardian's arena is reached only through the rune hall's door, so a dead
+//     guardian means the rune puzzle was solved;
+//   - the king's arena is reached only through the sand hall's door and past every
+//     checkpoint (his shortcut opens only on his death), so a dead king means the twin
+//     levers were solved and every checkpoint reached — the checkpoints are raised in
+//     [Sim.placeDungeonCheckpointsLocked], which knows how many the layout has.
+//
+// Cleared groups are not inferred: a party may walk past a hall it never cleared.
+func (r DungeonRoute) impliedBy(p dungeonProgress) DungeonRoute {
+	r = r.clone()
+	add := func(puzzle int) {
+		if !r.solved(puzzle) {
+			r.SolvedPuzzles = append(r.SolvedPuzzles, uint8(puzzle))
+			slices.Sort(r.SolvedPuzzles)
+		}
+	}
+	if p.guardian {
+		add(world.RunePuzzle)
+	}
+	if p.king {
+		add(world.TwinLeverPuzzle)
+	}
+	return r
+}
+
 // solved reports whether the route records a puzzle as solved.
 func (r DungeonRoute) solved(puzzle int) bool {
 	return puzzle >= 0 && puzzle <= 255 && slices.Contains(r.SolvedPuzzles, uint8(puzzle))
@@ -105,7 +140,13 @@ func (s *Sim) placeDungeonCheckpointsLocked(seed int64, d *dungeonEncounters) {
 		}
 	}
 	slices.SortFunc(anchors, func(a, b world.PlacedAnchor) int { return a.Index - b.Index })
-	d.checkpoints = dungeonCheckpoints{anchors: anchors, reached: min(int(d.progress.route.Checkpoints), len(anchors))}
+	reached := min(int(d.progress.route.Checkpoints), len(anchors))
+	// The king's arena lies past every checkpoint on the one route there, and its
+	// shortcut opens only on his death: a run that killed him had reached them all.
+	if d.progress.king {
+		reached = len(anchors)
+	}
+	d.checkpoints = dungeonCheckpoints{anchors: anchors, reached: reached}
 }
 
 // advanceDungeonCheckpointsLocked records every checkpoint a live player has reached this

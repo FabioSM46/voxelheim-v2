@@ -213,13 +213,14 @@ func TestARestoredRunKeepsItsRoute(t *testing.T) {
 		}
 	}
 	s.dungeon.descent.waves.started, s.dungeon.descent.waves.next = true, len(spiderWaveSizes)
-	s.dungeon.checkpoints.reached = 2
+	// A party that killed the king had passed every checkpoint on the way to him.
+	s.dungeon.checkpoints.reached = 3
 	s.mu.Unlock()
 	killMobInSession(t, session, vnet.MobKindDraugrKing)
 	m.Step()
 
 	saved := m.SavedSessions()
-	want := DungeonRoute{Checkpoints: 2, SolvedPuzzles: []uint8{1, 3}, ClearedGroups: []uint8{0, world.CaveBurrowGroup, world.SandBuriedGroup}}
+	want := DungeonRoute{Checkpoints: 3, SolvedPuzzles: []uint8{1, 3}, ClearedGroups: []uint8{0, world.CaveBurrowGroup, world.SandBuriedGroup}}
 	if len(saved) != 1 || !reflect.DeepEqual(saved[0].Route, want) {
 		t.Fatalf("the saved route is %#v, want %#v", saved, want)
 	}
@@ -270,10 +271,40 @@ func TestARestoredRunKeepsItsRoute(t *testing.T) {
 	cps := routeCheckpoints(t, live.Seed)
 	arrival, _ := world.InstanceAnchors(live.Seed)
 	late := joinDelver(t, r, 7, anchorStanding(arrival))
-	if got := dieAndRespawn(r, late); got != anchorStanding(cps[1]) {
-		t.Fatalf("a death in the restored run came back at %v, want checkpoint 1", got)
+	if got := dieAndRespawn(r, late); got != anchorStanding(cps[2]) {
+		t.Fatalf("a death in the restored run came back at %v, want checkpoint 2", got)
 	}
 	if back := again.SavedSessions(); len(back) != 1 || !reflect.DeepEqual(back[0].Route, want) {
 		t.Fatalf("the restored run writes back %#v, want %#v", back, want)
+	}
+}
+
+// A run restored with defeats and no route — a journal-only run, or a v1 file — comes back
+// with the progress its defeats prove: the rune door open behind a dead guardian, and the
+// twin-lever door open and every checkpoint reached behind a dead king. Cleared groups are
+// never invented.
+func TestADefeatRestoresTheRouteItProves(t *testing.T) {
+	at := time.Date(2026, 3, 14, 21, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		defeated []vnet.MobKind
+		want     DungeonRoute
+	}{
+		{[]vnet.MobKind{vnet.MobKindVargrGuardian}, DungeonRoute{SolvedPuzzles: []uint8{1}}},
+		{[]vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing}, DungeonRoute{Checkpoints: 3, SolvedPuzzles: []uint8{1, 3}}},
+	} {
+		saved := []SavedSession{{ID: 9, Seed: 4, ExpiresUnix: at.Add(time.Hour).Unix(), DefeatedBosses: tc.defeated}}
+		m, restored, _ := restartInto(t, saved, at)
+		if restored != 1 {
+			t.Fatal("the run was not restored")
+		}
+		live, _ := m.Lookup(9)
+		loadDungeon(t, live)
+		d := &puzzleDungeon{t: t, s: live.Sim}
+		if !d.doorOpen(world.RunePuzzle) || d.doorOpen(world.TwinLeverPuzzle) != (len(tc.defeated) == 2) {
+			t.Fatalf("%v: doors came back wrong", tc.defeated)
+		}
+		if got := m.SavedSessions()[0].Route; !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%v: route %#v, want %#v", tc.defeated, got, tc.want)
+		}
 	}
 }
