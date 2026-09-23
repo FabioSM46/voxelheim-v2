@@ -137,6 +137,14 @@ pub const PORTAL_HEART: BlockId = 57;
 /// Vertical iron bars arranged along X; the second orientation swaps X and Z.
 pub const IRON_GRILLE_X: BlockId = 58;
 pub const IRON_GRILLE_Z: BlockId = 59;
+/// The first dungeon's blocks, mirroring the server's `world.Cobweb`, `world.LeverOff`,
+/// `world.LeverOn` and `world.RuneStoneLit`. Only the ids, the cover class and a
+/// placeholder colour live here so far; their own meshes, glow and sounds are the
+/// client dungeon-blocks issue's work.
+pub const COBWEB: BlockId = 60;
+pub const LEVER_OFF: BlockId = 61;
+pub const LEVER_ON: BlockId = 62;
+pub const RUNE_STONE_LIT: BlockId = 63;
 pub const BOUNDS_SCALE: f32 = 20.0;
 const IRON_GRILLE_LINEAR: [f32; 3] = [0.055, 0.065, 0.075];
 pub const fn is_grille(block: BlockId) -> bool {
@@ -372,13 +380,14 @@ pub fn is_greedy_opaque(block: BlockId) -> bool {
     is_opaque(block) && !is_architectural_shape(block)
 }
 
-const COVER_FAMILY: [BlockId; 6] = [
+const COVER_FAMILY: [BlockId; 7] = [
     FLOWER_RED,
     FLOWER_YELLOW,
     FLOWER_BLUE,
     WINTER_BRAMBLE,
     BUSH,
     DESERT_SHRUB,
+    COBWEB,
 ];
 
 const WATER_FAMILY: [BlockId; 12] = [
@@ -561,7 +570,7 @@ pub fn material_class(block: BlockId) -> MaterialClass {
         SAND => MaterialClass::Sand,
         LOG | PLANKS | PALM_LOG | DARK_TIMBER | PALE_TIMBER => MaterialClass::Wood,
         LEAVES | PALM_FRONDS | BROAD_LEAVES | THATCH => MaterialClass::Foliage,
-        DESERT_SHRUB | BUSH | WINTER_BRAMBLE => MaterialClass::Foliage,
+        DESERT_SHRUB | BUSH | WINTER_BRAMBLE | COBWEB => MaterialClass::Foliage,
         FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE => MaterialClass::Foliage,
         DARK_GLASS => MaterialClass::Glass,
         _ if is_water(block) => MaterialClass::Water,
@@ -574,7 +583,7 @@ pub fn material_class(block: BlockId) -> MaterialClass {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 59] = [
+pub const PALETTE: [BlockId; 63] = [
     STONE,
     DIRT,
     GRASS,
@@ -634,6 +643,10 @@ pub const PALETTE: [BlockId; 59] = [
     PORTAL_HEART,
     IRON_GRILLE_X,
     IRON_GRILLE_Z,
+    COBWEB,
+    LEVER_OFF,
+    LEVER_ON,
+    RUNE_STONE_LIT,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -740,6 +753,12 @@ const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 /// in the leafless winter plant. `#761A3B`.
 const RUNE_STONE_LINEAR: [f32; 3] = [0.038, 0.065, 0.072];
 const PORTAL_LINEAR: [f32; 3] = [0.04, 0.7, 0.52];
+/// Placeholders until the dungeon blocks get their own look: a pale web, a dark and
+/// a brighter lever, and a rune stone that reads lit beside [`RUNE_STONE_LINEAR`].
+const COBWEB_LINEAR: [f32; 3] = [0.62, 0.62, 0.6];
+const LEVER_OFF_LINEAR: [f32; 3] = [0.09, 0.07, 0.05];
+const LEVER_ON_LINEAR: [f32; 3] = [0.2, 0.15, 0.08];
+const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.05, 0.45, 0.6];
 const WINTER_BRAMBLE_LINEAR: [f32; 3] = [0.181_164, 0.010_330, 0.043_735];
 
 /// The darkest thing in the world, and a castle's trim rather than its wall: a line of
@@ -895,6 +914,10 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         DARK_GLASS => DARK_GLASS_LINEAR,
         IRON_GRILLE_X => IRON_GRILLE_LINEAR,
         IRON_GRILLE_Z => IRON_GRILLE_LINEAR,
+        COBWEB => COBWEB_LINEAR,
+        LEVER_OFF => LEVER_OFF_LINEAR,
+        LEVER_ON => LEVER_ON_LINEAR,
+        RUNE_STONE_LIT => RUNE_STONE_LIT_LINEAR,
         SLATE_SLAB_BOTTOM => SLATE_SLAB_BOTTOM_LINEAR,
         SLATE_SLAB_TOP => SLATE_SLAB_TOP_LINEAR,
         SLATE_STAIR_NORTH_BOTTOM => SLATE_STAIR_NORTH_BOTTOM_LINEAR,
@@ -949,7 +972,7 @@ mod tests {
 
     #[test]
     fn the_water_family_is_exactly_the_water_class() {
-        for block in 0..=(WINTER_BRAMBLE + 8) {
+        for block in 0..=(RUNE_STONE_LIT + 8) {
             assert_eq!(
                 is_water(block),
                 material_class(block) == MaterialClass::Water,
@@ -1198,7 +1221,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=IRON_GRILLE_Z {
+        for block in 1..=RUNE_STONE_LIT {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
@@ -1383,11 +1406,12 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_exactly_six_ids_and_stops_nothing() {
+    fn cover_is_exactly_seven_ids_and_stops_nothing() {
         // The seam the next cover block is added at, pinned as a set rather than as a
         // predicate: an id that starts answering `is_cover` without being listed here is
         // a block a body would walk through by accident. `BUSH` and `DESERT_SHRUB`
-        // joined the other four in #874 — both were `world.Solid` before it.
+        // joined the other four in #874 — both were `world.Solid` before it — and the
+        // dungeon's `COBWEB` joined in #1288.
         for block in [
             FLOWER_RED,
             FLOWER_YELLOW,
@@ -1395,6 +1419,7 @@ mod tests {
             WINTER_BRAMBLE,
             BUSH,
             DESERT_SHRUB,
+            COBWEB,
         ] {
             assert!(is_cover(block));
             assert!(!is_solid(block), "cover {block} must stop no body");
@@ -1411,7 +1436,13 @@ mod tests {
             .filter(|block| {
                 !matches!(
                     *block,
-                    FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE | BUSH | DESERT_SHRUB
+                    FLOWER_RED
+                        | FLOWER_YELLOW
+                        | FLOWER_BLUE
+                        | WINTER_BRAMBLE
+                        | BUSH
+                        | DESERT_SHRUB
+                        | COBWEB
                 )
             })
             .chain([AIR, BlockId::MAX])

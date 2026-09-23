@@ -721,6 +721,12 @@ const (
 	// is worse than either, and nothing here needs a special case to say so.
 	SnowSpeedScale = 0.7
 
+	// CobwebSpeedScale is the fraction of horizontal speed left to a body whose box
+	// touches a dungeon cobweb ([world.Snares]). A scale rather than a cap, so it
+	// multiplies with starvation and snow the way they multiply with each other. A
+	// web is not water: there is no swimming in it and gravity is untouched.
+	CobwebSpeedScale = 0.4
+
 	// --- Voice ---------------------------------------------------------------
 	//
 	// Proximity voice is a relay, not a channel: the server decides who hears a frame

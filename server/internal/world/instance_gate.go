@@ -11,15 +11,28 @@ type InstanceGate struct {
 }
 
 func NewGatedInstanceCache(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
-	c := NewInstanceCache(seed, workers, capacity)
-	_, _, centre := InstanceEncounterAnchors(seed)
+	return chamberLayout.gated(seed, workers, capacity, open)
+}
+
+// gated places a five-wide, five-tall door centred on the layout's gate anchor, its
+// bottom course on the anchor's level. The cells are world coordinates, so a door
+// that straddles a chunk boundary in any direction — vertical included — is patched
+// into every chunk it touches.
+func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
+	c := l.cache(seed, workers, capacity)
+	var centre PlacedAnchor
+	for _, a := range l.placement(seed).Anchors {
+		if a.Kind == AnchorInstanceGate {
+			centre = a
+		}
+	}
 	g := &InstanceGate{cache: c, open: open}
 	dx, dz := int64(1), int64(0)
 	if uint64(seed)&1 != 0 {
 		dx, dz = 0, 1
 	}
 	for offset := int64(-2); offset <= 2; offset++ {
-		for y := int64(1); y <= 5; y++ {
+		for y := centre.Y; y <= centre.Y+4; y++ {
 			g.cells = append(g.cells, PlacedAnchor{X: centre.X + dx*offset, Y: y, Z: centre.Z + dz*offset, Kind: AnchorInstanceGate})
 		}
 	}

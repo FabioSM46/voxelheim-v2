@@ -157,6 +157,11 @@ var handMiningTimes = map[world.Block]time.Duration{
 	// And the window goes at the speed of the leaves, which is the fastest anything
 	// but a flower comes away at. Breaking a pane is not quarrying.
 	world.DarkGlass: 400 * time.Millisecond,
+
+	// A dungeon cobweb is one hit: the instant-break floor exactly, the fastest row
+	// here. Only an instance generates one and only an instance's edit rule lets the
+	// break land, so this row costs the open world nothing.
+	world.Cobweb: 250 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -260,6 +265,10 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		// The castle's two timbers, beside the planks they are the same thing as.
 		world.DarkTimber: {},
 		world.PaleTimber: {},
+
+		// Cutting through a web is a blade's work, and every block a hand can break
+		// has exactly one implement.
+		world.Cobweb: {},
 	},
 }
 
