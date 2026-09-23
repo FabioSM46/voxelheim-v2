@@ -133,11 +133,18 @@ func TestDungeonCaptureExportIsTheGatedInstance(t *testing.T) {
 		return Block(binary.LittleEndian.Uint16(data[i : i+2]))
 	}
 	// Every exported chunk of the shut drawing is the ungated generator's, except the
-	// gate's own cells.
+	// gate's own cells: every door and mechanism, and the guardian's five-by-five trapdoor
+	// in the floor course of the gate anchor.
 	gated := map[[3]int64]bool{}
 	for _, a := range InstanceDungeonAnchors(seed) {
 		if a.Kind == AnchorInstanceDoor || a.Kind == AnchorInstanceMechanism {
 			gated[[3]int64{a.X, a.Y, a.Z}] = true
+		}
+	}
+	_, _, trapdoor := InstanceEncounterAnchors(seed)
+	for dz := int64(-2); dz <= 2; dz++ {
+		for dx := int64(-2); dx <= 2; dx++ {
+			gated[[3]int64{trapdoor.X + dx, trapdoor.Y, trapdoor.Z + dz}] = true
 		}
 	}
 	differs := 0
@@ -150,17 +157,25 @@ func TestDungeonCaptureExportIsTheGatedInstance(t *testing.T) {
 			}
 		}
 	}
-	coord := ChunkOf(b.OriginX, b.OriginY, b.OriginZ)
-	generated := GenerateInstance(seed, coord)
-	ox, oy, oz := coord.Origin()
-	for y := range int64(ChunkSize) {
-		for z := range int64(ChunkSize) {
-			for x := range int64(ChunkSize) {
-				if gated[[3]int64{ox + x, oy + y, oz + z}] {
-					continue
-				}
-				if at(shut, ox+x, oy+y, oz+z) != generated.At(int(x), int(y), int(z)) {
-					t.Fatalf("exported voxel %d %d %d differs from the generator", ox+x, oy+y, oz+z)
+	// Every chunk, halo included: the building origin's chunk alone has zero chunk terms in
+	// the export's index arithmetic, so it could not catch a wrong stride or offset.
+	for cy := int64(0); cy < hh/ChunkSize; cy++ {
+		for cz := int64(0); cz < d/ChunkSize; cz++ {
+			for cx := int64(0); cx < w/ChunkSize; cx++ {
+				coord := ChunkOf(h.Origin[0]+cx*ChunkSize, h.Origin[1]+cy*ChunkSize, h.Origin[2]+cz*ChunkSize)
+				generated := GenerateInstance(seed, coord)
+				ox, oy, oz := coord.Origin()
+				for y := range int64(ChunkSize) {
+					for z := range int64(ChunkSize) {
+						for x := range int64(ChunkSize) {
+							if gated[[3]int64{ox + x, oy + y, oz + z}] {
+								continue
+							}
+							if at(shut, ox+x, oy+y, oz+z) != generated.At(int(x), int(y), int(z)) {
+								t.Fatalf("exported voxel %d %d %d differs from the generator", ox+x, oy+y, oz+z)
+							}
+						}
+					}
 				}
 			}
 		}
