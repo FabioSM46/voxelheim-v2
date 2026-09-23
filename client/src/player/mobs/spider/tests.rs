@@ -379,18 +379,56 @@ fn a_standing_spider_twitches_one_leg_at_a_time_and_a_crowd_out_of_step() {
     }
     assert!(seen.len() > 3, "every spider twitches the same leg");
 
-    // The twitch is a standing pose: a running spider's legs belong to the gait.
+    // Through the rig: a standing spider over five seconds lifts a tip visibly, never more
+    // than one at a time, and only the leg `twitch` names.
+    let (_, h) = frame();
+    let tips = |motion: &Motion| -> [Vec3; LEGS] {
+        std::array::from_fn(|leg| {
+            tip(
+                motion.transforms[index(Segment::Lower(leg as u8))],
+                lengths(leg).1,
+            )
+        })
+    };
+    let mut standing = Motion::new(Vec3::ZERO, 2, false);
+    let mut highest: f32 = 0.0;
+    for _ in 0..300 {
+        standing.sample(Vec3::ZERO, 0.0, MobAction::Idle, 0.0, FRAME, never_solid);
+        let lifted: Vec<_> = (0..LEGS)
+            .filter(|&leg| tips(&standing)[leg].y > rest_foot(leg).y + 1e-3)
+            .collect();
+        assert!(lifted.len() <= 1, "legs {lifted:?} twitch at once");
+        if let Some(&leg) = lifted.first() {
+            assert_eq!(twitch(standing.clock, 2).map(|(named, _)| named), Some(leg));
+            highest = highest.max(tips(&standing)[leg].y);
+        }
+    }
+    assert!(highest > 0.08 * h, "no visible twitch: {highest}");
+
+    // A running spider's tips are the gait's and nothing else: each is exactly where the
+    // gait puts it, on every frame, whatever `twitch` would have said at that moment.
     let mut running = Motion::new(Vec3::ZERO, 2, false);
     let mut position = Vec3::ZERO;
-    let mut reference = Motion::new(Vec3::ZERO, 99, false);
-    for _ in 0..120 {
+    let mut checked = 0;
+    for _ in 0..300 {
         position.z -= 0.08;
         running.sample(position, 0.0, MobAction::Chase, 0.0, FRAME, never_solid);
-        reference.sample(position, 0.0, MobAction::Chase, 0.0, FRAME, never_solid);
+        if running.amplitude < 0.3 {
+            continue;
+        }
+        for (leg, reached) in tips(&running).into_iter().enumerate() {
+            let gait = rest_foot(leg) + gait_offset(leg, running.phase) * running.amplitude;
+            assert!(
+                reached.distance(gait) < 2e-3,
+                "leg {leg} left the gait: {reached} for {gait}"
+            );
+        }
+        checked += usize::from(twitch(running.clock, 2).is_some());
     }
-    for (a, b) in running.transforms.iter().zip(reference.transforms) {
-        assert!(a.translation.distance(b.translation) < 0.03);
-    }
+    assert!(
+        checked > 0,
+        "no frame fell inside a twitch window, so nothing was tested"
+    );
 }
 
 /// The stamp the combat audio ticks from: one per set of four feet landing, twice a gait
@@ -499,11 +537,42 @@ fn a_fresh_spider_crawls_out_of_its_wall_and_a_streamed_one_does_not() {
     );
 
     // Not fresh — wounded, dead, or already doing something when first seen — and the wall
-    // makes no difference.
+    // makes no difference. Which first sights are fresh is `fresh_sight`, the decision
+    // `spawn_mob` hands this constructor, and it is pinned below rather than assumed here.
     let mut streamed = Motion::new(at, 4, false);
     streamed.sample(at, yaw, MobAction::Idle, 0.0, FRAME, wall_east);
     assert!(!streamed.emerging());
     assert!(centre(&streamed).length() < 1e-4);
+}
+
+/// The decision `spawn_mob` makes for every first sight: only a whole spider standing or
+/// running may be coming out of a wall.
+#[test]
+fn only_an_unhurt_standing_or_running_first_sight_may_emerge() {
+    let sight = |health: u16, action: MobAction| InterpolatedMob {
+        pos: Vec3::ZERO,
+        yaw: 0.0,
+        walk_phase: 0.0,
+        walking: false,
+        kind: MobKind::CaveSpider,
+        health,
+        max_health: 20,
+        action,
+        target_entity_id: 0,
+    };
+    assert!(fresh_sight(&sight(20, MobAction::Idle)));
+    assert!(fresh_sight(&sight(20, MobAction::Chase)));
+    assert!(!fresh_sight(&sight(19, MobAction::Idle)), "wounded");
+    assert!(!fresh_sight(&sight(19, MobAction::Chase)), "wounded");
+    for action in [
+        MobAction::Flee,
+        MobAction::Windup,
+        MobAction::Recovery,
+        MobAction::Dying,
+        MobAction::Corpse,
+    ] {
+        assert!(!fresh_sight(&sight(20, action)), "{action:?}");
+    }
 }
 
 fn spider(entity_id: u64, x: f32, z: f32, action: MobAction) -> MobState {
@@ -604,7 +673,7 @@ fn a_hit_spider_flashes_every_part_but_its_eyes() {
 
 /// The horde the dungeon's waves send, on a budget: thirty spiders share one set of meshes
 /// and two materials, so the renderer batches them rather than paying per spider, and what
-/// they draw together stays under what one boss is allowed.
+/// they draw together stays within two bosses' triangle budget.
 #[test]
 fn thirty_spiders_share_their_meshes_and_materials_and_stay_on_budget() {
     let mut app = app();
@@ -650,7 +719,7 @@ fn thirty_spiders_share_their_meshes_and_materials_and_stay_on_budget() {
         "thirty spiders draw {} triangles",
         30 * per_spider
     );
-    // And every one of them is being animated: no two sit in the same pose.
+    // And every one of them is being animated: the whole horde has its gait showing.
     let world = app.world_mut();
     let mut roots = world.query::<(&Mob, &Transform)>();
     let running = roots

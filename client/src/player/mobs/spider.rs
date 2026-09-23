@@ -577,6 +577,14 @@ pub(super) fn burrow(position: Vec3, solid: impl Fn(IVec3) -> bool) -> Option<Ve
     (walled && back.length() > 1.0).then(|| back.normalize())
 }
 
+/// Whether a spider seen for the first time may be one coming out of its burrow: alive,
+/// unhurt and standing or running. The wire says nothing about *why* a spider appeared, so
+/// this is the whole of the test; a wounded, attacking or dead spider was already in the
+/// fight before this client saw it.
+pub(super) fn fresh_sight(state: &InterpolatedMob) -> bool {
+    state.health == state.max_health && matches!(state.action, MobAction::Idle | MobAction::Chase)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Emerge {
     /// Toward the burrow, in world space.

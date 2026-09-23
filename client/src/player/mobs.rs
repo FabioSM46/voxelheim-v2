@@ -1170,15 +1170,13 @@ fn spawn_mob(
                 guardian_motion: (state.kind == MobKind::VargrGuardian)
                     .then(|| Box::new(guardian::Motion::new(state.pos, state.yaw))),
                 // Only a first sight that could be a spider leaving its burrow may play the
-                // emergence: alive, unhurt and standing or running. The wire says nothing
-                // about *why* a spider appeared, so this is the whole of the test — see
-                // `spider::burrow` for the wall it then looks for.
+                // emergence — see `spider::fresh_sight`, and `spider::burrow` for the wall
+                // it then looks for.
                 spider_motion: (state.kind == MobKind::CaveSpider).then(|| {
                     Box::new(spider::Motion::new(
                         state.pos,
                         entity_id,
-                        state.health == state.max_health
-                            && matches!(state.action, MobAction::Idle | MobAction::Chase),
+                        spider::fresh_sight(state),
                     ))
                 }),
                 kind: state.kind,
