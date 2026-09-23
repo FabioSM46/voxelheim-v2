@@ -79,6 +79,7 @@ impl Plugin for WorldPlugin {
             // the same: whichever plugin is built first creates the inbox and the
             // other finds it, so neither depends on the order in `main.rs`.
             .init_resource::<WorldInbox>()
+            .add_message::<BlockReplaced>()
             .add_systems(Update, ingest_world_updates.after(crate::net::DrainNetwork))
             .add_plugins((
                 render::ChunkRenderPlugin,
@@ -673,6 +674,22 @@ impl ChunkStore {
     pub fn take_changes(&mut self) -> Vec<ChunkChange> {
         std::mem::take(&mut self.changes)
     }
+}
+
+/// One voxel a `BlockUpdate` changed in a chunk this session holds: what it was and what
+/// the server made it.
+///
+/// **Written after the store has changed, and never before.** It reports an answer that
+/// has already been applied, so a reader cannot act on an edit the store does not hold.
+/// The dungeon's lever clunk, rune scrape, grille rattle, door grind and web tear are
+/// heard from these (`player/dungeon_audio`): a mechanism announces itself by the block
+/// update that moves it and by nothing else. An update that changed nothing — the same id
+/// again, or a chunk this session does not hold — is not reported.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockReplaced {
+    pub pos: BlockCoord,
+    pub before: BlockId,
+    pub after: BlockId,
 }
 
 /// What applying a `BlockUpdate` did to the store.
@@ -1313,6 +1330,11 @@ fn owner(update: &WorldUpdate, size: usize) -> Option<ChunkCoord> {
 /// The backlog itself is bounded too, at [`MAX_DECODE_BACKLOG`], and the refusal is
 /// announced twice over: a log line at each edge of the episode, and a counter the
 /// overlay carries live beside the queue depth.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the drain's own state plus one outbox per kind of report it makes; bundling \
+              them would name a struct after this one function"
+)]
 pub(crate) fn ingest_world_updates(
     mut inbox: ResMut<WorldInbox>,
     mut queue: ResMut<DecodeQueue>,
@@ -1331,6 +1353,9 @@ pub(crate) fn ingest_world_updates(
     // that over-streams refuses on every frame for as long as it lasts, and sixty
     // warnings a second is how the one line that mattered gets scrolled away.
     mut overflowing: Local<bool>,
+    // Where each applied voxel change is reported. `Option`, because a test app that drives
+    // the drain alone registers no reader, and a report nobody reads is not owed.
+    mut replaced: Option<ResMut<Messages<BlockReplaced>>>,
 ) {
     let arrived = inbox.take();
     // Nothing to queue and nothing owed. Returned before either resource is touched
@@ -1467,11 +1492,21 @@ pub(crate) fn ingest_world_updates(
             // possibly not, and the client cannot tell the difference and must not
             // try to. This is the one place a voxel changes after it arrives.
             WorldUpdate::Block { pos, block_id } => {
+                let before = store.block_at(pos, size);
                 match store.apply_block(pos, block_id, size) {
                     // Charged the same as an expansion, and for the same reason: an
                     // edited chunk is a fresh `size³` allocation and a copy into it.
                     BlockApplied::Rewritten { coord, remeshed } => {
                         spent += 1;
+                        if before != block_id
+                            && let Some(replaced) = replaced.as_deref_mut()
+                        {
+                            replaced.write(BlockReplaced {
+                                pos,
+                                before,
+                                after: block_id,
+                            });
+                        }
                         debug!(
                             "block {},{},{} is now {block_id}: chunk {},{},{} rewritten, \
                              {remeshed} chunk(s) to remesh",
@@ -3326,6 +3361,38 @@ mod tests {
             pos,
             block_id: block,
         }
+    }
+
+    #[test]
+    fn an_applied_change_is_reported_once_with_what_it_replaced() {
+        // The dungeon's sounds are heard from these reports (#1295). Only a change the store
+        // actually holds is reported: the same id again changes nothing, and a voxel in a
+        // chunk this session was never sent has no `before` to name.
+        let mut app = ingest_app(true);
+        app.add_message::<BlockReplaced>();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: stone_runs(),
+            },
+        );
+        push(&mut app, edit(at(1, 2, 3), palette::LEVER_ON));
+        push(&mut app, edit(at(1, 2, 3), palette::LEVER_ON));
+        push(&mut app, edit(at(100, 2, 3), palette::AIR));
+        app.update();
+
+        let messages = app.world().resource::<Messages<BlockReplaced>>();
+        let reported: Vec<BlockReplaced> =
+            messages.iter_current_update_messages().copied().collect();
+        assert_eq!(
+            reported,
+            vec![BlockReplaced {
+                pos: at(1, 2, 3),
+                before: palette::STONE,
+                after: palette::LEVER_ON,
+            }]
+        );
     }
 
     #[test]

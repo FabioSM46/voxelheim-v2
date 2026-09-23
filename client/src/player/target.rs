@@ -124,6 +124,7 @@ pub(super) struct AimBlocks;
 impl Plugin for BlockTargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BlockTarget>()
+            .init_resource::<super::mechanism::AimedMechanism>()
             .init_resource::<HealTargetHint>()
             .init_resource::<MiningInput>()
             // `PlayerPlugin` owns this in the game. Initialising it here too keeps this
@@ -710,11 +711,13 @@ fn aim_at_a_block(
     store: Option<Res<ChunkStore>>,
     cameras: Query<&Transform, With<WorldCamera>>,
     mut target: ResMut<BlockTarget>,
+    mut mechanism: ResMut<super::mechanism::AimedMechanism>,
     solids: Option<Res<super::static_props::StaticPropSolids>>,
 ) {
     // A player the server says is dead aims at nothing, so nothing is outlined and the
     // request below has no voxel to name. Presentation, not authority: the server refuses
     // a dead player's edit whether or not this crate drew a box round the block first.
+    let mut operable = None;
     let aimed = match (gate.may_aim(), session, store, cameras.iter().next()) {
         (true, Some(session), Some(store), Some(eye)) => {
             let size = usize::from(session.0.chunk_size);
@@ -727,7 +730,7 @@ fn aim_at_a_block(
                 .as_deref()
                 .and_then(|solids| solids.nearest_hit(eye.translation, *eye.forward(), MAX_REACH))
                 .map_or(MAX_REACH, |hit| (hit - 0.0001).max(0.0));
-            raycast_blocks(eye.translation, *eye.forward(), reach, |voxel| {
+            let hit = raycast_blocks(eye.translation, *eye.forward(), reach, |voxel| {
                 let pos = BlockCoord {
                     x: voxel.x,
                     y: voxel.y,
@@ -738,12 +741,36 @@ fn aim_at_a_block(
                 } else {
                     palette::AIR
                 }
-            })
+            });
+            // The dungeon's levers and rune stones are asked about here, where the store
+            // already is: the interact key's prompt reads the answer and nothing else.
+            let block_at = |voxel: IVec3| {
+                store.block_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            };
+            operable = hit
+                .filter(|hit| super::mechanism::looks_operable(hit.block, block_at))
+                .map(|hit| super::mechanism::Aimed {
+                    pos: BlockCoord {
+                        x: hit.block.x,
+                        y: hit.block.y,
+                        z: hit.block.z,
+                    },
+                    block: block_at(hit.block),
+                });
+            hit
         }
         _ => None,
     };
 
     set_if_changed(&mut target, BlockTarget(aimed));
+    set_if_changed(&mut mechanism, super::mechanism::AimedMechanism(operable));
 }
 
 // ---------------------------------------------------------------------------
@@ -1977,6 +2004,87 @@ mod tests {
                 },
                 progress,
             });
+    }
+
+    #[test]
+    fn an_aimed_lever_is_offered_to_the_interact_key_and_stone_is_not() {
+        // #1295: the same ray, asked one more question where the store already is. The
+        // prompt reads the answer; the interact key sends it (`loot.rs`).
+        use crate::player::mechanism::{Aimed, AimedMechanism};
+        let lever = IVec3::new(3, 81, 0);
+        let mut app = aiming_app(store_of(&[(lever, palette::LEVER_OFF)]));
+        app.update();
+        assert_eq!(
+            *app.world().resource::<AimedMechanism>(),
+            AimedMechanism(Some(Aimed {
+                pos: BlockCoord { x: 3, y: 81, z: 0 },
+                block: palette::LEVER_OFF,
+            }))
+        );
+        let prompt = {
+            let world = app.world_mut();
+            let mut texts = world.query::<(&Text, &Visibility)>();
+            texts
+                .iter(world)
+                .find(|(text, _)| text.0.contains("lever"))
+                .map(|(text, visibility)| (text.0.clone(), *visibility))
+        };
+        assert_eq!(
+            prompt,
+            Some(("[F] Pull the lever".to_owned(), Visibility::Visible))
+        );
+
+        // A corpse at the feet takes the key first (`loot.rs`), so the prompt stands down
+        // rather than promise a lever the press would not pull (review on #1326). The
+        // mechanism is still aimed at; only the promise is withdrawn.
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 2,
+                entities: vec![EntityState {
+                    entity_id: LOCAL_ID,
+                    pos: SPAWN,
+                    vel: [0.0, 0.0, 0.0],
+                    yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
+                }],
+                mobs: vec![crate::net::MobState {
+                    entity_id: 40,
+                    kind: crate::net::MobKind::Draugr,
+                    pos: [SPAWN[0] - 1.0, SPAWN[1], SPAWN[2]],
+                    vel: [0.0; 3],
+                    yaw: 0.0,
+                    health: 0,
+                    max_health: 60,
+                    action: crate::net::MobAction::Corpse,
+                    target_entity_id: 0,
+                }],
+                accessible_loot_corpses: vec![40],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        app.update();
+        app.update();
+        assert!(app.world().resource::<AimedMechanism>().0.is_some());
+        let shown = {
+            let world = app.world_mut();
+            let mut texts = world.query::<(&Text, &Visibility)>();
+            texts.iter(world).any(|(text, visibility)| {
+                text.0.contains("lever") && *visibility == Visibility::Visible
+            })
+        };
+        assert!(
+            !shown,
+            "the prompt promised a lever over a corpse the key would open"
+        );
+
+        let mut app = aiming_app(store_with(&[lever]));
+        app.update();
+        assert_eq!(
+            *app.world().resource::<AimedMechanism>(),
+            AimedMechanism(None)
+        );
     }
 
     #[test]
