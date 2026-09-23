@@ -136,7 +136,7 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are eight**:
+**Every edge from `player` to `world` is narrow and read-only, and there are nine**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
@@ -150,9 +150,13 @@ crossing and the clearance is what holds it clear of one; `player/critters.rs` r
 of column under each critter for the opposite sign — a bird is lifted *off* the surface and a
 critter is placed *on* it — plus a bounded ring search for the trunk that ends a critter's life;
 and `player/items.rs` asks `palette` for a terrain
-swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
+swatch when an item deliberately reuses one. The ninth is `player/dungeon_audio`, which reads the
+`world::BlockReplaced` reports the ingest writes after it has applied a `BlockUpdate`, because a
+lever, a rune stone, a grille, a door and a web announce that they moved in no other way (#1295);
+it reads the store for occlusion as every other effect does, and never writes a voxel. The
+first-person hand takes its skin colour from the
 local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
-state, and no edge points back from `world` to `player`.** A ninth, in either direction, is a
+state, and no edge points back from `world` to `player`.** A tenth, in either direction, is a
 design question rather than an import.
 
 **This count said six and had been wrong since #640**, which gave the flock its ground clearance
