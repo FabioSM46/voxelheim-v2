@@ -18,20 +18,25 @@ import (
 // mounted body three blocks tall or a fall thirty-three blocks deep.
 
 // descentTerrain is one seed's generated dungeon with the guardian's trapdoor open,
-// every chunk resident. doorOpen reads puzzle 1's door cells as air, the state of a
-// party that solved the rune hall; dry reads the pool as stone, the control that
+// every chunk resident, and every door opened through the gate's own Update — the
+// state of a party that solved the puzzles; dry reads the pool as stone, the control that
 // shows the water is what makes the landing harmless.
 type descentTerrain struct {
-	chunks   map[world.Coord]*world.Chunk
-	doors    map[[3]int64]bool
-	doorOpen bool
-	dry      bool
+	chunks map[world.Coord]*world.Chunk
+	dry    bool
 }
 
 func newDescentTerrain(t *testing.T, seed int64) *descentTerrain {
 	t.Helper()
-	cache, _ := world.NewGatedInstanceCache(seed, 1, world.InstanceChunkEnvelope(seed), true)
-	d := &descentTerrain{chunks: map[world.Coord]*world.Chunk{}, doors: map[[3]int64]bool{}, doorOpen: true}
+	cache, gate := world.NewGatedInstanceCache(seed, 1, world.InstanceChunkEnvelope(seed), true)
+	doors := map[int]bool{}
+	for _, a := range world.InstanceDungeonAnchors(seed) {
+		if a.Kind == world.AnchorInstanceDoor {
+			doors[a.Index] = true
+		}
+	}
+	gate.Update(world.InstanceUpdate{Doors: doors})
+	d := &descentTerrain{chunks: map[world.Coord]*world.Chunk{}}
 	// A box wider than any turn of the dungeon, filtered by the cache's own envelope;
 	// the count below proves the box held every chunk the envelope has.
 	for x := int32(-8); x <= 8; x++ {
@@ -52,18 +57,10 @@ func newDescentTerrain(t *testing.T, seed int64) *descentTerrain {
 	if len(d.chunks) != world.InstanceChunkEnvelope(seed) {
 		t.Fatalf("seed %d: loaded %d chunks of an envelope of %d", seed, len(d.chunks), world.InstanceChunkEnvelope(seed))
 	}
-	for _, a := range world.InstanceDungeonAnchors(seed) {
-		if a.Kind == world.AnchorInstanceDoor {
-			d.doors[[3]int64{a.X, a.Y, a.Z}] = true
-		}
-	}
 	return d
 }
 
 func (d *descentTerrain) Block(x, y, z int64) (world.Block, bool) {
-	if d.doorOpen && d.doors[[3]int64{x, y, z}] {
-		return world.Air, true
-	}
 	chunk := d.chunks[world.ChunkOf(x, y, z)]
 	if chunk == nil {
 		return world.Air, true // the void around the dungeon

@@ -1468,6 +1468,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	s.blows = s.blows[:0]
 	s.advancePartyInvitesLocked(tick)
 	s.flushDungeonGateLocked()
+	s.advanceDungeonPuzzlesLocked()
 	s.resetWipedDungeonLocked()
 	s.expireCorpsesLocked(tick)
 	s.advanceChunkRegenerationLocked()

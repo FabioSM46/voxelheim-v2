@@ -27,6 +27,8 @@ const (
 	// sunk a block below the slot is wholly buried.
 	SandBuriedGroup = 5
 
+	// RunePuzzle is the rune hall's four stones and the door into the guardian's arena.
+	RunePuzzle = runePuzzle
 	// GrillePuzzle is the cave's lever and the grille it holds open for a while.
 	GrillePuzzle = 2
 	// TwinLeverPuzzle is the sand hall's two levers and the door both open together.
