@@ -593,6 +593,20 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         };
     }
 
+    // V46's mechanism use. Whole sentences under their own action, for the portal's reason:
+    // "Cannot build" would be the wrong verb for a lever that did not move.
+    if refused.action == RefusedAction::UseMechanism {
+        return match refused.reason {
+            RefusalReason::NotAMechanism => {
+                Some("Cannot use that: it is not a lever or rune stone".to_owned())
+            }
+            RefusalReason::MechanismLocked => Some("Cannot use that: it will not move".to_owned()),
+            RefusalReason::OutOfReach => Some("Cannot use that: it is too far away".to_owned()),
+            RefusalReason::PlayerIsDead => Some("Cannot use that while dead".to_owned()),
+            _ => None,
+        };
+    }
+
     if refused.reason.is_client_defect() {
         return None;
     }
@@ -663,6 +677,9 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::EntryOfferUnknown
         | RefusalReason::NotEnoughEnergy
         | RefusalReason::HandsOccupied
+        // V46's two are answered above, under the action that produces them.
+        | RefusalReason::NotAMechanism
+        | RefusalReason::MechanismLocked
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1369,7 +1386,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 59] = [
+    const EVERY_REASON: [RefusalReason; 61] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1432,6 +1449,9 @@ mod tests {
         RefusalReason::NotEnoughEnergy,
         // V44's two-handed reason.
         RefusalReason::HandsOccupied,
+        // V46's two mechanism reasons.
+        RefusalReason::NotAMechanism,
+        RefusalReason::MechanismLocked,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1454,6 +1474,10 @@ mod tests {
             RefusalReason::NoAmmunition => RefusedAction::Attack,
             RefusalReason::NotEnoughEnergy => RefusedAction::Energy,
             RefusalReason::HandsOccupied => RefusedAction::MoveInventory,
+            // Their sentences live behind the mechanism action, for the marker trap below.
+            RefusalReason::NotAMechanism | RefusalReason::MechanismLocked => {
+                RefusedAction::UseMechanism
+            }
             RefusalReason::MountNotLearned
             | RefusalReason::AlreadyMounted
             | RefusalReason::MountNotGrounded

@@ -43,6 +43,9 @@ pub(super) fn impact(target: BlowTarget) -> Cue {
             MobKind::Vargr | MobKind::VargrGuardian => Cue::BeastImpact,
             MobKind::Villager => Cue::ClothImpact,
             MobKind::Deer | MobKind::Horse => Cue::SoftImpact,
+            // V46's two are chitin, which is dry and hard: the bone impact until their own
+            // voices exist, rather than a flesh sound that would say the wrong material.
+            MobKind::CaveSpider | MobKind::Scorpion => Cue::DryImpact,
         },
     }
 }
@@ -58,6 +61,8 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
         // Both bosses are routed by their explicit encounter phases, never Windup.
         (MobKind::VargrGuardian | MobKind::DraugrKing, _) => None,
+        // V46's placeholders have no voice yet; their behaviour issues own one.
+        (MobKind::CaveSpider | MobKind::Scorpion, _) => None,
     }
 }
 

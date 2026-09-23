@@ -119,6 +119,23 @@ const DRAUGR_KING_BODY: Body = Body {
     height: 2.8,
 };
 
+/// The V46 descent species' boxes: low and wide, the plan of a crawling creature, and the
+/// placeholder each is drawn as until its rig exists.
+///
+/// **These lead the server rather than mirror it, and that is the one place in this file
+/// they do.** #1287 puts the two kinds on the wire before any issue gives them stats, so
+/// `mobRegistry` has no row to copy yet. The issue that adds the server rows owns the
+/// numbers and must move these to match; `the_drawn_body_is_the_box_the_server_collides`
+/// then keeps the placeholder mesh on whatever box that is.
+const CAVE_SPIDER_BODY: Body = Body {
+    width: 1.2,
+    height: 0.7,
+};
+const SCORPION_BODY: Body = Body {
+    width: 1.3,
+    height: 0.6,
+};
+
 /// The body envelope for one kind. It is the box the server collides for creatures and
 /// people; Horse is the explicit presentation-only exception above. Total over
 /// [`MobKind`], with no wildcard arm, so a new species does not compile until it has been
@@ -137,6 +154,8 @@ pub(super) const fn body(kind: MobKind) -> Body {
         MobKind::Horse => HORSE_BODY,
         MobKind::VargrGuardian => VARGR_GUARDIAN_BODY,
         MobKind::DraugrKing => DRAUGR_KING_BODY,
+        MobKind::CaveSpider => CAVE_SPIDER_BODY,
+        MobKind::Scorpion => SCORPION_BODY,
     }
 }
 
@@ -162,9 +181,12 @@ pub(crate) enum Hostility {
 /// said how its bar reads.
 pub(crate) const fn hostility(kind: MobKind) -> Hostility {
     match kind {
-        MobKind::Draugr | MobKind::Vargr | MobKind::VargrGuardian | MobKind::DraugrKing => {
-            Hostility::Hostile
-        }
+        MobKind::Draugr
+        | MobKind::Vargr
+        | MobKind::VargrGuardian
+        | MobKind::DraugrKing
+        | MobKind::CaveSpider
+        | MobKind::Scorpion => Hostility::Hostile,
         MobKind::Deer => Hostility::Passive,
         MobKind::Villager | MobKind::Horse => Hostility::Neutral,
     }
@@ -310,6 +332,11 @@ const VARGR_EYE_EMISSIVE: LinearRgba = LinearRgba::rgb(7.0, 4.2, 0.15);
 const DEER_BODY_COLOUR: Color = Color::srgb(0.48, 0.30, 0.18);
 const DEER_HEAD_COLOUR: Color = Color::srgb(0.66, 0.46, 0.28);
 
+/// The neutral grey both V46 placeholders are drawn in. Deliberately no species colour: a
+/// placeholder that looked finished would hide that the rig is still owed.
+const PLACEHOLDER_BODY_COLOUR: Color = Color::srgb(0.42, 0.42, 0.44);
+const PLACEHOLDER_HEAD_COLOUR: Color = Color::srgb(0.52, 0.52, 0.54);
+
 /// The red a hit flashes. Shared by every kind: an impact reads the same whatever was hit.
 const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 
@@ -367,6 +394,10 @@ pub(super) struct MobVisuals {
     deer: SpeciesVisuals,
     guardian: SpeciesVisuals,
     king: SpeciesVisuals,
+    /// V46's two, drawn as neutral placeholder boxes of their own size until their rigs
+    /// exist, so the server placing one costs this build a box rather than the session.
+    cave_spider: SpeciesVisuals,
+    scorpion: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
     lootable_material: Handle<StandardMaterial>,
@@ -397,6 +428,8 @@ impl MobVisuals {
             MobKind::Horse => None,
             MobKind::VargrGuardian => Some(&self.guardian),
             MobKind::DraugrKing => Some(&self.king),
+            MobKind::CaveSpider => Some(&self.cave_spider),
+            MobKind::Scorpion => Some(&self.scorpion),
         }
     }
 }
@@ -562,6 +595,8 @@ pub(super) fn create_visuals(
         },
         guardian: guardian::visuals(&mut meshes, &mut materials),
         king: king::visuals(&mut meshes, &mut materials),
+        cave_spider: placeholder_visuals(MobKind::CaveSpider, &mut meshes, &mut materials),
+        scorpion: placeholder_visuals(MobKind::Scorpion, &mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
         aggro_marker: meshes.add(aggro_marker_mesh()),
@@ -910,6 +945,51 @@ fn deer_head_mesh() -> Mesh {
     let ears = Mesh::from(Cuboid::from_size(DEER_EARS)).translated_by(Vec3::new(0.0, 1.32, -0.24));
     merge_all(&mut head, [neck, ears], "deer head");
     head
+}
+
+/// A placeholder's body: a low slab filling the whole box in plan, three quarters of its
+/// height, standing on the snapshot position.
+fn placeholder_body_mesh(kind: MobKind) -> Mesh {
+    let envelope = body(kind);
+    let height = envelope.height * 0.75;
+    Mesh::from(Cuboid::new(envelope.width, height, envelope.width))
+        .translated_by(Vec3::Y * (height / 2.0))
+}
+
+/// A placeholder's head: a block on the front of the slab that takes the box to its full
+/// height, so the facing the server sends is readable on a plain box.
+fn placeholder_head_mesh(kind: MobKind) -> Mesh {
+    let envelope = body(kind);
+    let size = Vec3::new(
+        envelope.width * 0.4,
+        envelope.height * 0.25,
+        envelope.width * 0.4,
+    );
+    Mesh::from(Cuboid::from_size(size)).translated_by(Vec3::new(
+        0.0,
+        envelope.height - size.y / 2.0,
+        -(envelope.width - size.z) / 2.0,
+    ))
+}
+
+/// The meshes and materials a V46 placeholder is drawn from: two boxes and no legs, arms
+/// or eyes, because nothing here poses them yet.
+fn placeholder_visuals(
+    kind: MobKind,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> SpeciesVisuals {
+    SpeciesVisuals {
+        king_parts: None,
+        guardian_parts: None,
+        body: meshes.add(placeholder_body_mesh(kind)),
+        head: meshes.add(placeholder_head_mesh(kind)),
+        legs: None,
+        arms: None,
+        eyes: None,
+        body_material: materials.add(StandardMaterial::from_color(PLACEHOLDER_BODY_COLOUR)),
+        head_material: materials.add(StandardMaterial::from_color(PLACEHOLDER_HEAD_COLOUR)),
+    }
 }
 
 /// A downward arrowhead quad on one camera-facing plane.
@@ -1277,7 +1357,12 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
         // Articulated torso and arms carry the king's weight; planted feet keep the root upright.
         MobKind::DraugrKing => 0.0,
         MobKind::VargrGuardian => lean * 0.65,
-        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
+        MobKind::Vargr
+        | MobKind::Deer
+        | MobKind::Villager
+        | MobKind::Horse
+        | MobKind::CaveSpider
+        | MobKind::Scorpion => lean,
     }
 }
 
@@ -1375,6 +1460,10 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
+        // Placeholders roll onto their side like the other low bodies until a rig owns it.
+        MobKind::CaveSpider | MobKind::Scorpion => {
+            Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen)
+        }
         // The guardian loses its heavy shoulder; the king folds forward rather
         // than sharing the common draugr's backward fall. Cosmetic snapshot poses.
         MobKind::VargrGuardian => Quat::from_rotation_z(1.05 * fallen),
@@ -1392,7 +1481,12 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        MobKind::Draugr | MobKind::Villager | MobKind::Horse | MobKind::DraugrKing => Vec3::ONE,
+        MobKind::Draugr
+        | MobKind::Villager
+        | MobKind::Horse
+        | MobKind::DraugrKing
+        | MobKind::CaveSpider
+        | MobKind::Scorpion => Vec3::ONE,
         MobKind::VargrGuardian => Vec3::new(1.0 + 0.35 * fallen, 1.0, 1.0 + 0.35 * fallen),
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
@@ -3008,6 +3102,21 @@ mod tests {
             (
                 MobKind::Deer,
                 vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
+            ),
+            // V46's placeholders are held to the same box as every drawn species.
+            (
+                MobKind::CaveSpider,
+                vec![
+                    placeholder_body_mesh(MobKind::CaveSpider),
+                    placeholder_head_mesh(MobKind::CaveSpider),
+                ],
+            ),
+            (
+                MobKind::Scorpion,
+                vec![
+                    placeholder_body_mesh(MobKind::Scorpion),
+                    placeholder_head_mesh(MobKind::Scorpion),
+                ],
             ),
         ];
 

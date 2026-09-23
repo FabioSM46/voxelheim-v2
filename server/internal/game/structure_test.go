@@ -1425,6 +1425,10 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonEntryOfferUnknown,
 		// V44's two-handed refusal, produced by the equip rule in moveLocked.
 		vnet.RefusalReasonHandsOccupied,
+		// V46's mechanism refusals. The session answers NotAMechanism today; the
+		// mechanisms issue produces MechanismLocked.
+		vnet.RefusalReasonNotAMechanism,
+		vnet.RefusalReasonMechanismLocked,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1447,10 +1451,11 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// V40's NotEnoughEnergy does too: the contract part carries the member and its
 	// client silence, and the attack-cost part is its producer. V44's HandsOccupied follows
-	// the same pattern: the contract carries it, and #1236 is its producer. The count
-	// includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 59 {
-		t.Errorf("RefusalReason has %d members, want 59 — a new one needs a producer and client handling, not a test edit", got)
+	// the same pattern: the contract carries it, and #1236 is its producer. V46's
+	// MechanismLocked is the same again: the contract carries it and the mechanisms issue
+	// produces it. The count includes Unknown.
+	if got := len(vnet.EnumNamesRefusalReason); got != 61 {
+		t.Errorf("RefusalReason has %d members, want 61 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

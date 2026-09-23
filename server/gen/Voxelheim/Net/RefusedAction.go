@@ -82,6 +82,9 @@ const (
 	/// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
 	/// inventory the player already holds is still the complete answer.
 	RefusedActionMoveInventory RefusedAction = 23
+	/// A `MechanismUseRequest` that moved nothing. No lever flipped and no rune lit; the
+	/// blocks the player can see are still the complete answer.
+	RefusedActionUseMechanism RefusedAction = 24
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -109,6 +112,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionCrossPortal:    "CrossPortal",
 	RefusedActionEnergy:         "Energy",
 	RefusedActionMoveInventory:  "MoveInventory",
+	RefusedActionUseMechanism:   "UseMechanism",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -136,6 +140,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"CrossPortal":    RefusedActionCrossPortal,
 	"Energy":         RefusedActionEnergy,
 	"MoveInventory":  RefusedActionMoveInventory,
+	"UseMechanism":   RefusedActionUseMechanism,
 }
 
 func (v RefusedAction) String() string {

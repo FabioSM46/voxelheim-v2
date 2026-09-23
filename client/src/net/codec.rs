@@ -456,6 +456,13 @@ pub enum MobKind {
     /// The Draugr king at the far end, on the same terms as [`MobKind::VargrGuardian`]:
     /// a distinct species, decoded and undrawn.
     DraugrKing,
+    /// V46. The swarming spider of the first dungeon's dark cave, a species of its own.
+    /// This build draws it as a neutral placeholder box of the species' size and nothing
+    /// more; its rig, voice and behaviour are later issues.
+    CaveSpider,
+    /// V46. The scorpion buried in the descent's sand zone, on the same terms as
+    /// [`MobKind::CaveSpider`]: decoded, and drawn only as a placeholder box.
+    Scorpion,
 }
 
 /// Which learned horse authoritative mount state names.
@@ -519,6 +526,11 @@ impl MobKind {
     /// direction that paragraph warns about: refusing a member the server really sends
     /// ends the session, and the server sends these the moment a party crosses into the
     /// first arena. #1019 gives them their rig.
+    ///
+    /// **V46's cave spider and scorpion are accepted on the same terms**, and one step
+    /// further than the bosses were: they get a body box of their own size, drawn as a
+    /// neutral placeholder by [`crate::player::mobs`], so the server placing one costs this
+    /// build a plain box rather than the session.
     fn from_wire(value: fb::MobKind) -> Option<Self> {
         match value {
             fb::MobKind::Draugr => Some(Self::Draugr),
@@ -528,6 +540,8 @@ impl MobKind {
             fb::MobKind::Horse => Some(Self::Horse),
             fb::MobKind::VargrGuardian => Some(Self::VargrGuardian),
             fb::MobKind::DraugrKing => Some(Self::DraugrKing),
+            fb::MobKind::CaveSpider => Some(Self::CaveSpider),
+            fb::MobKind::Scorpion => Some(Self::Scorpion),
             _ => None,
         }
     }
@@ -1494,6 +1508,9 @@ pub enum RefusedAction {
     /// V44. An inventory move the server would not apply; nothing moved. The
     /// answering surface is the inventory window (#1238).
     MoveInventory,
+    /// V46. A lever or rune stone use that moved nothing; the blocks in view are still
+    /// the complete answer.
+    UseMechanism,
 }
 
 impl RefusedAction {
@@ -1523,6 +1540,7 @@ impl RefusedAction {
             fb::RefusedAction::CrossPortal => Self::CrossPortal,
             fb::RefusedAction::Energy => Self::Energy,
             fb::RefusedAction::MoveInventory => Self::MoveInventory,
+            fb::RefusedAction::UseMechanism => Self::UseMechanism,
             _ => Self::Unknown,
         }
     }
@@ -1607,6 +1625,10 @@ pub enum RefusalReason {
     NotEnoughEnergy,
     /// V44. A two-handed weapon and an off-hand item cannot be worn together.
     HandsOccupied,
+    /// V46. The named cell holds nothing a player may use.
+    NotAMechanism,
+    /// V46. The named mechanism belongs to a sealed or already-solved puzzle.
+    MechanismLocked,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1674,6 +1696,8 @@ impl RefusalReason {
             fb::RefusalReason::EntryOfferUnknown => Self::EntryOfferUnknown,
             fb::RefusalReason::NotEnoughEnergy => Self::NotEnoughEnergy,
             fb::RefusalReason::HandsOccupied => Self::HandsOccupied,
+            fb::RefusalReason::NotAMechanism => Self::NotAMechanism,
+            fb::RefusalReason::MechanismLocked => Self::MechanismLocked,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1751,6 +1775,20 @@ pub struct BlockRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawRequest {
     pub active: bool,
+    pub client_tick: u32,
+}
+
+/// A lever pulled or a rune stone touched: the block cell and nothing else.
+///
+/// **No mechanism kind, no desired state and no outcome.** Whether the cell holds a
+/// mechanism, whether the player may reach it and whether its puzzle is sealed are the
+/// server's. A mechanism that moves is answered by the `BlockUpdate`s that follow; one that
+/// does not is answered by an [`ActionRefused`] naming [`RefusedAction::UseMechanism`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MechanismUseRequest {
+    /// The mechanism's block cell, in world coordinates.
+    pub pos: BlockCoord,
+    /// The client's own tick counter, for ordering and staleness only.
     pub client_tick: u32,
 }
 
@@ -5340,7 +5378,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::PortalRequest
         | fb::Payload::InstanceEntryAnswer
         | fb::Payload::BlockRequest
-        | fb::Payload::DrawRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::DrawRequest
+        | fb::Payload::MechanismUseRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
         // and the ward boundary is its own issue. Validating at the decode boundary is
@@ -7959,6 +7998,28 @@ pub fn encode_draw_request(request: &DrawRequest) -> Vec<u8> {
     table.add_client_tick(request.client_tick);
     let payload = table.finish();
     finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value())
+}
+
+/// Builds one mechanism use. The cell is always written: [`MechanismUseRequest::pos`] is
+/// not optional, so the absent cell the server refuses is unrepresentable here.
+// V46 establishes this outbound contract before a lever or rune stone exists to aim at;
+// the dungeon mechanisms issue wires the input that sends it.
+#[allow(dead_code)]
+pub fn encode_mechanism_use_request(request: &MechanismUseRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let mut table = fb::MechanismUseRequestBuilder::new(&mut builder);
+    table.add_pos(&fb::BlockCoord::new(
+        request.pos.x,
+        request.pos.y,
+        request.pos.z,
+    ));
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+    finish_envelope(
+        builder,
+        fb::Payload::MechanismUseRequest,
+        payload.as_union_value(),
+    )
 }
 
 /// Builds one craft intent.
@@ -10826,7 +10887,10 @@ mod tests {
         // would have every swing dropped if that version bump were omitted.
         // V45 activates solid castle furnishings; V44 peers must be refused because
         // they can decode descriptors without rendering the authoritative obstacles.
-        assert_eq!(fb::ProtocolVersion::Current.0, 45);
+        // V46 appends `MobKind::CaveSpider` and `MobKind::Scorpion`, which `MobState.kind`
+        // refuses when it cannot name them, and `MechanismUseRequest`, which a V45 server
+        // cannot name.
+        assert_eq!(fb::ProtocolVersion::Current.0, 46);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -10900,6 +10964,7 @@ mod tests {
             (fb::Payload::InstanceBindings, 70),
             (fb::Payload::EncounterTimeline, 71),
             (fb::Payload::DrawRequest, 72),
+            (fb::Payload::MechanismUseRequest, 73),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -10915,7 +10980,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            73,
+            74,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -10945,7 +11010,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 73] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 74] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -11040,6 +11105,8 @@ mod tests {
         (fb::Payload::EncounterTimeline, Handling::Consumed),
         // V44's bow draw travels client -> server only.
         (fb::Payload::DrawRequest, Handling::ClientOnly),
+        // V46's mechanism use travels client -> server only.
+        (fb::Payload::MechanismUseRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -13032,6 +13099,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::CrossPortal.0, 21);
         assert_eq!(fb::RefusedAction::Energy.0, 22);
         assert_eq!(fb::RefusedAction::MoveInventory.0, 23);
+        assert_eq!(fb::RefusedAction::UseMechanism.0, 24);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -13042,7 +13110,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            24,
+            25,
             "a removal is refused in silence by design"
         );
 
@@ -13113,6 +13181,10 @@ mod tests {
             // V44's one, appended inside the low group: the player's own equipment
             // answered a legal move no, and taking one item off is what they can do.
             (fb::RefusalReason::HandsOccupied, 54),
+            // V46's two, appended inside the low group: a mechanism request is well formed
+            // whatever cell it names, and both answers are about the world.
+            (fb::RefusalReason::NotAMechanism, 55),
+            (fb::RefusalReason::MechanismLocked, 56),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -13122,7 +13194,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            59,
+            61,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -13201,6 +13273,9 @@ mod tests {
         // creature where the server said another and no compiler would object.
         assert_eq!(fb::MobKind::VargrGuardian.0, 6);
         assert_eq!(fb::MobKind::DraugrKing.0, 7);
+        // V46's descent species, appended after DraugrKing on the same terms.
+        assert_eq!(fb::MobKind::CaveSpider.0, 8);
+        assert_eq!(fb::MobKind::Scorpion.0, 9);
 
         assert_eq!(fb::MobAction::Unknown.0, 0);
         assert_eq!(fb::MobAction::Idle.0, 1);
@@ -13425,9 +13500,18 @@ mod tests {
             MobKind::from_wire(fb::MobKind::DraugrKing),
             Some(MobKind::DraugrKing)
         );
-        // One past the contract, which is 8 since V34. The literal moves with the enum;
+        // V46's pair is accepted and drawn as placeholder boxes of their own size.
+        assert_eq!(
+            MobKind::from_wire(fb::MobKind::CaveSpider),
+            Some(MobKind::CaveSpider)
+        );
+        assert_eq!(
+            MobKind::from_wire(fb::MobKind::Scorpion),
+            Some(MobKind::Scorpion)
+        );
+        // One past the contract, which is 10 since V46. The literal moves with the enum;
         // what this pins is that the door behind the newest member is still shut.
-        assert_eq!(MobKind::from_wire(fb::MobKind(8)), None);
+        assert_eq!(MobKind::from_wire(fb::MobKind(10)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);
@@ -16362,6 +16446,69 @@ mod tests {
             !RefusalReason::HandsOccupied.is_client_defect(),
             "a two-handed conflict is the world saying no, not a defect in this build"
         );
+    }
+
+    #[test]
+    fn v46_mechanism_use_request_carries_only_the_cell_and_is_never_read_by_a_client() {
+        let frame = encode_mechanism_use_request(&MechanismUseRequest {
+            pos: BlockCoord {
+                x: i32::MIN,
+                y: -64,
+                z: i32::MAX,
+            },
+            client_tick: u32::MAX,
+        });
+        let envelope = fb::root_as_envelope(&frame).expect("the frame verifies");
+        assert_eq!(envelope.payload_type(), fb::Payload::MechanismUseRequest);
+        let request = envelope
+            .payload_as_mechanism_use_request()
+            .expect("the payload is a mechanism use");
+        let pos = request.pos().expect("the cell is always written");
+        assert_eq!((pos.x(), pos.y(), pos.z()), (i32::MIN, -64, i32::MAX));
+        assert_eq!(request.client_tick(), u32::MAX);
+        // Client -> server only: a server that sent one is refused as out of direction.
+        assert_eq!(
+            decode(&frame),
+            Ok(Message::ClientOnly("MechanismUseRequest"))
+        );
+    }
+
+    #[test]
+    fn v46_mechanism_refusals_decode_to_their_own_names_with_their_cell() {
+        for (wire, reason) in [
+            (
+                fb::RefusalReason::NotAMechanism,
+                RefusalReason::NotAMechanism,
+            ),
+            (
+                fb::RefusalReason::MechanismLocked,
+                RefusalReason::MechanismLocked,
+            ),
+            (fb::RefusalReason::OutOfReach, RefusalReason::OutOfReach),
+            (fb::RefusalReason::PlayerIsDead, RefusalReason::PlayerIsDead),
+        ] {
+            let mut builder = FlatBufferBuilder::new();
+            let mut table = fb::ActionRefusedBuilder::new(&mut builder);
+            table.add_action(fb::RefusedAction::UseMechanism);
+            table.add_reason(wire);
+            table.add_anchor(&fb::BlockCoord::new(3, -2, 1));
+            let payload = table.finish();
+            let frame = finish_envelope(
+                builder,
+                fb::Payload::ActionRefused,
+                payload.as_union_value(),
+            );
+            let Ok(Message::ActionRefused(refused)) = decode(&frame) else {
+                panic!("{wire:?} did not decode as a refusal");
+            };
+            assert_eq!(refused.action, RefusedAction::UseMechanism);
+            assert_eq!(refused.reason, reason);
+            assert_eq!(refused.anchor, Some(BlockCoord { x: 3, y: -2, z: 1 }));
+            assert!(
+                !reason.is_client_defect(),
+                "{reason:?} is the world saying no, not a defect in this build"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

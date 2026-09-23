@@ -184,6 +184,15 @@ const (
 	/// A two-handed weapon and an off-hand item cannot be worn together. Paired with
 	/// `RefusedAction.MoveInventory`. The player can take off one of them.
 	RefusalReasonHandsOccupied RefusalReason = 54
+	/// The named cell holds no lever, rune stone or other block a player may use. Paired
+	/// with `RefusedAction.UseMechanism`. An ordinary answer rather than a defect: the
+	/// block may have changed between the click and its arrival.
+	RefusalReasonNotAMechanism RefusalReason = 55
+	/// The named mechanism belongs to a puzzle that is sealed or already solved, and does
+	/// not move. Paired with `RefusedAction.UseMechanism`. Named for mechanisms rather
+	/// than plain `Locked`, because this enum is shared by every action and a bare word
+	/// would read as an answer about doors, chests or accounts.
+	RefusalReasonMechanismLocked RefusalReason = 56
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -254,6 +263,8 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonEntryOfferUnknown:           "EntryOfferUnknown",
 	RefusalReasonNotEnoughEnergy:             "NotEnoughEnergy",
 	RefusalReasonHandsOccupied:               "HandsOccupied",
+	RefusalReasonNotAMechanism:               "NotAMechanism",
+	RefusalReasonMechanismLocked:             "MechanismLocked",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -316,6 +327,8 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"EntryOfferUnknown":           RefusalReasonEntryOfferUnknown,
 	"NotEnoughEnergy":             RefusalReasonNotEnoughEnergy,
 	"HandsOccupied":               RefusalReasonHandsOccupied,
+	"NotAMechanism":               RefusalReasonNotAMechanism,
+	"MechanismLocked":             RefusalReasonMechanismLocked,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,

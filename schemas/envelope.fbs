@@ -320,7 +320,18 @@ union Payload {
   //    The same version also carries `AttackRequest.slot`'s new meaning. The draw's
   //    answer is `PlayerVitals.draw_progress`, a field rather than a union member. See
   //    `player.fbs` and `ProtocolVersion` in `common.fbs`.
-  DrawRequest             // 72  client -> server
+  DrawRequest,            // 72  client -> server
+
+  // -- V46. Appended, so the tags of 1..72 are untouched.
+  //
+  //    `MechanismUseRequest` carries the bump, on the rule this file has stated since V8:
+  //    it travels client -> server, a V45 server cannot name the tag, and direction being
+  //    a protocol rule means that server closes the session rather than dropping the
+  //    frame. There is no answering union member: a mechanism that moves is blocks
+  //    changing, which is `BlockUpdate`, and one that does not is `ActionRefused`. The
+  //    same version carries `MobKind.CaveSpider` and `MobKind.Scorpion`. See `player.fbs`
+  //    and `ProtocolVersion` in `common.fbs`.
+  MechanismUseRequest     // 73  client -> server
 }
 
 table Envelope {

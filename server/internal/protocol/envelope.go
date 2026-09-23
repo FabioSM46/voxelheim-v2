@@ -212,6 +212,7 @@ type Message struct {
 	Attack             *AttackRequest
 	Block              *BlockRequest
 	Draw               *DrawRequest
+	MechanismUse       *MechanismUseRequest
 	PlaceStructure     *PlaceStructureRequest
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
@@ -743,6 +744,26 @@ type BlockRequest struct {
 // charge from its own ticks. ClientTick is ordering and staleness only, never a clock.
 type DrawRequest struct {
 	Active     bool
+	ClientTick uint32
+}
+
+// MechanismUseRequest is one decoded attempt to pull a lever or touch a rune stone.
+// **Intent, never outcome.**
+//
+// It names a block cell and nothing else: whether that cell holds a mechanism, whether the
+// player is alive and within reach, and whether its puzzle is sealed or solved are all the
+// simulation's to decide. A mechanism that moves is answered by the BlockUpdates that
+// follow; one that does not is answered by ActionRefused with RefusedAction.UseMechanism.
+type MechanismUseRequest struct {
+	// Pos is the target voxel in world block coordinates, and HasPos says whether the
+	// client sent one at all. The flag is the requirement BlockEditRequest.HasPos records:
+	// an absent struct field decodes as null, and the world origin it would otherwise
+	// become is a real cell nobody named.
+	Pos    [3]int32
+	HasPos bool
+
+	// ClientTick is ordering and staleness only, exactly as in PlayerInput, and never
+	// read as a clock.
 	ClientTick uint32
 }
 
@@ -1706,6 +1727,23 @@ func Decode(frame []byte) (msg Message, err error) {
 			Active:     request.Active(),
 			ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadMechanismUseRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.MechanismUseRequest
+		request.Init(table.Bytes, table.Pos)
+
+		use := &MechanismUseRequest{ClientTick: request.ClientTick()}
+		// Same discipline as PlaceStructureRequest.Anchor: the accessor is a view over bytes
+		// a client chose, it returns nil for an absent struct field, and it must not escape
+		// this function either way. An absent cell is copied as absent, never as the origin.
+		if pos := request.Pos(nil); pos != nil {
+			use.Pos, use.HasPos = [3]int32{pos.X(), pos.Y(), pos.Z()}, true
+		}
+		msg.MechanismUse = use
 
 	case vnet.PayloadPlaceStructureRequest:
 		table, tErr := unionPayload(env, msg.Kind)
@@ -3299,6 +3337,22 @@ func EncodeDrawRequest(r DrawRequest) []byte {
 	request := vnet.DrawRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadDrawRequest, request)
+}
+
+// EncodeMechanismUseRequest builds one mechanism use. The server never sends one; it exists
+// so tests can hand the session the bytes a client would. HasPos is honoured rather than
+// assumed, because a request with no cell is an input the server has to be able to refuse.
+func EncodeMechanismUseRequest(r MechanismUseRequest) []byte {
+	b := flatbuffers.NewBuilder(64)
+
+	vnet.MechanismUseRequestStart(b)
+	if r.HasPos {
+		vnet.MechanismUseRequestAddPos(b, vnet.CreateBlockCoord(b, r.Pos[0], r.Pos[1], r.Pos[2]))
+	}
+	vnet.MechanismUseRequestAddClientTick(b, r.ClientTick)
+	request := vnet.MechanismUseRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadMechanismUseRequest, request)
 }
 
 // EncodePlaceStructureRequest builds one placement intent. The server never sends one,

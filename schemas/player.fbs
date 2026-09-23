@@ -192,6 +192,52 @@ table DrawRequest {
   client_tick: uint;
 }
 
+/// A player pulling a lever or touching a rune stone. Client -> server, and intent only.
+///
+/// **It names a block cell and nothing else.** Whether that cell holds a mechanism,
+/// whether the player is alive and within reach of it, and whether the puzzle it belongs
+/// to is sealed or already solved are all read from state the server owns. The request
+/// carries no mechanism kind, no desired state and no outcome: a client that could say
+/// "this lever is now down" would be stating the world, which `schemas/AGENTS.md` rule 4
+/// forbids. It is the same shape `BlockEditRequest` has — a voxel in world coordinates,
+/// as a `BlockCoord` — because a mechanism is a block and every block cell on this wire
+/// is addressed that way.
+///
+/// **Mechanism state is not a message of its own, and never will be.** A lever that
+/// flips, a rune that lights and a door that opens are blocks changing, and a block
+/// changing reaches every session that can see it as the existing `BlockUpdate` — the
+/// shape `world.fbs` already reserves for "whatever the world later grows that moves
+/// blocks on its own". So a use that succeeds is answered by the `BlockUpdate`s that
+/// follow, and nothing else; there is no acknowledgement payload, and a client must
+/// never treat its own request as applied.
+///
+/// **A use that is refused is answered**, through `ActionRefused` with
+/// `RefusedAction.UseMechanism`: the reason is one of `OutOfReach`, `PlayerIsDead`,
+/// `NotAMechanism` or `MechanismLocked`, and `anchor` echoes `pos` when it was present.
+/// A lever that does nothing when pulled is indistinguishable from a click that missed,
+/// which is the case `ActionRefused` exists to end. None of those reasons says anything
+/// about another player's state that the asking player cannot already see: whether a
+/// block is a mechanism, and whether its puzzle is solved, are both facts about blocks
+/// in view.
+///
+/// Appended in V46; a V45 server cannot name the tag and closes the session, which is
+/// part of why the version moved.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `pos` is a struct field, so an absent one decodes as null (Go) / `None` (Rust).
+///     The origin is a real cell, so a missing coordinate is refused rather than read as
+///     (0, 0, 0)
+///   - `pos` is unbounded on the wire and bounded by the simulation: reach is measured
+///     against the position the server computed, never one the client states
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table MechanismUseRequest {
+  /// The block cell of the lever or rune stone, in world coordinates.
+  pos: BlockCoord;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
 /// Which recipe a `CraftRequest` names.
 ///
 /// The wire carries the recipe's *identity*; what it costs and what it produces is the
@@ -999,7 +1045,13 @@ enum RefusedAction : ubyte {
 
   /// An `InventoryMoveRequest` the server would not apply. Nothing moved, and the
   /// inventory the player already holds is still the complete answer.
-  MoveInventory = 23
+  MoveInventory = 23,
+
+  // -- V46. Appended so every shipped action keeps its number.
+
+  /// A `MechanismUseRequest` that moved nothing. No lever flipped and no rune lit; the
+  /// blocks the player can see are still the complete answer.
+  UseMechanism = 24
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1232,6 +1284,21 @@ enum RefusalReason : ubyte {
   /// A two-handed weapon and an off-hand item cannot be worn together. Paired with
   /// `RefusedAction.MoveInventory`. The player can take off one of them.
   HandsOccupied = 54,
+
+  // -- V46. Appended inside the low group: a mechanism request is well formed whatever
+  //    cell it names, and both answers are about the world rather than the build.
+  //    Reach and death reuse `OutOfReach` and `PlayerIsDead`, which already say it.
+
+  /// The named cell holds no lever, rune stone or other block a player may use. Paired
+  /// with `RefusedAction.UseMechanism`. An ordinary answer rather than a defect: the
+  /// block may have changed between the click and its arrival.
+  NotAMechanism = 55,
+
+  /// The named mechanism belongs to a puzzle that is sealed or already solved, and does
+  /// not move. Paired with `RefusedAction.UseMechanism`. Named for mechanisms rather
+  /// than plain `Locked`, because this enum is shared by every action and a bare word
+  /// would read as an answer about doors, chests or accounts.
+  MechanismLocked = 56,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -1489,7 +1556,31 @@ enum MobKind : ubyte {
   /// Appended, never inserted, and it rides the same V34 bump as the member above —
   /// one bump for the pair, because a receiver that can name one boss and not the
   /// other is a receiver that ends the session halfway through the dungeon.
-  DraugrKing = 7
+  DraugrKing = 7,
+
+  /// A cave spider: the swarming creature of the descent's dark cave, met in numbers
+  /// rather than alone. A species of its own and not a small `Vargr` — the wire says
+  /// which creature the server placed, and a receiver that drew a spider as a wolf
+  /// would draw the wrong body, play the wrong voice and price the wrong fight.
+  ///
+  /// Appended rather than inserted, for the reason every member above is: a
+  /// renumbering would draw one creature where the server said another, and no
+  /// compiler would object.
+  ///
+  /// It moves `ProtocolVersion.Current`, and the argument is `VargrGuardian`'s
+  /// verbatim: `MobState.kind` is **refused** when it names a member the receiver
+  /// cannot speak, never dropped, so a V45 client meeting one would end the session
+  /// rather than the value. See `common.fbs`, where V46 is written out.
+  CaveSpider = 8,
+
+  /// A scorpion: the creature buried in the descent's sand zone. A different species
+  /// from `CaveSpider` on the same terms the two bosses are different species from
+  /// their field kin — what crosses the wire is which creature the server placed.
+  ///
+  /// Appended, never inserted, and it rides the same V46 bump as the member above —
+  /// one bump for the pair, because a receiver that can name the cave's creature and
+  /// not the sand's is a receiver that ends the session one zone further down.
+  Scorpion = 9
 }
 
 /// Which learned horse a request, snapshot or stable item names.

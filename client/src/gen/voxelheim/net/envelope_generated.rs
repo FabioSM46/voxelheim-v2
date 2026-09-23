@@ -1148,6 +1148,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_mechanism_use_request(&self) -> Option<MechanismUseRequest<'a>> {
+        if self.payload_type() == Payload::MechanismUseRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MechanismUseRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1231,6 +1246,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::InstanceBindings => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceBindings>>("Payload::InstanceBindings", pos),
           Payload::EncounterTimeline => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<EncounterTimeline>>("Payload::EncounterTimeline", pos),
           Payload::DrawRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DrawRequest>>("Payload::DrawRequest", pos),
+          Payload::MechanismUseRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MechanismUseRequest>>("Payload::MechanismUseRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -2004,6 +2020,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::DrawRequest => {
                 if let Some(x) = self.payload_as_draw_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MechanismUseRequest => {
+                if let Some(x) = self.payload_as_mechanism_use_request() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

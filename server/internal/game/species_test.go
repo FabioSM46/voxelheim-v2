@@ -206,8 +206,10 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 // they turn out to need, which is not this one.
 //
 // Horse is the same staged-contract exception: #705 reserves the wire member while the
-// dependent authoritative issue owns its registry row. The guard remains exact — these
-// two named members and no wildcard.
+// dependent authoritative issue owns its registry row. CaveSpider and Scorpion are the
+// same exception again: #1287 puts them on the wire for the first dungeon descent, and
+// their stats, behaviour and loot belong to the later issues that place them. The guard
+// remains exact — these four named members and no wildcard.
 func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 	t.Parallel()
 
@@ -218,7 +220,7 @@ func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 			if registered {
 				t.Error("MobKind.Unknown is registered, and it is the value an absent field decodes to")
 			}
-		case vnet.MobKindVillager, vnet.MobKindHorse:
+		case vnet.MobKindVillager, vnet.MobKindHorse, vnet.MobKindCaveSpider, vnet.MobKindScorpion:
 			if registered {
 				t.Errorf("%s has a director row before its authoritative producer owns one", kind)
 			}

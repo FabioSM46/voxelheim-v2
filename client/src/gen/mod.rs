@@ -134,6 +134,8 @@ pub mod voxelheim {
         pub use self::block_request_generated::*;
         mod draw_request_generated;
         pub use self::draw_request_generated::*;
+        mod mechanism_use_request_generated;
+        pub use self::mechanism_use_request_generated::*;
         mod craft_request_generated;
         pub use self::craft_request_generated::*;
         mod repair_request_generated;

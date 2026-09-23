@@ -59,6 +59,28 @@ const (
 	/// one bump for the pair, because a receiver that can name one boss and not the
 	/// other is a receiver that ends the session halfway through the dungeon.
 	MobKindDraugrKing MobKind = 7
+	/// A cave spider: the swarming creature of the descent's dark cave, met in numbers
+	/// rather than alone. A species of its own and not a small `Vargr` — the wire says
+	/// which creature the server placed, and a receiver that drew a spider as a wolf
+	/// would draw the wrong body, play the wrong voice and price the wrong fight.
+	///
+	/// Appended rather than inserted, for the reason every member above is: a
+	/// renumbering would draw one creature where the server said another, and no
+	/// compiler would object.
+	///
+	/// It moves `ProtocolVersion.Current`, and the argument is `VargrGuardian`'s
+	/// verbatim: `MobState.kind` is **refused** when it names a member the receiver
+	/// cannot speak, never dropped, so a V45 client meeting one would end the session
+	/// rather than the value. See `common.fbs`, where V46 is written out.
+	MobKindCaveSpider MobKind = 8
+	/// A scorpion: the creature buried in the descent's sand zone. A different species
+	/// from `CaveSpider` on the same terms the two bosses are different species from
+	/// their field kin — what crosses the wire is which creature the server placed.
+	///
+	/// Appended, never inserted, and it rides the same V46 bump as the member above —
+	/// one bump for the pair, because a receiver that can name the cave's creature and
+	/// not the sand's is a receiver that ends the session one zone further down.
+	MobKindScorpion MobKind = 9
 )
 
 var EnumNamesMobKind = map[MobKind]string{
@@ -70,6 +92,8 @@ var EnumNamesMobKind = map[MobKind]string{
 	MobKindHorse:         "Horse",
 	MobKindVargrGuardian: "VargrGuardian",
 	MobKindDraugrKing:    "DraugrKing",
+	MobKindCaveSpider:    "CaveSpider",
+	MobKindScorpion:      "Scorpion",
 }
 
 var EnumValuesMobKind = map[string]MobKind{
@@ -81,6 +105,8 @@ var EnumValuesMobKind = map[string]MobKind{
 	"Horse":         MobKindHorse,
 	"VargrGuardian": MobKindVargrGuardian,
 	"DraugrKing":    MobKindDraugrKing,
+	"CaveSpider":    MobKindCaveSpider,
+	"Scorpion":      MobKindScorpion,
 }
 
 func (v MobKind) String() string {

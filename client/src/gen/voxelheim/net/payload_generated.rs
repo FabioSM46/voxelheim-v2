@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 72;
+pub const ENUM_MAX_PAYLOAD: u8 = 73;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 73] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 74] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -91,6 +91,7 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 73] = [
     Payload::InstanceBindings,
     Payload::EncounterTimeline,
     Payload::DrawRequest,
+    Payload::MechanismUseRequest,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -190,9 +191,10 @@ impl Payload {
     pub const InstanceBindings: Self = Self(70);
     pub const EncounterTimeline: Self = Self(71);
     pub const DrawRequest: Self = Self(72);
+    pub const MechanismUseRequest: Self = Self(73);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 72;
+    pub const ENUM_MAX: u8 = 73;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -267,6 +269,7 @@ impl Payload {
         Self::InstanceBindings,
         Self::EncounterTimeline,
         Self::DrawRequest,
+        Self::MechanismUseRequest,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -344,6 +347,7 @@ impl Payload {
             Self::InstanceBindings => Some("InstanceBindings"),
             Self::EncounterTimeline => Some("EncounterTimeline"),
             Self::DrawRequest => Some("DrawRequest"),
+            Self::MechanismUseRequest => Some("MechanismUseRequest"),
             _ => None,
         }
     }
