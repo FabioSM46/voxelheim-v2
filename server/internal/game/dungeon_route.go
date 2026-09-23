@@ -60,7 +60,7 @@ type DungeonRoute struct {
 	// party — and its progress is the checkpoint past it.
 	SolvedPuzzles []uint8
 	// ClearedGroups is every minor-spawn group whose creatures are all dead; for the
-	// cave's burrows, once all three spider waves have come out and died.
+	// cave's burrows, once every spider wave has come out and died.
 	ClearedGroups []uint8
 }
 

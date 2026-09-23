@@ -145,7 +145,7 @@ func TestAWipeResetsOnlyTheZoneThePartyFellIn(t *testing.T) {
 		if s.mobs[old.entityID] != nil || fresh == nil || id == old.entityID {
 			t.Fatalf("survivor %d kept its identity through the wipe", i)
 		}
-		if fresh.health != fresh.species().maxHealth || fresh.leash == nil || fresh.leash.zone != desc.zones[0] {
+		if !fresh.tiered || fresh.health != fresh.maxHealth() || fresh.leash == nil || fresh.leash.zone != desc.zones[0] {
 			t.Fatalf("survivor %d came back hurt or unleashed: %+v", i, fresh)
 		}
 	}
@@ -194,5 +194,26 @@ func TestAnEmptyDungeonIsNotAWipe(t *testing.T) {
 	m.health = 1
 	if s.advanceDungeonDescentLocked(2, nil) || s.mobs[m.entityID] != m || m.health != 1 {
 		t.Fatal("an empty instance reset a creature")
+	}
+}
+
+// A wipe deep into the siege puts all twelve waves back, not just the three it once had.
+func TestAWipeMidSiegeRestartsEveryWave(t *testing.T) {
+	s := newWavesSim(t, 2)
+	cave := triggerCentre(t, s, world.CaveTrigger)
+	party := partyAt(4, cave)
+	w := &s.dungeon.descent.waves
+	for tick := uint64(1); w.next < 7; tick++ {
+		released := len(s.dungeon.descent.groups[world.CaveBurrowGroup])
+		s.advanceDungeonDescentLocked(tick, party)
+		for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup][released:] {
+			m := s.mobs[id]
+			s.damageMobLocked(m, m.health)
+		}
+	}
+	killAll(party)
+	s.advanceDungeonDescentLocked(100000, party)
+	if w.started || w.next != 0 || s.dungeonTriggerFiredLocked(world.CaveTrigger) || s.dungeonGroupClearedLocked(world.CaveBurrowGroup) {
+		t.Fatalf("a wipe after seven waves left the siege at %+v", w)
 	}
 }

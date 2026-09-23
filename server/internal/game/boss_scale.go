@@ -123,11 +123,15 @@ func (s *Sim) bossScaleLevelsLocked() []uint16 {
 	return levels
 }
 
-// maxHealth is this creature's health ceiling: the pull's scale once a boss is engaged, and
+// maxHealth is this creature's health ceiling: the pull's scale once a boss is engaged, the
+// dungeon's tier over the row for a creature the dungeon placed (dungeon_balance.go), and
 // the registry row before that and for every other species.
 func (m *mob) maxHealth() uint16 {
 	if m.encounter != nil && m.encounter.scale.maxHealth != 0 {
 		return m.encounter.scale.maxHealth
+	}
+	if m.tiered {
+		return m.species().maxHealth * dungeonHealthTier
 	}
 	return m.species().maxHealth
 }

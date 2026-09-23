@@ -78,7 +78,7 @@ func (s *Sim) resetGroupLocked(group int) bool {
 		if !known {
 			continue
 		}
-		fresh, made := s.placeMinorMobLocked(m.kind, anchorStanding(home), desc.zones[group], species.buried)
+		fresh, made := s.placeTieredMinorLocked(m.kind, anchorStanding(home), desc.zones[group], species.buried)
 		if !made {
 			s.log.Error("could not reset a dungeon creature after a wipe", "kind", m.kind, "group", group)
 			continue
