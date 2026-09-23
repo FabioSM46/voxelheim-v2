@@ -14,9 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RATE: u32 = 8000;
+pub(in super::super) const RATE: u32 = 8000;
 
-fn baked(sound: &Sound, seconds: f32) -> Vec<f32> {
+pub(in super::super) fn baked(sound: &Sound, seconds: f32) -> Vec<f32> {
     sound
         .bake(seconds, RATE, 19)
         .expect("a spider sound bakes")
@@ -26,7 +26,7 @@ fn baked(sound: &Sound, seconds: f32) -> Vec<f32> {
 
 /// Energy per DFT bin between `low` and `high` hertz, by Goertzel's recurrence — the
 /// measurement `water_audio::sounds` reads a splash with.
-fn band_power(samples: &[f32], low: f32, high: f32) -> Vec<f64> {
+pub(in super::super) fn band_power(samples: &[f32], low: f32, high: f32) -> Vec<f64> {
     let n = samples.len();
     let bin = |hz: f32| (hz * n as f32 / RATE as f32).round() as usize;
     (bin(low)..bin(high).min(n / 2))
@@ -45,7 +45,7 @@ fn band_power(samples: &[f32], low: f32, high: f32) -> Vec<f64> {
 
 /// Spectral flatness from 300 Hz to 3.6 kHz: the geometric mean of the power spectrum over
 /// its arithmetic mean. Near one for noise, near zero for a note.
-fn flatness(samples: &[f32]) -> f64 {
+pub(in super::super) fn flatness(samples: &[f32]) -> f64 {
     let power = band_power(samples, 300.0, 3600.0);
     let mean = power.iter().sum::<f64>() / power.len() as f64;
     let log = power.iter().map(|p| (p + mean * 1e-12).ln()).sum::<f64>() / power.len() as f64;
@@ -55,7 +55,7 @@ fn flatness(samples: &[f32]) -> f64 {
 /// The negative control: the same description with every noise layer replaced by a clean
 /// sine at its filter's centre and every gate removed — the same layers, envelopes and
 /// frequencies as pure tones. It must fail the measurement the real sound passes.
-fn pure_tones(sound: Sound) -> Sound {
+pub(in super::super) fn pure_tones(sound: Sound) -> Sound {
     let layers = sound
         .layers
         .into_iter()
@@ -84,12 +84,12 @@ fn pure_tones(sound: Sound) -> Sound {
     Sound { layers }
 }
 
-fn energy(samples: &[f32]) -> f64 {
+pub(in super::super) fn energy(samples: &[f32]) -> f64 {
     samples.iter().map(|x| f64::from(*x).powi(2)).sum()
 }
 
 /// Separate ticks: how many times the level jumps up out of near-silence.
-fn onsets(samples: &[f32]) -> usize {
+pub(in super::super) fn onsets(samples: &[f32]) -> usize {
     let window = (RATE / 1000) as usize;
     let levels: Vec<f32> = samples
         .chunks(window)
@@ -258,7 +258,7 @@ fn a_spider_hisses_on_notice_and_bites_on_the_lunge_but_not_on_the_windup() {
     );
 }
 
-struct Buffer(Vec<f32>);
+pub(in super::super) struct Buffer(pub(in super::super) Vec<f32>);
 impl Sink for Buffer {
     fn block(&mut self) -> &mut [f32] {
         &mut self.0
@@ -267,7 +267,7 @@ impl Sink for Buffer {
 
 /// The production rig and the production audio together: spiders run through the real
 /// snapshot consumer, their drawn legs stamp steps, and the combat audio hears them.
-fn horde_app() -> (App, Arc<Mixer>) {
+pub(in super::super) fn horde_app() -> (App, Arc<Mixer>) {
     let mixer = Arc::new(Mixer::new());
     mixer.set_format(RATE, 2);
     let mut app = App::new();
@@ -311,6 +311,12 @@ fn run(count: u64) -> (usize, usize, Vec<Cue>, f32) {
     let (mut app, mixer) = horde_app();
     let (mut peak, mut legs, mut cues, mut heard) = (0, 0, Vec::new(), 0.0f32);
     for frame in 0..200u32 {
+        // Paced in real time. The renderer interpolates the drawn spiders at the wall clock
+        // (`Instant::now()`), so an unpaced loop — two hundred frames in a fraction of a second —
+        // draws them covering however much ground the host's speed allowed, and the step count
+        // this test measures becomes a measurement of the machine. At 10 ms a frame the drawn
+        // run is the 5.0 blocks a second the snapshots describe.
+        let started_at = Instant::now();
         if frame % 5 == 0 {
             let seconds = frame as f32 / 100.0;
             let mobs = (0..count)
@@ -349,6 +355,9 @@ fn run(count: u64) -> (usize, usize, Vec<Cue>, f32) {
         let mut buffer = Buffer(vec![0.0; (RATE / 100 * 2) as usize]);
         mixer.render(&mut buffer);
         heard += buffer.0.iter().map(|x| x * x).sum::<f32>();
+        if let Some(rest) = Duration::from_millis(10).checked_sub(started_at.elapsed()) {
+            std::thread::sleep(rest);
+        }
     }
     (peak, legs, cues, heard)
 }

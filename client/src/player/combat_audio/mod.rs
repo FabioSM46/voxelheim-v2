@@ -1,6 +1,8 @@
 //! Server outcomes and visible action transitions only. No input, swings or health deltas.
+mod capped;
 mod guardian;
 mod king;
+mod scorpion;
 mod sounds;
 mod spider;
 
@@ -33,6 +35,7 @@ struct CombatAudio {
     started: Vec<(u64, Cue, Vec3)>,
     guardian: guardian::State,
     spider: spider::State,
+    scorpion: scorpion::State,
     tick: Option<u32>,
     previous: HashMap<u64, (MobKind, MobAction)>,
     palette: Vec<(Cue, Baked)>,
@@ -220,6 +223,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         inputs.time.elapsed_secs(),
         &mut pending,
     );
+    state.scorpion.heard(&inputs.mobs, snapshot, &mut pending);
     // Events/transitions are consumed even without a mixer or camera. Availability later
     // is never permission to replay earlier blows or an old pursuit transition.
     let Some((mixer, eye)) = inputs.mixer.as_deref().zip(inputs.eyes.iter().next()) else {
@@ -235,6 +239,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             .chain(guardian::sounds::CUES.into_iter().map(Cue::Guardian))
             .chain(king::sounds::CUES.into_iter().map(Cue::King))
             .chain(spider::CUES.into_iter().map(Cue::Spider))
+            .chain(scorpion::CUES.into_iter().map(Cue::Scorpion))
             .filter_map(|cue| {
                 cue.describe()
                     .bake(cue.seconds(), rate, 19)
@@ -347,14 +352,17 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                 state.playing.remove(victim);
             }
         }
-        if let Cue::Spider(voice) = cue.cue {
-            match spider::admit(&state.playing, voice, cue.id) {
-                Ok(Some(victim)) => {
-                    state.playing.remove(victim);
-                }
-                Ok(None) => {}
-                Err(()) => continue,
+        let capped = match cue.cue {
+            Cue::Spider(voice) => Some(spider::admit(&state.playing, voice, cue.id)),
+            Cue::Scorpion(voice) => Some(scorpion::admit(&state.playing, voice, cue.id)),
+            _ => None,
+        };
+        match capped {
+            Some(Ok(Some(victim))) => {
+                state.playing.remove(victim);
             }
+            Some(Err(())) => continue,
+            Some(Ok(None)) | None => {}
         }
         // One claim per actual cue. No retry after refusal, including a claim which revokes
         // ambience: the existing policy discards that one-shot. Only granted sources enter

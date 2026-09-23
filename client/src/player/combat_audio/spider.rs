@@ -4,7 +4,7 @@
 //! Every cue follows something the player can see: a step the drawn rig just took, or a
 //! transition in the action the server sent. None of them says that a bite landed; the blow
 //! the server reports is the impact cue, as for every other species.
-use super::{Active, Pending, sounds::Cue as CatalogueCue};
+use super::{Active, Pending, capped, sounds::Cue as CatalogueCue};
 use crate::{
     audio::synth::{Curve, Envelope, Exciter, Filter, FilterKind, Gate, Layer, Noise, Sound, Wave},
     net::{BlowTarget, MobKind, Snapshot},
@@ -43,7 +43,7 @@ pub(in super::super) enum Cue {
 
 pub(in super::super) const CUES: [Cue; 4] = [Cue::Skitter, Cue::SkitterSwarm, Cue::Hiss, Cue::Bite];
 
-fn envelope(attack: f32, decay: f32) -> Envelope {
+pub(super) fn envelope(attack: f32, decay: f32) -> Envelope {
     Envelope {
         attack,
         decay,
@@ -53,7 +53,7 @@ fn envelope(attack: f32, decay: f32) -> Envelope {
 }
 
 /// Band-passed white noise: the texture every spider sound is made of.
-fn grit(hz: f32, q: f32, gain: f32, attack: f32, decay: f32) -> Layer {
+pub(super) fn grit(hz: f32, q: f32, gain: f32, attack: f32, decay: f32) -> Layer {
     Layer {
         exciter: Exciter::Noise(Noise::White),
         gain,
@@ -68,7 +68,7 @@ fn grit(hz: f32, q: f32, gain: f32, attack: f32, decay: f32) -> Layer {
 }
 
 /// A noise layer struck open and shut `from`–`to` times a second: one tick per opening.
-fn ticks(layer: Layer, from: f32, to: f32, seconds: f32, duty: f32) -> Layer {
+pub(super) fn ticks(layer: Layer, from: f32, to: f32, seconds: f32, duty: f32) -> Layer {
     Layer {
         gate: Some(Gate {
             from,
@@ -231,41 +231,23 @@ impl State {
 
 /// Whether a spider cue may start, and which playing spider source it replaces if one must
 /// go. `Err` refuses it. A spider plays one skitter at a time; the species plays at most
-/// [`MAX_SOURCES`], of which at most [`MAX_SKITTERS`] are legs; and a full species gives
-/// up its lowest-priority source only to something that outranks it.
+/// [`MAX_SOURCES`], of which at most [`MAX_SKITTERS`] are legs — see [`capped::admit`].
 pub(super) fn admit(playing: &[Active], cue: Cue, id: u64) -> Result<Option<usize>, ()> {
-    let spider = |active: &&Active| matches!(active.cue, CatalogueCue::Spider(_));
-    let of = |active: &Active| match active.cue {
-        CatalogueCue::Spider(cue) => Some(cue),
-        _ => None,
+    let cap = capped::Cap {
+        sources: MAX_SOURCES,
+        legs: MAX_SKITTERS,
     };
-    if cue.legs()
-        && playing
-            .iter()
-            .any(|active| active.id == id && of(active).is_some_and(Cue::legs))
-    {
-        return Err(());
-    }
-    let total = playing.iter().filter(spider).count();
-    let legs = playing
-        .iter()
-        .filter(|active| of(active).is_some_and(Cue::legs))
-        .count();
-    if total < MAX_SOURCES && !(cue.legs() && legs >= MAX_SKITTERS) {
-        return Ok(None);
-    }
-    playing
-        .iter()
-        .enumerate()
-        .filter(|(_, active)| {
-            of(active).is_some_and(|other| {
-                other.priority() < cue.priority() && (!cue.legs() || other.legs())
-            })
-        })
-        .min_by_key(|(_, active)| active.priority)
-        .map(|(index, _)| Some(index))
-        .ok_or(())
+    capped::admit(
+        playing,
+        cap,
+        (cue.priority(), cue.legs()),
+        id,
+        |active| match active.cue {
+            CatalogueCue::Spider(cue) => Some((cue.priority(), cue.legs())),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

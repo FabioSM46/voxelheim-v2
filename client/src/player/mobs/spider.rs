@@ -13,8 +13,11 @@
 //! combat audio reads to tick the legs.
 use std::f32::consts::{PI, TAU};
 
+pub(super) use super::arthropod::LEGS;
+#[cfg(test)]
+use super::arthropod::group;
+use super::arthropod::{self, BoxPart, around, bone_transform, part, side};
 use super::*;
-use crate::player::shapes::hexahedron;
 
 /// One independently posed part. Legs are numbered front to back in pairs, left before
 /// right: leg `2p` is the left leg of pair `p`, `2p + 1` the right.
@@ -31,7 +34,6 @@ pub(crate) enum Segment {
     Lower(u8),
 }
 
-pub(super) const LEGS: usize = 8;
 pub(super) const SEGMENT_COUNT: usize = 4 + 2 * LEGS;
 
 pub(super) const SEGMENTS: [Segment; SEGMENT_COUNT] = [
@@ -127,17 +129,6 @@ fn frame() -> (f32, f32) {
     (envelope.width, envelope.height)
 }
 
-/// -1 for a left leg, +1 for a right.
-fn side(leg: usize) -> f32 {
-    if leg.is_multiple_of(2) { -1.0 } else { 1.0 }
-}
-
-/// Which half of the alternating tetrapod a leg belongs to: L1, R2, L3, R4 step together,
-/// and R1, L2, R3, L4 step together half a cycle later. Four feet are always down.
-pub(super) fn group(leg: usize) -> usize {
-    (leg / 2 + leg % 2) % 2
-}
-
 pub(super) fn hip(leg: usize) -> Vec3 {
     let (w, h) = frame();
     Vec3::new(side(leg) * HIP_X * w, HIP_Y * h, HIP_Z[leg / 2] * w)
@@ -170,15 +161,7 @@ pub(super) fn lengths(leg: usize) -> (f32, f32) {
 /// for somewhere it cannot go is pointed at rather than reached, and no bone ever stretches.
 pub(super) fn knee(leg: usize, hip: Vec3, foot: Vec3) -> Vec3 {
     let (upper, lower) = lengths(leg);
-    let delta = foot - hip;
-    let reach = delta
-        .length()
-        .clamp((upper - lower).abs() + 1e-3, upper + lower - 1e-3);
-    let direction = delta.normalize_or(Vec3::new(side(leg), 0.0, 0.0));
-    let along = (upper * upper - lower * lower + reach * reach) / (2.0 * reach);
-    let rise = (upper * upper - along * along).max(0.0).sqrt();
-    let up = (Vec3::Y - direction * direction.y).normalize_or(Vec3::new(side(leg), 0.0, 0.0));
-    hip + direction * along + up * rise
+    arthropod::solve_knee(hip, foot, upper, lower, Vec3::new(side(leg), 0.0, 0.0))
 }
 
 /// Where one leg's tip sits relative to its rest, `phase` radians into the gait.
@@ -188,32 +171,12 @@ pub(super) fn knee(leg: usize, hip: Vec3, foot: Vec3) -> Vec3 {
 /// quarter stride ahead of rest. The two groups are half a cycle apart.
 pub(super) fn gait_offset(leg: usize, phase: f32) -> Vec3 {
     let (w, h) = frame();
-    let stride = STRIDE * w;
-    let shift = if group(leg) == 0 { 0.0 } else { 0.5 };
-    let u = (phase / TAU + shift).rem_euclid(1.0);
-    if u < 0.5 {
-        let t = u / 0.5;
-        Vec3::new(0.0, 0.0, -stride / 4.0 + stride / 2.0 * t)
-    } else {
-        let t = (u - 0.5) / 0.5;
-        let eased = t * t * (3.0 - 2.0 * t);
-        Vec3::new(
-            0.0,
-            LIFT * h * (PI * t).sin(),
-            stride / 4.0 - stride / 2.0 * eased,
-        )
-    }
+    arthropod::stride_offset(leg, phase, STRIDE * w, LIFT * h)
 }
 
 /// The gait phase one block of travel advances, in radians.
 pub(super) fn radians_per_block() -> f32 {
     TAU / (STRIDE * frame().0)
-}
-
-type BoxPart = (Vec3, Vec3, Color);
-
-fn part(size: [f32; 3], centre: [f32; 3], colour: Color) -> BoxPart {
-    (Vec3::from_array(size), Vec3::from_array(centre), colour)
 }
 
 /// The body parts, in the feet-centred rest frame the root stands in.
@@ -340,30 +303,7 @@ fn geometry(segment: Segment) -> Vec<BoxPart> {
 /// A leg bone along +X from its joint, tapering from `from` to `to` across, with a pale band
 /// just short of the far joint.
 fn bone(length: f32, from: f32, to: f32, band: bool) -> Mesh {
-    let (a, b) = (from / 2.0, to / 2.0);
-    // Authored along +Y, then turned so +Y becomes +X.
-    let corners = [
-        Vec3::new(-a, 0.0, a),
-        Vec3::new(a, 0.0, a),
-        Vec3::new(a, 0.0, -a),
-        Vec3::new(-a, 0.0, -a),
-        Vec3::new(-b, length, b),
-        Vec3::new(b, length, b),
-        Vec3::new(b, length, -b),
-        Vec3::new(-b, length, -b),
-    ];
-    let turn = Quat::from_rotation_z(-FRAC_PI_2);
-    let mut mesh = draugr_tint(hexahedron(corners), LEG_CHITIN).rotated_by(turn);
-    if band {
-        let size = from * 1.25;
-        let ring = draugr_box(
-            Vec3::new(length * 0.10, size, size),
-            Vec3::new(length * 0.88, 0.0, 0.0),
-            JOINT_BAND,
-        );
-        merge_all(&mut mesh, [ring], "spider leg band");
-    }
-    mesh
+    arthropod::bone(length, from, to, LEG_CHITIN, band.then_some(JOINT_BAND))
 }
 
 pub(super) fn meshes() -> Vec<(Segment, Mesh)> {
@@ -422,17 +362,8 @@ pub(super) fn visuals(
         king_parts: None,
         guardian_parts: None,
         spider_parts: Some(parts),
+        scorpion_parts: None,
     }
-}
-
-fn around(pivot: Vec3, rotation: Quat) -> Mat4 {
-    Mat4::from_translation(pivot) * Mat4::from_quat(rotation) * Mat4::from_translation(-pivot)
-}
-
-/// A bone from `from` to `to`, drawn from a mesh authored along +X.
-fn bone_transform(from: Vec3, to: Vec3) -> Transform {
-    let direction = (to - from).normalize_or(Vec3::X);
-    Transform::from_translation(from).with_rotation(Quat::from_rotation_arc(Vec3::X, direction))
 }
 
 /// Everything one frame's pose is made from.
@@ -523,28 +454,14 @@ fn curled(leg: usize) -> (Vec3, Vec3) {
     let out = (rest_foot(leg) - hip(leg))
         .with_y(0.0)
         .normalize_or(Vec3::new(side(leg), 0.0, 0.0));
-    let (raise, fold) = (1.25_f32, 0.72_f32);
-    (
-        (out * raise.cos() + Vec3::Y * raise.sin()).normalize(),
-        (-out * fold.cos() - Vec3::Y * fold.sin()).normalize(),
-    )
+    arthropod::curled(out, 1.25, 0.72)
 }
 
 /// Which leg twitches at `clock` for a spider standing still, and how far through the
 /// twitch it is. A fixed pseudo-random schedule per spider, so a crowd does not twitch in
 /// step and a test can know when one will.
 pub(super) fn twitch(clock: f32, seed: u64) -> Option<(usize, f32)> {
-    const LENGTH: f32 = 0.22;
-    let period = 1.7 + (seed % 13) as f32 * 0.1;
-    let cycle = (clock / period).floor();
-    let within = (clock - cycle * period).max(0.0);
-    if within >= LENGTH {
-        return None;
-    }
-    let mixed = (seed ^ (cycle as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-        .wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    let leg = ((mixed >> 29) % LEGS as u64) as usize;
-    Some((leg, (PI * within / LENGTH).sin()))
+    arthropod::twitch(clock, seed, LEGS)
 }
 
 /// The direction, in world space, of the wall a newly seen spider is coming out of: away

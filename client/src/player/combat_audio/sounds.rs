@@ -17,6 +17,7 @@ pub(super) enum Cue {
     Guardian(super::guardian::sounds::Cue),
     King(super::king::sounds::Cue),
     Spider(super::spider::Cue),
+    Scorpion(super::scorpion::Cue),
 }
 
 pub(super) const CUES: [Cue; 8] = [
@@ -66,7 +67,8 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         // are the telegraph — and the bite is voiced on the lunge, by [`strike`].
         (MobKind::CaveSpider, false) => Some(Cue::Spider(super::spider::Cue::Hiss)),
         (MobKind::CaveSpider, true) => None,
-        // The scorpion's placeholder has no voice yet; its own issue owns one.
+        // The scorpion's voice follows its rig rather than the bare action — the rattle has to
+        // know which of two identical windups is the sting — in `combat_audio/scorpion.rs`.
         (MobKind::Scorpion, _) => None,
     }
 }
@@ -101,6 +103,7 @@ impl Cue {
             Self::Guardian(cue) => cue.seconds(),
             Self::King(cue) => cue.seconds(),
             Self::Spider(cue) => cue.seconds(),
+            Self::Scorpion(cue) => cue.seconds(),
         }
     }
 
@@ -110,6 +113,7 @@ impl Cue {
             Self::Guardian(cue) => cue.priority(),
             Self::King(cue) => cue.priority(),
             Self::Spider(cue) => cue.priority(),
+            Self::Scorpion(cue) => cue.priority(),
             _ => 3,
         }
     }
@@ -128,6 +132,7 @@ impl Cue {
             Self::Guardian(cue) => return cue.describe(),
             Self::King(cue) => return cue.describe(),
             Self::Spider(cue) => return cue.describe(),
+            Self::Scorpion(cue) => return cue.describe(),
             _ => {}
         }
         // Sine/noise transients make impacts; rough tones are reserved for creature
@@ -141,7 +146,7 @@ impl Cue {
             Self::DraugrAttack => (103.0, 0.18, 0.42, 1800.0, Wave::Triangle),
             Self::VargrNotice => (157.0, 0.32, 0.22, 650.0, Wave::Triangle),
             Self::VargrAttack => (281.0, 0.30, 0.37, 2200.0, Wave::Triangle),
-            Self::Guardian(_) | Self::King(_) | Self::Spider(_) => {
+            Self::Guardian(_) | Self::King(_) | Self::Spider(_) | Self::Scorpion(_) => {
                 unreachable!("species catalogues return above")
             }
         };

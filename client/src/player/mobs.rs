@@ -38,11 +38,13 @@ use crate::net::{MobAction, MobKind, Session};
 
 #[cfg(test)]
 mod arena_capture;
+mod arthropod;
 mod bosses;
 mod guardian;
 mod king;
 #[cfg(test)]
 mod reduced_effects;
+mod scorpion;
 mod spider;
 
 pub(super) use king::regalia::{present as present_regalia, setup as setup_regalia};
@@ -126,10 +128,9 @@ const DRAUGR_KING_BODY: Body = Body {
 /// and 0.6 to the top of its knees. `spider.rs` reads every dimension of its rig out of
 /// this row, so a change to the server's box is this one line and nothing else.
 ///
-/// **The scorpion's leads the server rather than mirrors it.** #1287 put it on the wire
-/// before any issue gave it stats; the issue that adds its row owns the number and must
-/// move this one to match, and `the_drawn_body_is_the_box_the_server_collides` then keeps
-/// the placeholder mesh on whatever box that is.
+/// The scorpion's is mirrored the same way from the row #1291 gave it (PR #1302): 1.3 wide
+/// and 0.6 tall, a vargr's width and a half at a spider's height. `scorpion.rs` reads its
+/// rig out of this row as `spider.rs` does, and `scorpion::tests` reads the server's row.
 const CAVE_SPIDER_BODY: Body = Body {
     width: 0.9,
     height: 0.6,
@@ -335,11 +336,6 @@ const VARGR_EYE_EMISSIVE: LinearRgba = LinearRgba::rgb(7.0, 4.2, 0.15);
 const DEER_BODY_COLOUR: Color = Color::srgb(0.48, 0.30, 0.18);
 const DEER_HEAD_COLOUR: Color = Color::srgb(0.66, 0.46, 0.28);
 
-/// The neutral grey V46's scorpion placeholder is drawn in. Deliberately no species colour: a
-/// placeholder that looked finished would hide that the rig is still owed.
-const PLACEHOLDER_BODY_COLOUR: Color = Color::srgb(0.42, 0.42, 0.44);
-const PLACEHOLDER_HEAD_COLOUR: Color = Color::srgb(0.52, 0.52, 0.54);
-
 /// The red a hit flashes. Shared by every kind: an impact reads the same whatever was hit.
 const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 
@@ -374,6 +370,7 @@ struct SpeciesVisuals {
     king_parts: Option<Vec<(king::Segment, Handle<Mesh>)>>,
     guardian_parts: Option<Vec<(guardian::Segment, Handle<Mesh>)>>,
     spider_parts: Option<Vec<(spider::Segment, Handle<Mesh>)>>,
+    scorpion_parts: Option<Vec<(scorpion::Segment, Handle<Mesh>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -400,8 +397,7 @@ pub(super) struct MobVisuals {
     king: SpeciesVisuals,
     /// The cave spider's procedural rig, from `spider.rs`.
     cave_spider: SpeciesVisuals,
-    /// V46's scorpion, drawn as a neutral placeholder box of its own size until its rig
-    /// exists, so the server placing one costs this build a box rather than the session.
+    /// The scorpion's procedural rig, from `scorpion.rs`.
     scorpion: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
@@ -509,6 +505,7 @@ pub(super) struct Mob {
     guardian_motion: Option<Box<guardian::Motion>>,
     king_motion: Option<Box<king::motion::Motion>>,
     spider_motion: Option<Box<spider::Motion>>,
+    scorpion_motion: Option<Box<scorpion::Motion>>,
 }
 
 /// Which part of a body one child mesh draws.
@@ -521,6 +518,7 @@ pub(super) enum MobPart {
     King(king::Segment),
     Guardian(guardian::Segment),
     Spider(spider::Segment),
+    Scorpion(scorpion::Segment),
     Body,
     Head,
     Legs,
@@ -563,6 +561,7 @@ pub(super) fn create_visuals(
             king_parts: None,
             guardian_parts: None,
             spider_parts: None,
+            scorpion_parts: None,
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
@@ -575,6 +574,7 @@ pub(super) fn create_visuals(
             king_parts: None,
             guardian_parts: None,
             spider_parts: None,
+            scorpion_parts: None,
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
@@ -595,6 +595,7 @@ pub(super) fn create_visuals(
             king_parts: None,
             guardian_parts: None,
             spider_parts: None,
+            scorpion_parts: None,
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
@@ -606,7 +607,7 @@ pub(super) fn create_visuals(
         guardian: guardian::visuals(&mut meshes, &mut materials),
         king: king::visuals(&mut meshes, &mut materials),
         cave_spider: spider::visuals(&mut meshes, &mut materials),
-        scorpion: placeholder_visuals(MobKind::Scorpion, &mut meshes, &mut materials),
+        scorpion: scorpion::visuals(&mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
         aggro_marker: meshes.add(aggro_marker_mesh()),
@@ -957,52 +958,6 @@ fn deer_head_mesh() -> Mesh {
     head
 }
 
-/// A placeholder's body: a low slab filling the whole box in plan, three quarters of its
-/// height, standing on the snapshot position.
-fn placeholder_body_mesh(kind: MobKind) -> Mesh {
-    let envelope = body(kind);
-    let height = envelope.height * 0.75;
-    Mesh::from(Cuboid::new(envelope.width, height, envelope.width))
-        .translated_by(Vec3::Y * (height / 2.0))
-}
-
-/// A placeholder's head: a block on the front of the slab that takes the box to its full
-/// height, so the facing the server sends is readable on a plain box.
-fn placeholder_head_mesh(kind: MobKind) -> Mesh {
-    let envelope = body(kind);
-    let size = Vec3::new(
-        envelope.width * 0.4,
-        envelope.height * 0.25,
-        envelope.width * 0.4,
-    );
-    Mesh::from(Cuboid::from_size(size)).translated_by(Vec3::new(
-        0.0,
-        envelope.height - size.y / 2.0,
-        -(envelope.width - size.z) / 2.0,
-    ))
-}
-
-/// The meshes and materials V46's scorpion placeholder is drawn from: two boxes and no legs, arms
-/// or eyes, because nothing here poses them yet.
-fn placeholder_visuals(
-    kind: MobKind,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) -> SpeciesVisuals {
-    SpeciesVisuals {
-        king_parts: None,
-        guardian_parts: None,
-        spider_parts: None,
-        body: meshes.add(placeholder_body_mesh(kind)),
-        head: meshes.add(placeholder_head_mesh(kind)),
-        legs: None,
-        arms: None,
-        eyes: None,
-        body_material: materials.add(StandardMaterial::from_color(PLACEHOLDER_BODY_COLOUR)),
-        head_material: materials.add(StandardMaterial::from_color(PLACEHOLDER_HEAD_COLOUR)),
-    }
-}
-
 /// A downward arrowhead quad on one camera-facing plane.
 ///
 /// This is world geometry rather than `bevy_ui`, so it inherits the body's visibility
@@ -1179,6 +1134,10 @@ fn spawn_mob(
                         spider::fresh_sight(state),
                     ))
                 }),
+                // The scorpion's rig keeps the attack rhythm it watches from here on; a first
+                // sight in a windup is taken for the sting, the blow that always opens.
+                scorpion_motion: (state.kind == MobKind::Scorpion)
+                    .then(|| Box::new(scorpion::Motion::new(state.pos, entity_id, state.action))),
                 kind: state.kind,
                 action: state.action,
                 action_elapsed: Duration::ZERO,
@@ -1206,6 +1165,26 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
+        if let Some(parts) = species.scorpion_parts {
+            for (segment, mesh) in parts {
+                parent.spawn((
+                    MobVisual {
+                        owner,
+                        part: MobPart::Scorpion(segment),
+                    },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(species.body_material.clone()),
+                    Transform::IDENTITY,
+                    // Explicit rather than left to the renderer's required components: the
+                    // sand parts are shown and hidden through it, headless or not.
+                    Visibility::Hidden,
+                ));
+            }
+            if hunts_local {
+                parent.spawn(aggro_marker_bundle(visuals, owner, state.kind));
+            }
+            return;
+        }
         if let Some(parts) = species.spider_parts {
             let eyes = species
                 .eyes
@@ -1404,11 +1383,9 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
         // Articulated torso and arms carry the king's weight; planted feet keep the root upright.
         MobKind::DraugrKing => 0.0,
         MobKind::VargrGuardian => lean * 0.65,
-        // The spider's rig rears and lunges on its own joints; the root stays level.
-        MobKind::CaveSpider => 0.0,
-        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse | MobKind::Scorpion => {
-            lean
-        }
+        // The arthropods' rigs rear and lunge on their own joints; the root stays level.
+        MobKind::CaveSpider | MobKind::Scorpion => 0.0,
+        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
     }
 }
 
@@ -1506,11 +1483,9 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
-        // The scorpion's placeholder rolls onto its side like the other low bodies until a
-        // rig owns it. The spider does not roll at all: it curls its legs in on its own
-        // joints and settles where it stood, in `spider::Motion::sample`.
-        MobKind::Scorpion => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
-        MobKind::CaveSpider => Quat::IDENTITY,
+        // Neither arthropod rolls: each curls its legs in on its own joints and settles
+        // where it stood, in `spider::Motion::sample` and `scorpion::Motion::sample`.
+        MobKind::CaveSpider | MobKind::Scorpion => Quat::IDENTITY,
         // The guardian loses its heavy shoulder; the king folds forward rather
         // than sharing the common draugr's backward fall. Cosmetic snapshot poses.
         MobKind::VargrGuardian => Quat::from_rotation_z(1.05 * fallen),
@@ -1546,6 +1521,28 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     }
 }
 
+/// Every child mesh of every body: what it draws, its material, its pose, and — for the
+/// parts that come and go, a scorpion's sand — whether it is shown.
+///
+/// `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the parents
+/// carry `Mob` and the children carry `MobVisual`, and without the filter it refuses the
+/// system rather than risk aliasing them.
+type MobParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static MobVisual,
+        &'static mut MeshMaterial3d<StandardMaterial>,
+        &'static mut Transform,
+        Option<&'static mut Visibility>,
+    ),
+    Without<Mob>,
+>;
+
+/// This session's own body, disjoint from every creature and every creature's parts.
+type LocalBody<'w, 's> =
+    Query<'w, 's, &'static Transform, (With<super::LocalPlayer>, Without<Mob>, Without<MobVisual>)>;
+
 /// Runs the cosmetic half: the pose easing towards its action's lean, the fall a killed
 /// body is part way through, and the hit flash.
 ///
@@ -1565,17 +1562,9 @@ pub(super) fn animate(
     snapshots: Option<Res<SnapshotBuffer>>,
     visuals: Option<Res<MobVisuals>>,
     mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
-    // `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the
-    // parents carry `Mob` and the children carry `MobVisual`, and without the filter it
-    // refuses the system rather than risk aliasing them.
-    mut parts: Query<
-        (
-            &MobVisual,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &mut Transform,
-        ),
-        Without<Mob>,
-    >,
+    mut parts: MobParts,
+    // Where this session's own body stands: what stirs the sand over a buried scorpion.
+    local: LocalBody,
 ) {
     let Some(visuals) = visuals else {
         return;
@@ -1590,6 +1579,7 @@ pub(super) fn animate(
     let mut guardian_poses = HashMap::new();
     let mut king_poses = HashMap::new();
     let mut spider_poses = HashMap::new();
+    let mut scorpion_poses = HashMap::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
         // and never overshoots into a lean the server did not ask for. The timings the
@@ -1629,6 +1619,19 @@ pub(super) fn animate(
                 solid_voxel(session.as_deref(), terrain.as_deref(), voxel)
             });
             spider_poses.insert(entity, motion.transforms);
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
+        if let Some(motion) = mob.scorpion_motion.as_mut() {
+            let player = local.iter().next().map(|body| body.translation);
+            motion.sample(
+                transform.translation,
+                action,
+                down,
+                delta,
+                |voxel| solid_voxel(session.as_deref(), terrain.as_deref(), voxel),
+                player,
+            );
+            scorpion_poses.insert(entity, motion.transforms);
             transform.rotation = Quat::from_rotation_y(yaw);
         }
         if let Some(motion) = mob.guardian_motion.as_mut() {
@@ -1686,7 +1689,7 @@ pub(super) fn animate(
         poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
     }
 
-    for (part, mut material, mut transform) in &mut parts {
+    for (part, mut material, mut transform, visibility) in &mut parts {
         let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
@@ -1756,11 +1759,53 @@ pub(super) fn animate(
         {
             *transform = pose[spider::index(segment)];
         }
+        if let MobPart::Scorpion(segment) = part.part
+            && let Some(pose) = scorpion_poses.get(&part.owner)
+        {
+            // The sand is hidden rather than scaled to nothing whenever the rig is not
+            // placing it, so a degenerate transform never reaches the renderer.
+            let posed = pose[scorpion::index(segment)];
+            let shown = posed != scorpion::HIDDEN;
+            let wanted = if shown {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if let Some(mut visibility) = visibility
+                && *visibility != wanted
+            {
+                *visibility = wanted;
+            }
+            if shown {
+                *transform = posed;
+            }
+        }
         if kind == MobKind::VargrGuardian && matches!(part.part, MobPart::Head | MobPart::Eyes) {
             // Encounter neck poses are frame-local overrides, not persistent rig state.
             *transform = Transform::IDENTITY;
         }
     }
+}
+
+/// Whether a creature the server sent is lying buried: standing still with its middle inside a
+/// solid block. The wire has no member for burial (#1291, PR #1302); a buried creature is sent
+/// `Idle` one block under the surface it will rise to, and no live creature above ground is ever
+/// inside a solid block, because the server's collision will not put one there.
+///
+/// **A drawing decision, not a gameplay one.** It picks what to draw — a mound rather than a
+/// body, no bar over the sand — and nothing is sent or decided from it.
+pub(super) fn buried(
+    kind: MobKind,
+    action: MobAction,
+    feet: Vec3,
+    solid: impl Fn(IVec3) -> bool,
+) -> bool {
+    action == MobAction::Idle
+        && solid(
+            (feet + Vec3::Y * (body(kind).height / 2.0))
+                .floor()
+                .as_ivec3(),
+        )
 }
 
 /// Whether a voxel is solid in the streamed terrain. Before a session or any terrain exists,
@@ -3166,14 +3211,6 @@ mod tests {
                 MobKind::Deer,
                 vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
             ),
-            // V46's scorpion placeholder is held to the same box as every drawn species.
-            (
-                MobKind::Scorpion,
-                vec![
-                    placeholder_body_mesh(MobKind::Scorpion),
-                    placeholder_head_mesh(MobKind::Scorpion),
-                ],
-            ),
         ];
 
         // The list above is hand-written, for the reason every list like it in this
@@ -3184,7 +3221,7 @@ mod tests {
         // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
         // `CLASSIFICATION` are.
         //
-        // **Six members have no row, for separate reasons.** `Unknown` is never drawn at
+        // **Seven members have no row, for separate reasons.** `Unknown` is never drawn at
         // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
@@ -3196,10 +3233,12 @@ mod tests {
         // the collision envelope. The server-mirror test below still pins their boxes.
         // The cave spider is the same case: a spider is legs around a small body, so its
         // rig is held inside the box and made to fill most of it in `spider::tests`
-        // (`the_rest_pose_fills_the_box_the_server_collides_and_stands_on_its_feet`).
+        // (`the_rest_pose_fills_the_box_the_server_collides_and_stands_on_its_feet`), and
+        // so is the scorpion, in `scorpion::tests`
+        // (`the_rest_pose_fills_the_box_the_server_collides_and_stands_on_its_legs`).
         assert_eq!(
             drawn.len(),
-            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 6,
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 7,
             "a species the contract names is drawn by nobody here, so its box is unchecked"
         );
         for (seen, (kind, _)) in drawn.iter().enumerate() {
