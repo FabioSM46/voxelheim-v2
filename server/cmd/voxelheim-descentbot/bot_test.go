@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -77,10 +78,37 @@ func TestTheSoloSiegeIsTwelvePacksOfThree(t *testing.T) {
 }
 
 func TestTheHumanEstimateReplacesOnlyTheBossFights(t *testing.T) {
-	got := humanEstimate(20*time.Minute, 5*time.Minute, 6*time.Minute)
-	want := 9*time.Minute + time.Duration(1618.65*float64(time.Second))
-	if d := got - want; d < -time.Millisecond || d > time.Millisecond {
-		t.Fatalf("estimate %v, want %v", got, want)
+	got, ok := humanEstimate(3, 20*time.Minute, 5*time.Minute, 6*time.Minute)
+	want := 9*time.Minute + time.Duration((206.65+324.70)*float64(time.Second))
+	if d := got - want; !ok || d < -time.Millisecond || d > time.Millisecond {
+		t.Fatalf("estimate %v (%t), want %v", got, ok, want)
+	}
+	if _, ok := humanEstimate(2, 20*time.Minute, 0, 0); ok {
+		t.Fatal("a pair has an estimate, but no reader was ever measured at two")
+	}
+}
+
+func TestTheBarrierReleasesOnlyWhenEveryMemberHasArrived(t *testing.T) {
+	b := newBarrier(3)
+	first, second := b.arrive(), b.arrive()
+	select {
+	case <-first:
+		t.Fatal("released with two of three members")
+	default:
+	}
+	third := b.arrive()
+	for i, ch := range []<-chan struct{}{first, second, third} {
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("arrival %d was not released once all three had arrived", i)
+		}
+	}
+	// The next part of the route starts a fresh count.
+	select {
+	case <-b.arrive():
+		t.Fatal("the barrier's next round released at once")
+	default:
 	}
 }
 
@@ -88,11 +116,51 @@ func TestFlagsRefuseARunWithNoServer(t *testing.T) {
 	if _, err := parseFlags("bot", nil); err == nil {
 		t.Fatal("a run with no -server was accepted")
 	}
-	if _, err := parseFlags("bot", []string{"-server", "voxelheimd", "-max-deaths", "0"}); err == nil {
-		t.Fatal("-max-deaths 0 was accepted")
+	if _, err := parseFlags("bot", []string{"-server", "voxelheimd", "-max-wipes", "0"}); err == nil {
+		t.Fatal("-max-wipes 0 was accepted")
+	}
+	for _, n := range []string{"0", "6"} {
+		if _, err := parseFlags("bot", []string{"-server", "voxelheimd", "-party", n}); err == nil {
+			t.Fatalf("-party %s was accepted", n)
+		}
 	}
 	o, err := parseFlags("bot", []string{"-server", "voxelheimd"})
-	if err != nil || o.maxDeaths != 3 || o.viewDistance != 4 {
+	if err != nil || o.maxWipes != 3 || o.viewDistance != 4 || o.members != 3 {
 		t.Fatalf("defaults %+v, %v", o, err)
+	}
+}
+
+func TestTheReaderSeesTheRegionsTheServerStrikes(t *testing.T) {
+	disc := region{shape: vnet.HazardShapeDisc, origin: [3]float64{0, 10, 0}, radius: 3, height: 4}
+	lane := region{shape: vnet.HazardShapeLine, origin: [3]float64{0, 10, 0}, direction: [3]float64{1, 0, 0},
+		radius: 8, height: 4, halfWidth: 1}
+	for _, c := range []struct {
+		what    string
+		regions []region
+		pos     [3]float64
+		want    bool
+	}{
+		{"inside the disc", []region{disc}, [3]float64{1, 10, 1}, true},
+		{"a margin past its rim", []region{disc}, [3]float64{3.5, 10, 0}, true},
+		{"well clear of it", []region{disc}, [3]float64{5, 10, 0}, false},
+		{"a floor above it", []region{disc}, [3]float64{0, 13, 0}, false},
+		{"on the lane", []region{lane}, [3]float64{6, 10, 0.5}, true},
+		{"behind the lane's start", []region{lane}, [3]float64{-2, 10, 0}, false},
+		{"beside the lane", []region{lane}, [3]float64{4, 10, 2.5}, false},
+		{"nothing announced", nil, [3]float64{0, 10, 0}, false},
+	} {
+		if got := touches(c.regions, c.pos); got != c.want {
+			t.Errorf("%s: touches %t, want %t", c.what, got, c.want)
+		}
+	}
+}
+
+func TestAWalkAlongTheWorldBecomesTheControlsForTheFacing(t *testing.T) {
+	yaw := yawToward(1, 0) // facing +X
+	if x, z := relative([2]float64{1, 0}, yaw); math.Abs(x) > 1e-9 || math.Abs(z-1) > 1e-9 {
+		t.Fatalf("walking the way the body faces is (%.3f, %.3f), want forward", x, z)
+	}
+	if x, z := relative([2]float64{0, 1}, yaw); math.Abs(math.Abs(x)-1) > 1e-9 || math.Abs(z) > 1e-9 {
+		t.Fatalf("walking across the facing is (%.3f, %.3f), want a pure strafe", x, z)
 	}
 }

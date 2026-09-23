@@ -47,7 +47,7 @@ func serverArgs(o options, ticketKey string) []string {
 		"-seed", strconv.FormatInt(o.seed, 10),
 		"-view-distance", strconv.Itoa(o.viewDistance),
 		"-max-players", strconv.Itoa(session.MinConcurrentSessions),
-		// /teleport, /additem and /immortal. See route.go for exactly what each is used
+		// /teleport and /additem. See route.go for exactly what each is used
 		// for; none of them opens a door, lights a rune or kills anything.
 		"-dev-commands",
 		"-log-format", "json",

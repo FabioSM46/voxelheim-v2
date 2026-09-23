@@ -21,16 +21,20 @@ import (
 // there, and where every creature stands, are read off the stream; the rune order is read
 // off the delivered inscription and only then checked against world.InstanceRuneOrder.
 //
-// /additem gives the iron blade and rusty armour before the portal. /immortal is on for
-// the boss fights, which the bot plays without evading, and for the rest of any phase that
-// has cost maxDeaths deaths. /teleport places the bot beside the open world's portal
-// before it walks in (a veil is never a path cell, so no walk reaches it from spawn), and
-// is otherwise only [pilot.assist]; the report counts both. None of them opens a door,
-// lights a rune, kills a creature or moves the bot past anything the server has not opened.
+// /additem gives the iron blade and rusty armour before the portal. /teleport places each
+// member beside the open world's portal before it walks in (a veil is never a path cell,
+// so no walk reaches it from spawn), and is otherwise only [pilot.assist]; the report
+// counts both. Nothing else is a development command: no member is ever made immortal
+// (#1333), and none of them opens a door, lights a rune, kills a creature or moves a
+// member past anything the server has not opened.
 
-// maxDeaths is how many deaths one phase may cost before the bot finishes it under
-// /immortal, so that a bot that cannot evade still reaches every later part of the route.
-var maxDeaths = 3
+// maxWipes is how many wipes in a row, with nothing killed between them, one part of the
+// route may cost before the party gives up on it. A wipe puts the encounter the party lost
+// back as it found it, but a creature killed stays killed, so a wipe after a kill is
+// progress and one after none is not; a run that cannot be finished ends with a report
+// rather than retrying until the timeout. A member's own death is not a wipe — the others
+// fight on, and it respawns and walks back in.
+var maxWipes = 3
 
 type layout struct {
 	seed                          int64
@@ -121,9 +125,11 @@ func abs(v int64) int64 {
 	return v
 }
 
-// runner is one bot playing the route.
+// runner is one member playing the route.
 type runner struct {
 	*pilot
+	party  *party
+	leader bool
 	opts   options
 	lay    layout
 	server *serverProcess
@@ -132,24 +138,20 @@ type runner struct {
 	rss    map[string]uint64
 	// websCut is how many cobwebs of the curtain the bot cut.
 	websCut int
+	// caveBase is the party's spider kills when this member's siege began, or -1 before
+	// it has, and caveWipes the party's wipes then: a wipe starts the waves again.
+	caveBase, caveWipes int
 }
 
-// phase runs one part of the route, retrying it after each death: a respawn puts the bot
-// back at the furthest checkpoint and the phase walks on from there.
+// phase runs one part of the route, retrying it after each death: a respawn puts the
+// member back at the furthest checkpoint the party has reached and the phase walks on
+// from there, until maxWipes wipes say the party cannot finish it.
 func (r *runner) phase(ctx context.Context, name string, body func(context.Context) error) error {
 	r.say("phase: %s", name)
 	r.stats.begin(name)
 	for {
-		if r.stats.deathsIn(name) >= maxDeaths {
-			if err := r.setImmortal(ctx, true); err != nil {
-				return err
-			}
-		}
 		err := body(ctx)
 		if !errors.Is(err, errDied) {
-			if immErr := r.setImmortal(ctx, false); err == nil {
-				err = immErr
-			}
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
@@ -159,7 +161,27 @@ func (r *runner) phase(ctx context.Context, name string, body func(context.Conte
 		if err := r.waitAlive(ctx); err != nil {
 			return err
 		}
+		if barren := r.party.barrenWipes(); barren >= maxWipes {
+			return fmt.Errorf("%s: the party wiped %d times without killing anything between: %w", name, barren, errGaveUp)
+		}
 	}
+}
+
+// errGaveUp is a part of the route the party died in too often to finish.
+var errGaveUp = errors.New("gave up")
+
+// waitAlive waits out a death and the respawn after it.
+func (r *runner) waitAlive(ctx context.Context) error {
+	r.c.stand()
+	for !r.c.self().alive {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	// The respawn is a relocation: give the stream a moment to deliver where it put us.
+	return sleep(ctx, time.Second)
 }
 
 func (r *runner) sampleRSS(label string) {
@@ -168,18 +190,12 @@ func (r *runner) sampleRSS(label string) {
 	}
 }
 
-// play is the whole route.
-func (r *runner) play(ctx context.Context) error {
-	if err := r.equip(ctx); err != nil {
-		return fmt.Errorf("equip: %w", err)
-	}
-	r.sampleRSS("open world, before the portal")
-	start := time.Now()
-	if err := r.enterPortal(ctx); err != nil {
-		return fmt.Errorf("portal: %w", err)
-	}
-	r.sampleRSS("inside, on arrival")
-	steps := []struct {
+// route is the whole route after the portal, in order.
+func (r *runner) route() []struct {
+	name string
+	body func(context.Context) error
+} {
+	return []struct {
 		name string
 		body func(context.Context) error
 	}{
@@ -195,15 +211,51 @@ func (r *runner) play(ctx context.Context) error {
 		{"king", r.kingFight},
 		{"return shortcut", r.returnShortcut},
 	}
-	for _, s := range steps {
-		began := time.Now()
+}
+
+// play is one member's whole run: through the portal with the others, then each part of
+// the route once every member has finished the part before it. The leader keeps the
+// party's clock for each part, from the moment the party sets off into it to the moment
+// the last member is through it.
+func (r *runner) play(ctx context.Context) error {
+	if err := r.enterPortal(ctx); err != nil {
+		return fmt.Errorf("%s at the portal: %w", r.c.name, err)
+	}
+	if err := r.regroup(ctx); err != nil {
+		return err
+	}
+	if r.leader {
+		r.sampleRSS("inside, on arrival")
+		want := r.c.self().world
+		for _, m := range r.party.members {
+			if got := m.c.self().world; got != want {
+				return fmt.Errorf("%s is in world %d and the leader in %d: the party was split", m.c.name, got, want)
+			}
+		}
+	}
+	var began time.Time
+	var last string
+	for _, s := range r.route() {
+		if err := r.regroup(ctx); err != nil {
+			return err
+		}
+		if r.leader {
+			if last != "" {
+				r.timing[last] = time.Since(began)
+			}
+			began, last = time.Now(), s.name
+		}
 		if err := r.phase(ctx, s.name, s.body); err != nil {
 			return err
 		}
-		r.timing[s.name] = time.Since(began)
 	}
-	r.timing["total"] = time.Since(start)
-	r.sampleRSS("back in the open world")
+	if err := r.regroup(ctx); err != nil {
+		return err
+	}
+	if r.leader {
+		r.timing[last] = time.Since(began)
+		r.sampleRSS("back in the open world")
+	}
 	r.stats.finish()
 	return nil
 }
@@ -339,7 +391,7 @@ func (r *runner) waitTerrain(ctx context.Context, c cell) error {
 // upperHalls walks the draugr and vargr halls to the rune hall, putting down every
 // creature that turns on the bot, and then any hall creature still standing.
 func (r *runner) upperHalls(ctx context.Context) error {
-	for group := 0; group < 4; group++ {
+	for group := range 4 {
 		slots := r.lay.minors[group]
 		if len(slots) == 0 {
 			continue
@@ -367,6 +419,10 @@ func (r *runner) runeHall(ctx context.Context) error {
 	stones := r.lay.stones
 	if len(stones) != 4 || len(r.lay.runeDoor) == 0 {
 		return fmt.Errorf("%d rune stones and %d door cells in the layout", len(stones), len(r.lay.runeDoor))
+	}
+	if !r.leader {
+		// The stones are the leader's; the others come into the hall and wait for the door.
+		return r.walkTo(ctx, "the rune hall", near(at(stones[1]), 4), true)
 	}
 	if err := r.walkTo(ctx, "the rune stones", near(at(stones[1]), 3), true); err != nil {
 		return err
@@ -458,14 +514,13 @@ func (r *runner) waitOpen(ctx context.Context, cells []world.PlacedAnchor, limit
 	return errors.New("the door did not open")
 }
 
-// bossFight fights one boss to its death under /immortal, timed.
+// bossFight fights one boss to its death. The party's clock for it starts at the first
+// member's pull and stops at the kill, across every death and wipe between.
 func (r *runner) bossFight(ctx context.Context, kind vnet.MobKind, anchor world.PlacedAnchor, label string) error {
 	if err := r.walkTo(ctx, label, near(at(anchor), 9), true); err != nil {
 		return err
 	}
-	if err := r.setImmortal(ctx, true); err != nil {
-		return err
-	}
+	r.party.fightBegan(label + " fight")
 	began := time.Now()
 	seen := false
 	for !seen || r.stats.killedCount(kind) == 0 {
@@ -486,8 +541,8 @@ func (r *runner) bossFight(ctx context.Context, kind vnet.MobKind, anchor world.
 			}
 		}
 	}
-	r.timing[label+" fight"] = time.Since(began)
-	return r.setImmortal(ctx, false)
+	r.party.fightEnded(label + " fight")
+	return nil
 }
 
 func (r *runner) guardianFight(ctx context.Context) error {
@@ -553,11 +608,16 @@ func expectedSpiders(members int) int {
 // wave has come out and died.
 func (r *runner) caveWaves(ctx context.Context) error {
 	centre := cell{(r.lay.caveLow[0] + r.lay.caveHigh[0]) / 2, r.lay.caveLow[1], (r.lay.caveLow[2] + r.lay.caveHigh[2]) / 2}
-	base := r.stats.killedCount(vnet.MobKindCaveSpider)
+	if r.caveBase < 0 || r.party.wipeCount() != r.caveWipes {
+		// First time in, or a wipe since sent the waves back into the walls and they
+		// start again from the first.
+		r.caveBase, r.caveWipes = r.stats.killedCount(vnet.MobKindCaveSpider), r.party.wipeCount()
+	}
+	base := r.caveBase
 	if err := r.walkTo(ctx, "the cavern", near(centre, 3), true); err != nil {
 		return err
 	}
-	want := expectedSpiders(1)
+	want := expectedSpiders(len(r.party.members))
 	quietSince := time.Now()
 	sighted := map[uint64]bool{}
 	for {
@@ -607,6 +667,9 @@ func (r *runner) caveWaves(ctx context.Context) error {
 
 // webCurtain cuts every web of the curtain across the neck, one hit each.
 func (r *runner) webCurtain(ctx context.Context) error {
+	if !r.leader {
+		return nil // the leader's knife; the others hold the cavern
+	}
 	floor := r.lay.checkpoints[0].Y
 	curtain := r.curtainCells(floor)
 	if len(curtain) == 0 {
@@ -694,6 +757,8 @@ func (r *runner) curtainCells(floor int64) []cell {
 }
 
 // timedGrille pulls the cavern's lever and makes it through the grille before it shuts.
+// Every member does: whoever finds the lever up pulls it, and a pull while the grille is
+// open changes nothing, so members arriving together all run on the first pull.
 func (r *runner) timedGrille(ctx context.Context) error {
 	lever := at(r.lay.grilleLever)
 	past := at(r.lay.checkpoints[1])
@@ -744,6 +809,9 @@ func (r *runner) sandHall(ctx context.Context) error {
 func (r *runner) twinLevers(ctx context.Context) error {
 	if len(r.lay.twins) != 2 {
 		return fmt.Errorf("%d twin levers in the layout", len(r.lay.twins))
+	}
+	if !r.leader {
+		return nil // the leader's run; the others wait in the sand hall for the door
 	}
 	a, b := at(r.lay.twins[0]), at(r.lay.twins[1])
 	for attempt := 1; attempt <= 3; attempt++ {
