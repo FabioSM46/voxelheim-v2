@@ -177,6 +177,7 @@ pub(super) fn visuals(
         head_material: material,
         king_parts: None,
         guardian_parts: Some(parts),
+        spider_parts: None,
     }
 }
 
