@@ -115,7 +115,10 @@ func TestDungeonRestoreOmitsExactlyTheCompletedEncounters(t *testing.T) {
 		}
 		session, _ := manager.Lookup(20)
 		loadDungeon(t, session)
+		// The restored route is raised to what the defeats prove (DungeonRoute.impliedBy),
+		// and a record with no route of its own carries exactly that.
 		expected := dungeonProgressFrom(completed)
+		expected.route = DungeonRoute{}.impliedBy(expected)
 		if !reflect.DeepEqual(session.Sim.dungeon.progress, expected) || dungeonBossCount(session.Sim) != 2-len(completed) {
 			t.Fatal("restore forgot or duplicated an encounter")
 		}
