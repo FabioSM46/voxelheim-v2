@@ -24,7 +24,8 @@ use crate::net::{BlockCoord, MobAction, MobKind, Session};
 use crate::player::encounters::EncounterPresentation;
 use crate::player::{
     AimCamera, ApplySnapshots, Hostility, NAME_PLATE_HEIGHT, PlateSight, SnapshotBuffer,
-    WorldCamera, hostility, mob_overhead_anchor, player_overhead_anchor, step_plate_sight,
+    WorldCamera, hostility, mob_is_buried, mob_overhead_anchor, player_overhead_anchor,
+    step_plate_sight,
 };
 use crate::settings::{HealthBars, Settings};
 use crate::world::ChunkStore;
@@ -214,6 +215,7 @@ fn collect_overhead_bars(
     session: Option<Res<Session>>,
     snapshots: Option<Res<SnapshotBuffer>>,
     encounters: Option<Res<EncounterPresentation>>,
+    store: Option<Res<ChunkStore>>,
     mut wanted: ResMut<OverheadBars>,
 ) {
     let filter = settings.map_or(HealthBars::default(), |settings| settings.health_bars());
@@ -233,7 +235,25 @@ fn collect_overhead_bars(
                 drawn.pos,
             ));
         }
+        let size = usize::from(session.0.chunk_size);
+        let solid = |voxel: IVec3| {
+            store.as_deref().is_some_and(|store| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            })
+        };
         for (entity_id, mob) in snapshots.sample_mobs(now, interval) {
+            // A creature lying buried is a patch of sand until it rises; a bar over it would
+            // give the ambush away (#1297).
+            if mob_is_buried(mob.kind, mob.action, mob.pos, solid) {
+                continue;
+            }
             let boss_reading = encounters.as_ref().is_some_and(|presentation| {
                 presentation.0.iter().any(|one| one.key.boss == entity_id)
             });
@@ -485,6 +505,42 @@ mod tests {
                 false
             )
             .is_none()
+        );
+    }
+
+    /// A scorpion lying buried is sent `Idle` inside the sand block under the surface; the
+    /// bar waits for it to rise.
+    #[test]
+    fn a_buried_scorpion_has_no_bar_until_it_rises() {
+        const SCORPION: u64 = 14;
+        let mut app = app();
+        let mut chunk = crate::world::VoxelChunk::all_air(32);
+        chunk.set(SCORPION as usize, 0, 4, crate::world::palette::SAND);
+        let mut store = ChunkStore::default();
+        store.insert(
+            crate::net::ChunkCoord {
+                cx: 0,
+                cy: 2,
+                cz: 0,
+            },
+            chunk,
+        );
+        app.insert_resource(store);
+        deliver(
+            &mut app,
+            snapshot(1, 50, vec![mob(SCORPION, MobKind::Scorpion)]),
+        );
+        assert!(
+            !owners(&mut app).contains(&Owner::Mob(SCORPION)),
+            "a bar over the sand"
+        );
+        let mut risen = mob(SCORPION, MobKind::Scorpion);
+        risen.pos[1] = 65.0;
+        risen.action = MobAction::Recovery;
+        deliver(&mut app, snapshot(2, 50, vec![risen]));
+        assert!(
+            owners(&mut app).contains(&Owner::Mob(SCORPION)),
+            "no bar once it is up"
         );
     }
 

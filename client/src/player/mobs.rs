@@ -1134,8 +1134,10 @@ fn spawn_mob(
                         spider::fresh_sight(state),
                     ))
                 }),
+                // The scorpion's rig keeps the attack rhythm it watches from here on; a first
+                // sight in a windup is taken for the sting, the blow that always opens.
                 scorpion_motion: (state.kind == MobKind::Scorpion)
-                    .then(|| Box::new(scorpion::Motion::new(state.pos, entity_id))),
+                    .then(|| Box::new(scorpion::Motion::new(state.pos, entity_id, state.action))),
                 kind: state.kind,
                 action: state.action,
                 action_elapsed: Duration::ZERO,
@@ -1173,6 +1175,9 @@ fn spawn_mob(
                     Mesh3d(mesh),
                     MeshMaterial3d(species.body_material.clone()),
                     Transform::IDENTITY,
+                    // Explicit rather than left to the renderer's required components: the
+                    // sand parts are shown and hidden through it, headless or not.
+                    Visibility::Hidden,
                 ));
             }
             if hunts_local {
@@ -1527,6 +1532,29 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
 /// writes, so a frame that ran the two the other way round would begin every death one
 /// frame late.
 #[allow(clippy::too_many_arguments)] // Terrain joined the snapshot, timeline and asset inputs.
+/// Every child mesh of every body: what it draws, its material, its pose, and — for the
+/// parts that come and go, a scorpion's sand — whether it is shown.
+///
+/// `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the parents
+/// carry `Mob` and the children carry `MobVisual`, and without the filter it refuses the
+/// system rather than risk aliasing them.
+type MobParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static MobVisual,
+        &'static mut MeshMaterial3d<StandardMaterial>,
+        &'static mut Transform,
+        Option<&'static mut Visibility>,
+    ),
+    Without<Mob>,
+>;
+
+/// This session's own body, disjoint from every creature and every creature's parts.
+type LocalBody<'w, 's> =
+    Query<'w, 's, &'static Transform, (With<super::LocalPlayer>, Without<Mob>, Without<MobVisual>)>;
+
+#[allow(clippy::too_many_arguments)] // A Bevy system: one parameter per resource it reads.
 pub(super) fn animate(
     time: Res<Time>,
     session: Option<Res<Session>>,
@@ -1535,17 +1563,9 @@ pub(super) fn animate(
     snapshots: Option<Res<SnapshotBuffer>>,
     visuals: Option<Res<MobVisuals>>,
     mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
-    // `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the
-    // parents carry `Mob` and the children carry `MobVisual`, and without the filter it
-    // refuses the system rather than risk aliasing them.
-    mut parts: Query<
-        (
-            &MobVisual,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &mut Transform,
-        ),
-        Without<Mob>,
-    >,
+    mut parts: MobParts,
+    // Where this session's own body stands: what stirs the sand over a buried scorpion.
+    local: LocalBody,
 ) {
     let Some(visuals) = visuals else {
         return;
@@ -1603,7 +1623,15 @@ pub(super) fn animate(
             transform.rotation = Quat::from_rotation_y(yaw);
         }
         if let Some(motion) = mob.scorpion_motion.as_mut() {
-            motion.sample(transform.translation, action, down, delta);
+            let player = local.iter().next().map(|body| body.translation);
+            motion.sample(
+                transform.translation,
+                action,
+                down,
+                delta,
+                |voxel| solid_voxel(session.as_deref(), terrain.as_deref(), voxel),
+                player,
+            );
             scorpion_poses.insert(entity, motion.transforms);
             transform.rotation = Quat::from_rotation_y(yaw);
         }
@@ -1662,7 +1690,7 @@ pub(super) fn animate(
         poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
     }
 
-    for (part, mut material, mut transform) in &mut parts {
+    for (part, mut material, mut transform, visibility) in &mut parts {
         let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
@@ -1735,13 +1763,50 @@ pub(super) fn animate(
         if let MobPart::Scorpion(segment) = part.part
             && let Some(pose) = scorpion_poses.get(&part.owner)
         {
-            *transform = pose[scorpion::index(segment)];
+            // The sand is hidden rather than scaled to nothing whenever the rig is not
+            // placing it, so a degenerate transform never reaches the renderer.
+            let posed = pose[scorpion::index(segment)];
+            let shown = posed != scorpion::HIDDEN;
+            let wanted = if shown {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if let Some(mut visibility) = visibility
+                && *visibility != wanted
+            {
+                *visibility = wanted;
+            }
+            if shown {
+                *transform = posed;
+            }
         }
         if kind == MobKind::VargrGuardian && matches!(part.part, MobPart::Head | MobPart::Eyes) {
             // Encounter neck poses are frame-local overrides, not persistent rig state.
             *transform = Transform::IDENTITY;
         }
     }
+}
+
+/// Whether a creature the server sent is lying buried: standing still with its middle inside a
+/// solid block. The wire has no member for burial (#1291, PR #1302); a buried creature is sent
+/// `Idle` one block under the surface it will rise to, and no live creature above ground is ever
+/// inside a solid block, because the server's collision will not put one there.
+///
+/// **A drawing decision, not a gameplay one.** It picks what to draw — a mound rather than a
+/// body, no bar over the sand — and nothing is sent or decided from it.
+pub(super) fn buried(
+    kind: MobKind,
+    action: MobAction,
+    feet: Vec3,
+    solid: impl Fn(IVec3) -> bool,
+) -> bool {
+    action == MobAction::Idle
+        && solid(
+            (feet + Vec3::Y * (body(kind).height / 2.0))
+                .floor()
+                .as_ivec3(),
+        )
 }
 
 /// Whether a voxel is solid in the streamed terrain. Before a session or any terrain exists,

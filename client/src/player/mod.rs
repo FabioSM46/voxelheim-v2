@@ -2712,6 +2712,17 @@ pub(crate) fn player_overhead_anchor(feet: Vec3) -> Vec3 {
     name_plate_anchor(&Transform::from_translation(feet))
 }
 
+/// Whether a creature the snapshot places at `feet` is lying buried under the sand, for the
+/// over-head bar that must not float over it — see `mobs::buried`.
+pub(crate) fn mob_is_buried(
+    kind: crate::net::MobKind,
+    action: crate::net::MobAction,
+    feet: Vec3,
+    solid: impl Fn(IVec3) -> bool,
+) -> bool {
+    mobs::buried(kind, action, feet, solid)
+}
+
 /// Where an over-head bar over a creature standing at `feet` is anchored: the plate's gap
 /// above the top of the box its species is mirrored with.
 pub(crate) fn mob_overhead_anchor(kind: crate::net::MobKind, feet: Vec3) -> Vec3 {
