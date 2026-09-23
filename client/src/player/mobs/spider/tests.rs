@@ -643,7 +643,8 @@ fn thirty_spiders_share_their_meshes_and_materials_and_stay_on_budget() {
         .map(|id| triangles(assets.get(*id).expect("a live mesh")))
         .sum();
     // One boss may draw 12,000 triangles (the arena's authoring budget); a wave of thirty
-    // spiders is held to two bosses' worth.
+    // spiders is held to two bosses' worth. What that costs a frame on a real adapter is
+    // `measure_a_spider_horde_in_the_shipped_chamber`, beside the bosses' own measurement.
     assert!(
         30 * per_spider <= 24_000,
         "thirty spiders draw {} triangles",

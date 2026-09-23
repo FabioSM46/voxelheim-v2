@@ -1534,3 +1534,137 @@ fn measure_rendering_cost_in_the_shipped_chamber() {
         }
     }
 }
+
+/// The spider waves' worst case, measured the way the bosses are: thirty cave spiders
+/// scuttling across the shipped courtyard at the server's 5.0 blocks a second, in view of a
+/// standing player, beside the empty courtyard and the idle guardian timed in the same run.
+///
+/// **The budget is the frame the measurement above times at**: 60 Hz, one frame every
+/// 16.7 ms. The horde's 95th-percentile frame must fit inside it, GPU work included, on the
+/// adapter the run reports; the CSV beside the bosses' records all three scenes so a
+/// reviewer can read the horde's cost against the boss scenes rather than in isolation.
+#[test]
+#[ignore = "requires a render adapter and the server source; times frames and writes a CSV to the temporary directory"]
+fn measure_a_spider_horde_in_the_shipped_chamber() {
+    const HORDE: u64 = 30;
+    const BUDGET_MS: f64 = 1000.0 / 60.0;
+
+    let chamber = Chamber::read();
+    let (mut app, camera, _) = chamber_app(&chamber);
+    let home = Vec3::new(16.5, FLOOR_TOP, 14.5);
+    let eye = Vec3::new(home.x, FLOOR_TOP + 1.7, home.z + 8.0);
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+        Transform::from_translation(eye).looking_at(home + Vec3::Y * 0.5, Vec3::Y);
+    let mut tick = 1000_u32;
+    let summary = |name: &str, times: &[Duration]| {
+        let mut millis: Vec<f64> = times.iter().map(|time| time.as_secs_f64() * 1e3).collect();
+        millis.sort_by(f64::total_cmp);
+        let rank =
+            |p: f64| millis[((p * millis.len() as f64).ceil() as usize).clamp(1, millis.len()) - 1];
+        let mean = millis.iter().sum::<f64>() / millis.len() as f64;
+        (
+            rank(0.95),
+            format!(
+                "{name},{},{mean:.3},{:.3},{:.3},{:.3},{:.3}",
+                millis.len(),
+                rank(0.5),
+                rank(0.95),
+                rank(0.99),
+                millis[millis.len() - 1]
+            ),
+        )
+    };
+    let mut rows = vec!["scene,frames,mean_ms,p50_ms,p95_ms,p99_ms,max_ms".to_owned()];
+    let (times, _) = hold(&mut app, &mut tick, None, home, 0.0, 1, &[]);
+    rows.push(summary("empty-courtyard", &times).1);
+    let guardian = Boss {
+        kind: MobKind::VargrGuardian,
+        entity: 21,
+    };
+    let (times, _) = hold(
+        &mut app,
+        &mut tick,
+        Some(guardian),
+        home,
+        yaw_toward(eye - home),
+        1,
+        &[],
+    );
+    rows.push(summary("vargr-idle", &times).1);
+
+    // Thirty spiders on three rings round the courtyard centre, each running its ring at the
+    // server's cave-spider speed and facing the way it runs, a snapshot every third frame.
+    let speed = 5.0_f32;
+    let spiders = |tick: u32| -> Vec<crate::net::MobState> {
+        let seconds = tick as f32 / 20.0;
+        (0..HORDE)
+            .map(|index| {
+                let ring = 1.5 + (index % 3) as f32 * 1.2;
+                let start = index as f32 * std::f32::consts::TAU / HORDE as f32;
+                let angle = start + seconds * speed / ring;
+                let pos = home + Vec3::new(ring * angle.cos(), 0.0, ring * angle.sin());
+                let heading = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                crate::net::MobState {
+                    entity_id: 500 + index,
+                    kind: MobKind::CaveSpider,
+                    pos: pos.to_array(),
+                    vel: (heading * speed).to_array(),
+                    yaw: yaw_toward(heading),
+                    health: 20,
+                    max_health: 20,
+                    action: MobAction::Chase,
+                    target_entity_id: 7,
+                }
+            })
+            .collect()
+    };
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_micros(16_667),
+    ));
+    // What the camera actually drew, frustum culling included: every spider part the render
+    // world will see this frame. Read on every timed frame rather than once at the end, so a
+    // spider that ran out of view for part of the run fails the measurement it would otherwise
+    // have made cheaper.
+    let on_screen = |app: &mut App| {
+        let world = app.world_mut();
+        world
+            .query::<(&MobVisual, &ViewVisibility)>()
+            .iter(world)
+            .filter(|(visual, visible)| matches!(visual.part, MobPart::Spider(_)) && visible.get())
+            .count()
+    };
+    let whole = HORDE as usize * super::spider::SEGMENT_COUNT;
+    let mut fewest = usize::MAX;
+    let mut times = Vec::with_capacity(TIMED_FRAMES);
+    for frame in 0..WARM_FRAMES + TIMED_FRAMES {
+        if frame % 3 == 0 {
+            tick += 1;
+            let mut snapshot = fixture::snapshot(tick);
+            snapshot.mobs = spiders(tick);
+            app.world_mut()
+                .resource_mut::<SnapshotBuffer>()
+                .accept(snapshot, Instant::now() - Duration::from_millis(100));
+        }
+        let time = timed_frame(&mut app);
+        if frame >= WARM_FRAMES {
+            times.push(time);
+            fewest = fewest.min(on_screen(&mut app));
+        }
+    }
+    assert_eq!(
+        fewest, whole,
+        "every part of all thirty spiders was drawn on every timed frame"
+    );
+    let (p95, row) = summary("spider-horde-30", &times);
+    rows.push(row);
+    std::fs::write(
+        std::env::temp_dir().join("spider-horde-cost-1296.csv"),
+        rows.join("\n") + "\n",
+    )
+    .unwrap();
+    assert!(
+        p95 <= BUDGET_MS,
+        "thirty spiders take {p95:.3} ms at the 95th percentile, over the {BUDGET_MS:.3} ms frame:\n{}",
+        rows.join("\n")
+    );
+}

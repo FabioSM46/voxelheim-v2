@@ -770,3 +770,6 @@ impl Mob {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capture;
