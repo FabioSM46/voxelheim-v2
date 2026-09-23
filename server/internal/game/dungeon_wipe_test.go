@@ -217,3 +217,48 @@ func TestAWipeMidSiegeRestartsEveryWave(t *testing.T) {
 		t.Fatalf("a wipe after seven waves left the siege at %+v", w)
 	}
 }
+
+// The waves count as beaten only once every wave has come out and every spider is dead
+// (dungeonGroupClearedLocked holds the burrows uncleared while waves remain). A party
+// that cleared the waves so far and then wiped in a hall gets the whole siege back, as
+// does one that wiped elsewhere with the last wave still out. A party that beat every
+// wave keeps the cave cleared through a wipe anywhere.
+func TestAWipeElsewhereRestartsTheWavesUnlessTheyWereBeaten(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		waves   int  // waves released before the wipe
+		killAll bool // every released spider dead before the wipe
+		restart bool
+	}{
+		{"the first wave cleared, the rest to come", 1, true, true},
+		{"the last wave out and alive", len(spiderWaveSizes), false, true},
+		{"every wave beaten", len(spiderWaveSizes), true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newWavesSim(t, 1)
+			cave := partyAt(4, triggerCentre(t, s, world.CaveTrigger))
+			w := &s.dungeon.descent.waves
+			for tick := uint64(1); w.next < tc.waves; tick++ {
+				released := len(s.dungeon.descent.groups[world.CaveBurrowGroup])
+				s.advanceDungeonDescentLocked(tick, cave)
+				for _, id := range s.dungeon.descent.groups[world.CaveBurrowGroup][released:] {
+					if m := s.mobs[id]; m != nil && (tc.killAll || w.next < tc.waves) {
+						s.damageMobLocked(m, m.health)
+					}
+				}
+			}
+			// The party has died in the first hall. Nothing ticks in between, so no
+			// further wave can come out and make the burrows look unbeaten.
+			hall := partyAt(4, zoneCentre(s, 0))
+			killAll(hall)
+			s.advanceDungeonDescentLocked(100000, hall)
+			restarted := !w.started && w.next == 0 && !s.dungeonTriggerFiredLocked(world.CaveTrigger)
+			if restarted != tc.restart {
+				t.Fatalf("restarted=%v, want %v: %+v", restarted, tc.restart, w)
+			}
+			if !tc.restart && !s.dungeonGroupClearedLocked(world.CaveBurrowGroup) {
+				t.Fatal("a beaten siege lost its cleared cave to a wipe elsewhere")
+			}
+		})
+	}
+}
