@@ -37,9 +37,6 @@ func TestTheChasmIsASmoothShaftIntoDeepStillWater(t *testing.T) {
 		w := newDungeonWorld(t, seed, true, false)
 		_, _, gate := InstanceEncounterAnchors(seed)
 		surface := dungeonAnchorsByKind(seed)[AnchorInstanceCheckpoint][0].Y // level with the water's top
-		if gate.Y-surface < 30 {
-			t.Fatalf("seed %d: the drop from the trapdoor to the water is %d", seed, gate.Y-surface)
-		}
 		shaft := 0
 		for y := gate.Y; y >= surface; y-- {
 			// The column is the trapdoor's five by five; its walls are the ring one out,

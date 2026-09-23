@@ -32,9 +32,11 @@ func newDescentTerrain(t *testing.T, seed int64) *descentTerrain {
 	t.Helper()
 	cache, _ := world.NewGatedInstanceCache(seed, 1, world.InstanceChunkEnvelope(seed), true)
 	d := &descentTerrain{chunks: map[world.Coord]*world.Chunk{}, doors: map[[3]int64]bool{}, doorOpen: true}
-	for x := int32(-3); x <= 2; x++ {
-		for y := int32(-3); y <= 1; y++ {
-			for z := int32(-3); z <= 2; z++ {
+	// A box wider than any turn of the dungeon, filtered by the cache's own envelope;
+	// the count below proves the box held every chunk the envelope has.
+	for x := int32(-8); x <= 8; x++ {
+		for y := int32(-8); y <= 8; y++ {
+			for z := int32(-8); z <= 8; z++ {
 				coord := world.Coord{X: x, Y: y, Z: z}
 				if !cache.Contains(coord) {
 					continue
@@ -46,6 +48,9 @@ func newDescentTerrain(t *testing.T, seed int64) *descentTerrain {
 				d.chunks[coord] = chunk
 			}
 		}
+	}
+	if len(d.chunks) != world.InstanceChunkEnvelope(seed) {
+		t.Fatalf("seed %d: loaded %d chunks of an envelope of %d", seed, len(d.chunks), world.InstanceChunkEnvelope(seed))
 	}
 	for _, a := range world.InstanceDungeonAnchors(seed) {
 		if a.Kind == world.AnchorInstanceDoor {
@@ -73,18 +78,31 @@ func (d *descentTerrain) Block(x, y, z int64) (world.Block, bool) {
 func (d *descentTerrain) Solid(x, y, z int64) bool { b, _ := d.Block(x, y, z); return world.Solid(b) }
 func (d *descentTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(d, x, y, z) }
 
+// The drawing's arrival slot and guardian centre, which fix the frame below.
+const (
+	descentArrivalX, descentArrivalZ = 17, 3
+	descentGuardianZ                 = 87
+)
+
 // descentFrame maps a cell of the unrotated drawing's floor plan to the centre of the
 // world cell the seed's placement put it in. It is derived from two anchors rather than
-// from world's rotation: the arrival slot stands at (17, 3) in the drawing and the
-// guardian at (17, 87), so their difference is the drawing's +Z in the world, and +X is
-// that turned a quarter clockwise.
-func descentFrame(seed int64) func(lx, lz int) [3]float64 {
+// from world's rotation: the arrival slot and the guardian share the drawing's x, so
+// their difference is the drawing's +Z in the world, and +X is that turned a quarter
+// clockwise. A difference that is not exactly one axis of that length fails the test,
+// so a moved anchor can never collapse the frame into a route that goes nowhere.
+func descentFrame(t *testing.T, seed int64) func(lx, lz int) [3]float64 {
+	t.Helper()
 	arrival, _ := world.InstanceAnchors(seed)
 	guardian, _, _ := world.InstanceEncounterAnchors(seed)
-	ux, uz := (guardian.X-arrival.X)/84, (guardian.Z-arrival.Z)/84
+	const span = descentGuardianZ - descentArrivalZ
+	dx, dz := guardian.X-arrival.X, guardian.Z-arrival.Z
+	if dx%span != 0 || dz%span != 0 || max(dx, -dx)+max(dz, -dz) != span {
+		t.Fatalf("seed %d: arrival %+v and guardian %+v are not %d apart on one axis", seed, arrival, guardian, span)
+	}
+	ux, uz := dx/span, dz/span
 	vx, vz := uz, -ux
 	return func(lx, lz int) [3]float64 {
-		dx, dz := int64(lx-17), int64(lz-3)
+		dx, dz := int64(lx-descentArrivalX), int64(lz-descentArrivalZ)
 		return [3]float64{
 			float64(arrival.X+ux*dz+vx*dx) + .5,
 			float64(arrival.Y),
@@ -145,14 +163,14 @@ func walkDescent(t *testing.T, terrain Terrain, mount vnet.MountKind, route [][3
 func TestFloorOneIsWalkedAndRiddenFromArrivalToTheChasm(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		terrain := newDescentTerrain(t, seed)
-		at := descentFrame(seed)
+		at := descentFrame(t, seed)
 		for _, body := range []struct {
 			mount vnet.MountKind
 			lanes []int
 		}{{vnet.MountKindUnknown, []int{16, 17, 18}}, {vnet.MountKindBlackHorse, []int{17}}} {
 			for _, lane := range body.lanes {
 				t.Run(fmt.Sprintf("seed%d/mount%d/lane%d", seed, body.mount, lane), func(t *testing.T) {
-					route := [][3]float64{at(17, 3), at(12, 3), at(12, 11), at(lane, 11), at(lane, 92)}
+					route := [][3]float64{at(descentArrivalX, descentArrivalZ), at(12, 3), at(12, 11), at(lane, 11), at(lane, 92)}
 					p := walkDescent(t, terrain, body.mount, route)
 					if p.pos[1] != route[0][1] {
 						t.Fatalf("the rim is not on floor 1: %v", p.pos)
