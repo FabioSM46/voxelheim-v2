@@ -8,16 +8,18 @@ import (
 )
 
 // dungeonWorld reads the generated dungeon of one seed through its real cache, with
-// the gate open or shut and the puzzle doors optionally read as open — the state a
-// party that solved them walks through, less any puzzle named in shut. Nothing here
-// consults the drawing.
+// the gate open or shut and the doors optionally opened — the state a party that
+// solved the puzzles and felled the king walks through, less any door named in shut.
+// The doors are opened through the gate's own Update on the first read, so every read
+// is of the chunks the cache really publishes. Nothing here consults the drawing.
 type dungeonWorld struct {
 	t        *testing.T
 	cache    *Cache
 	gate     *InstanceGate
 	doorOpen bool
-	doors    map[[3]int64]int // a door cell's puzzle
+	doors    map[[3]int64]int // a door cell's index
 	shut     map[int]bool
+	opened   map[int]bool // what the first read opened, so a later shut is caught
 }
 
 func newDungeonWorld(t *testing.T, seed int64, gateOpen, doorOpen bool) *dungeonWorld {
@@ -33,8 +35,17 @@ func newDungeonWorld(t *testing.T, seed int64, gateOpen, doorOpen bool) *dungeon
 }
 
 func (w *dungeonWorld) at(x, y, z int64) Block {
-	if puzzle, door := w.doors[[3]int64{x, y, z}]; door && w.doorOpen && !w.shut[puzzle] {
-		return Air
+	if w.doorOpen && w.opened == nil {
+		w.opened = map[int]bool{}
+		for _, index := range w.doors {
+			w.opened[index] = !w.shut[index]
+		}
+		w.gate.Update(InstanceUpdate{Doors: w.opened})
+	}
+	for index, open := range w.opened {
+		if open == w.shut[index] {
+			w.t.Fatalf("door %d was shut after the doors were opened", index)
+		}
 	}
 	coord := ChunkOf(x, y, z)
 	if !w.cache.Contains(coord) {

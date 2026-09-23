@@ -7,7 +7,6 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -28,6 +27,7 @@ type dungeonEncounters struct {
 	gate               *world.InstanceGate
 	guardianID, kingID uint64
 	progress           dungeonProgress
+	puzzles            *dungeonPuzzles
 	changes            [][]byte
 	pending            map[*Player]int
 	// descent is the minor encounters: placed groups, triggers and the spider waves
@@ -82,22 +82,19 @@ func (s *Sim) dungeonDefeatLocked(m *mob) {
 	if d == nil {
 		return
 	}
-	if m.entityID == d.kingID {
+	if m.entityID == d.kingID && !d.progress.king {
 		d.progress.king = true
+		s.openReturnShortcutLocked()
 	}
 	if m.entityID != d.guardianID || d.progress.guardian {
 		return
 	}
 	d.progress.guardian = true
+	var cells []world.InstanceCell
 	for _, p := range d.gate.Open() {
-		d.changes = append(d.changes, protocol.EncodeBlockUpdate(protocol.BlockUpdate{
-			Pos: [3]int32{int32(p.X), int32(p.Y), int32(p.Z)}, BlockID: uint16(world.Air),
-		}))
+		cells = append(cells, world.InstanceCell{X: p.X, Y: p.Y, Z: p.Z, Block: world.Air})
 	}
-	for _, p := range s.players {
-		d.pending[p] = 0
-	}
-	s.flushDungeonGateLocked()
+	s.announceDungeonCellsLocked(cells)
 }
 
 // A full outbound queue retains the unsent suffix. Late arrivals read the open

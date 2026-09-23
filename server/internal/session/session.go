@@ -2206,8 +2206,18 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			return nil
 		}
 		request := *msg.MechanismUse
-		refusal := mechanismRefusal(request)
+		reason := vnet.RefusalReasonMalformedNoAnchor
+		uErr := errMechanismWithoutCell
+		if request.HasPos {
+			reason, uErr = player.UseMechanism(request.Pos)
+		}
+		if uErr == nil {
+			// Accepted: the block updates it caused are the whole answer.
+			return nil
+		}
+		refusal := mechanismRefusal(request, reason)
 		log.Debug("refusing mechanism use",
+			"reason", uErr.Error(),
 			"code", refusal.Reason.String(),
 			"pos", request.Pos,
 			"has_pos", request.HasPos,
@@ -3103,22 +3113,24 @@ func attackRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
 	return protocol.ActionRefused{Action: action, Reason: reason}
 }
 
-// mechanismRefusal is the answer to every MechanismUseRequest this server can receive
-// today. **No block is a mechanism yet**: levers and rune stones arrive with the dungeon's
-// world and mechanism issues, and until then every named cell answers NotAMechanism. It is
-// still a refusal rather than silence, because a lever that does nothing when pulled is
-// indistinguishable from a click that missed.
+// errMechanismWithoutCell is a MechanismUseRequest that named no cell.
+var errMechanismWithoutCell = errors.New("the mechanism use named no cell")
+
+// mechanismRefusal is the answer to a MechanismUseRequest the simulation refused, under
+// UseMechanism and echoing the cell it named. It is a refusal rather than silence,
+// because a lever that does nothing when pulled is indistinguishable from a click that
+// missed.
 //
 // A request that named no cell is MalformedNoAnchor instead, and carries no anchor: the
 // origin is a real cell, and echoing one the client never sent would point the player's
 // answer at a place nobody named.
-func mechanismRefusal(request protocol.MechanismUseRequest) protocol.ActionRefused {
+func mechanismRefusal(request protocol.MechanismUseRequest, reason vnet.RefusalReason) protocol.ActionRefused {
 	if !request.HasPos {
 		return protocol.ActionRefused{Action: vnet.RefusedActionUseMechanism, Reason: vnet.RefusalReasonMalformedNoAnchor}
 	}
 	return protocol.ActionRefused{
 		Action:    vnet.RefusedActionUseMechanism,
-		Reason:    vnet.RefusalReasonNotAMechanism,
+		Reason:    reason,
 		Anchor:    request.Pos,
 		HasAnchor: true,
 	}
