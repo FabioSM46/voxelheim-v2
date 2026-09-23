@@ -37,8 +37,13 @@ import (
 // Three waves, each from the burrows in turn, [spiderWaveInterval] apart — or
 // [spiderWaveBreather] after the previous wave's last spider dies, when that is
 // sooner, so a party that clears a wave quickly is not left waiting but always gets a
-// breath. A wipe — no live player inside — stops the waves for good; what comes back
-// after one is the persistence issue's wipe rule, not this file's.
+// breath. A wipe — somebody inside and every one of them dead — stops the waves for
+// good; what comes back after one is the persistence issue's wipe rule, not this
+// file's. An instance with nobody in it is not a wipe: a party that has disconnected
+// has not lost, so the schedule only pauses, and an overdue wave comes out on the
+// first tick somebody is back. That is deliberately narrower than
+// [Sim.resetWipedDungeonLocked], which treats an empty instance as abandoned combat:
+// resetting a boss is transient, while stopping the waves is permanent.
 //
 // The layout makes the cavern's trigger the first thing a party reaches, ahead of the
 // web curtain across the neck beyond it, so the trigger is the one start the waves
@@ -175,6 +180,9 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 		}
 	}
 	w := &desc.waves
+	if len(players) == 0 {
+		return false // nobody inside: nothing fires and the schedule waits
+	}
 	if w.started && !anyAlive {
 		w.stopped = true
 	}

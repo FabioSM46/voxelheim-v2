@@ -246,6 +246,27 @@ func TestAWipeStopsTheWaves(t *testing.T) {
 	}
 }
 
+// An empty instance is a party that disconnected, not one that lost: the waves wait
+// for it rather than stopping, and the overdue wave comes out when somebody is back.
+func TestAnEmptyInstancePausesTheWavesRatherThanStoppingThem(t *testing.T) {
+	s := newWavesSim(t, 3)
+	cave := triggerCentre(t, s, world.CaveTrigger)
+	s.advanceDungeonDescentLocked(10, []*Player{delver(7, cave)})
+	interval := uint64(ticksFor(spiderWaveInterval, 20))
+	for tick := uint64(11); tick < 10+3*interval; tick++ {
+		if s.advanceDungeonDescentLocked(tick, nil) {
+			t.Fatalf("a wave came at tick %d with nobody inside", tick)
+		}
+	}
+	w := &s.dungeon.descent.waves
+	if w.stopped || w.next != 1 {
+		t.Fatalf("an empty instance ended the waves: %+v", w)
+	}
+	if !s.advanceDungeonDescentLocked(10+3*interval, []*Player{delver(7, cave)}) || w.next != 2 {
+		t.Fatal("the overdue wave did not come out when the party returned")
+	}
+}
+
 func TestADungeonGroupIsClearedOnlyWhenEveryMemberIsDead(t *testing.T) {
 	s := newWavesSim(t, 0)
 	group := s.dungeon.descent.groups[2]
