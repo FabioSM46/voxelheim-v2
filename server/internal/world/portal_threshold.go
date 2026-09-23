@@ -6,7 +6,7 @@ package world
 // **The opening is read from the drawing, never restated.** Cells are exactly the
 // [PortalVeil] and [PortalHeart] voxels the placed schematic writes, turned with the
 // walls by the same [rotateCell] the chunk compositor uses — so both ruin variants,
-// the instance chamber and every quarter turn describe the doorway a player can
+// the dungeon's exit and every quarter turn describe the doorway a player can
 // actually see, and a later redrawing of an arch moves its trigger with it. The
 // [RuneStone] jambs, shoulders and crown are deliberately absent: touching the frame
 // is not touching the veil.
@@ -30,7 +30,7 @@ func (r Ruin) Threshold() PortalThreshold {
 // InstanceExitThreshold is the return opening in the dungeon generated from seed,
 // placed by the same quarter turn as [InstanceAnchors]; its Heart is that exit anchor.
 func InstanceExitThreshold(seed int64) PortalThreshold {
-	return placedThreshold(instanceChamber, instancePlacement(seed))
+	return placedThreshold(instanceDungeon, instancePlacement(seed))
 }
 
 // placedThreshold collects one drawing's portal voxels at their placed coordinates.

@@ -13,7 +13,7 @@ type InstanceGate struct {
 }
 
 func NewGatedInstanceCache(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
-	return chamberLayout.gated(seed, workers, capacity, open)
+	return dungeonLayout.gated(seed, workers, capacity, open)
 }
 
 // gated places a five-by-five door centred on the layout's gate anchor: upright, its

@@ -2,7 +2,7 @@ package world
 
 // InstanceAnchors returns independent copies of the two standing slots in world
 // block coordinates. Consumers place feet at Y and centre X/Z in the named cell.
-// The same seed rotation places both the chamber and its anchors.
+// The same seed rotation places both the dungeon and its anchors.
 func InstanceAnchors(seed int64) (arrival, exit PlacedAnchor) {
 	b := instancePlacement(seed)
 	for _, anchor := range b.Anchors {
@@ -46,15 +46,14 @@ type drawnCell struct {
 	block   Block
 }
 
-// chamberLayout is the two-arena drawing with its authored headroom rule.
-var chamberLayout = instanceLayout{
-	drawing: instanceChamber,
-	interior: func(lx, ly, lz int) bool {
-		// No shell, ornament, ceiling, or void cell is editable. Air above a real
-		// floor is ephemeral player space, including the connected gallery.
-		return ly > 0 && instanceEditableCell(instanceChamber.At(lx, ly, lz)) && instanceChamber.At(lx, 0, lz) != Air &&
-			((ly < 9 && (lz < 28 || lz > 36)) || ly < 6)
-	},
+// dungeonLayout is the first dungeon: the upper halls, the chasm and the pool, with
+// the seed's rune inscription laid over the drawing and floor 1 on world y = 1.
+var dungeonLayout = instanceLayout{
+	drawing:   instanceDungeon,
+	interior:  dungeonEditable,
+	originY:   1 - dungeonUpperFloor,
+	overlay:   runeInscription,
+	floorGate: true,
 }
 
 // instanceEditableCell is the one drawing content an edit may replace: open air, or
@@ -67,14 +66,14 @@ func (l instanceLayout) placement(seed int64) Building {
 	return centreSchematic(BuildingRuin, 0, l.drawing, 0, 0, l.originY, Facing(uint64(seed)&3))
 }
 
-func instancePlacement(seed int64) Building { return chamberLayout.placement(seed) }
+func instancePlacement(seed int64) Building { return dungeonLayout.placement(seed) }
 
 // GenerateInstance is a pure generator for the dungeon.
 // Outside its shell every voxel is Air (void), never open-world terrain. The
 // drawing straddles X/Z chunk boundaries so the ordinary chunk compositor and
 // streamer can use it without a special representation.
 func GenerateInstance(seed int64, coord Coord) *Chunk {
-	return chamberLayout.generate(seed, coord)
+	return dungeonLayout.generate(seed, coord)
 }
 
 // generate fills one chunk by mapping each of its voxels back into the unrotated
@@ -122,7 +121,7 @@ func (l instanceLayout) generate(seed int64, coord Coord) *Chunk {
 // halo of void for rendering the outside faces. Streamers should use Contains to
 // skip everything else; Get refuses it even if a body escapes through another bug.
 func NewInstanceCache(seed int64, workers, capacity int) *Cache {
-	return chamberLayout.cache(seed, workers, capacity)
+	return dungeonLayout.cache(seed, workers, capacity)
 }
 
 func (l instanceLayout) cache(seed int64, workers, capacity int) *Cache {
@@ -136,7 +135,7 @@ func (l instanceLayout) cache(seed int64, workers, capacity int) *Cache {
 // resident: its shell's chunks plus the one-chunk halo of void around them. A cache
 // sized to it never evicts a chunk a party can see.
 func InstanceChunkEnvelope(seed int64) int {
-	lo, hi := chamberLayout.chunkBounds(seed)
+	lo, hi := dungeonLayout.chunkBounds(seed)
 	return int(hi.X-lo.X+3) * int(hi.Y-lo.Y+3) * int(hi.Z-lo.Z+3)
 }
 
@@ -165,7 +164,7 @@ func (l instanceLayout) containsChunk(seed int64, coord Coord) bool {
 // finite bounds before converting to int so hostile coordinates cannot overflow
 // on the server's 32-bit builds.
 func instanceLocal(seed, x, y, z int64) (int, int, int, bool) {
-	return chamberLayout.local(seed, x, y, z)
+	return dungeonLayout.local(seed, x, y, z)
 }
 
 func (l instanceLayout) local(seed, x, y, z int64) (int, int, int, bool) {
@@ -184,7 +183,7 @@ func (l instanceLayout) localIn(b Building, x, y, z int64) (int, int, int, bool)
 }
 
 func instanceInterior(seed, x, y, z int64) bool {
-	return chamberLayout.editable(seed, x, y, z)
+	return dungeonLayout.editable(seed, x, y, z)
 }
 
 func (l instanceLayout) editable(seed, x, y, z int64) bool {

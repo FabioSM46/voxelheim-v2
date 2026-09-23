@@ -167,7 +167,14 @@ func TestTransferredPlayersSeeOnlyTheirWorldsMobsAndDrops(t *testing.T) {
 			sim.Step(2)
 			sink := &dropSink{frames: [][]byte{frame}}
 			snap := newestSnapshot(t, sink)
-			if snap.EntitiesLength() != 1 || snap.MobsLength() != len(sim.mobs) || snap.DropsLength() != 1 {
+			// The dungeon is larger than one view: count the mobs this player can see.
+			visible := 0
+			for _, m := range sim.mobs {
+				if withinView(p.chunk, m.chunk, sim.viewDistance) {
+					visible++
+				}
+			}
+			if snap.EntitiesLength() != 1 || snap.MobsLength() != visible || visible == 0 || snap.DropsLength() != 1 {
 				t.Fatalf("foreign entities: players=%d mobs=%d drops=%d", snap.EntitiesLength(), snap.MobsLength(), snap.DropsLength())
 			}
 			var entity vnet.EntityState

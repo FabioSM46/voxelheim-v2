@@ -31,7 +31,7 @@ func TestInstanceGoldenChunks(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("seed %d chunk %+v differs from chamber fixture", seed, coord)
+					t.Errorf("seed %d chunk %+v differs from dungeon fixture", seed, coord)
 				}
 			}
 		}
@@ -53,7 +53,7 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 			t.Fatalf("bad anchors: %+v %+v", arrival, exit)
 		}
 		if arrival.Y != 1 || exit.Y != 1 {
-			t.Fatal("anchors must stand directly on the chamber floor")
+			t.Fatal("anchors must stand directly on floor 1")
 		}
 		// Flood the two-voxel-tall body's standing cells. Reaching an external
 		// cell would also detect a hole that an anchor-only check cannot see.
@@ -70,8 +70,8 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 		for len(queue) > 0 {
 			p := queue[0]
 			queue = queue[1:]
-			if p.x <= -34 || p.x >= 34 || p.z <= -34 || p.z >= 34 {
-				t.Fatal("body escaped the chamber")
+			if _, _, _, inside := instanceLocal(seed, p.x, 1, p.z); !inside {
+				t.Fatal("body escaped the dungeon")
 			}
 			for _, d := range []point{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 				next := point{p.x + d.x, p.z + d.z}
@@ -89,7 +89,7 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 
 func TestInstanceVoidAndFiniteCache(t *testing.T) {
 	cache := NewInstanceCache(7, 1, 2)
-	for _, coord := range []Coord{{Y: -1}, {X: 3}, {X: -3}, {Y: 1}, {Z: 3}, {Z: -3}, {Y: -100}, {X: math.MinInt32}, {Z: math.MaxInt32}} {
+	for _, coord := range []Coord{{Y: -3}, {X: 3}, {X: -3}, {Y: 1}, {Z: 3}, {Z: -3}, {Y: -100}, {X: math.MinInt32}, {Z: math.MaxInt32}} {
 		chunk := GenerateInstance(7, coord)
 		if chunk.Coord != coord || len(chunk.Blocks) != ChunkVolume {
 			t.Fatalf("invalid void chunk at %+v", coord)
@@ -101,16 +101,19 @@ func TestInstanceVoidAndFiniteCache(t *testing.T) {
 		}
 	}
 	// Include partial shell chunks: every voxel outside the drawing is void.
-	for x := int32(-1); x <= 0; x++ {
-		for z := int32(-1); z <= 0; z++ {
-			chunk := GenerateInstance(7, Coord{X: x, Z: z})
-			ox, oy, oz := chunk.Coord.Origin()
-			for y := range ChunkSize {
-				for lz := range ChunkSize {
-					for lx := range ChunkSize {
-						wx, wy, wz := ox+int64(lx), oy+int64(y), oz+int64(lz)
-						if (wx < -34 || wx > 34 || wy > 9 || wz < -16 || wz > 16) && chunk.At(lx, y, lz) != Air {
-							t.Fatal("partial chunk grows terrain outside shell")
+	lo, hi := dungeonLayout.chunkBounds(7)
+	for x := lo.X; x <= hi.X; x++ {
+		for z := lo.Z; z <= hi.Z; z++ {
+			for cy := lo.Y; cy <= hi.Y; cy++ {
+				chunk := GenerateInstance(7, Coord{X: x, Y: cy, Z: z})
+				ox, oy, oz := chunk.Coord.Origin()
+				for y := range ChunkSize {
+					for lz := range ChunkSize {
+						for lx := range ChunkSize {
+							wx, wy, wz := ox+int64(lx), oy+int64(y), oz+int64(lz)
+							if _, _, _, inside := instanceLocal(7, wx, wy, wz); !inside && chunk.At(lx, y, lz) != Air {
+								t.Fatal("partial chunk grows terrain outside shell")
+							}
 						}
 					}
 				}
@@ -134,7 +137,7 @@ func TestInstanceVoidAndFiniteCache(t *testing.T) {
 			}
 		}
 	}
-	if accepted != 72 || cache.Len() > 2 {
+	if accepted != InstanceChunkEnvelope(7) || accepted != 120 || cache.Len() > 2 {
 		t.Fatalf("finite envelope/residency changed: %d accepted, %d resident", accepted, cache.Len())
 	}
 	outside := Coord{Y: -1000}
@@ -155,7 +158,13 @@ func TestInstanceShellCannotBeEditedAndInteriorIsEphemeral(t *testing.T) {
 	t.Chdir(dir)
 	cache := NewInstanceCache(2, 1, 48)
 	ctx := context.Background()
-	for _, p := range [][3]int64{{0, 0, 0}, {0, 6, 0}, {-16, 2, 0}, {16, 2, 0}, {0, 2, -34}, {0, 2, 34}, {8, 2, 0}} {
+	arrival, exit := InstanceAnchors(2)
+	guardian, _, gate := InstanceEncounterAnchors(2)
+	// Floor, portal heart, monolith, arena ceiling, and the chasm's air column.
+	for _, p := range [][3]int64{
+		{arrival.X, 0, arrival.Z}, {exit.X, exit.Y, exit.Z}, {guardian.X + 8, 2, guardian.Z + 8},
+		{guardian.X, 9, guardian.Z}, {gate.X, gate.Y - 5, gate.Z},
+	} {
 		if err := cache.Apply(ctx, p[0], p[1], p[2], Air, nil); !errors.Is(err, ErrImmutableShell) {
 			t.Fatalf("shell edit accepted at %v: %v", p, err)
 		}
@@ -163,12 +172,12 @@ func TestInstanceShellCannotBeEditedAndInteriorIsEphemeral(t *testing.T) {
 			t.Fatalf("resident shell edit accepted at %v: %v", p, err)
 		}
 	}
-	if err := cache.Apply(ctx, 0, 1, 0, Planks, nil); err != nil {
+	if err := cache.Apply(ctx, arrival.X, 1, arrival.Z, Planks, nil); err != nil {
 		t.Fatal(err)
 	}
-	coord := ChunkOf(0, 1, 0)
+	coord := ChunkOf(arrival.X, 1, arrival.Z)
 	chunk, _, err := cache.Get(ctx, coord)
-	if err != nil || chunk.At(0, 1, 0) != Planks {
+	if err != nil || chunk.At(Local(arrival.X), 1, Local(arrival.Z)) != Planks {
 		t.Fatal("interior edit missing")
 	}
 	if cache.store != nil {
@@ -186,11 +195,11 @@ func TestInstanceShellCannotBeEditedAndInteriorIsEphemeral(t *testing.T) {
 	}
 	chunk, _, err = cache.Get(ctx, coord)
 	if err != nil || !reflect.DeepEqual(chunk, GenerateInstance(2, coord)) {
-		t.Fatal("regeneration did not restore chamber base")
+		t.Fatal("regeneration did not restore the dungeon")
 	}
 	fresh := NewInstanceCache(2, 1, 48)
 	chunk, _, err = fresh.Get(ctx, coord)
-	if err != nil || chunk.At(0, 1, 0) != Air {
+	if err != nil || chunk.At(Local(arrival.X), 1, Local(arrival.Z)) != Air {
 		t.Fatal("a new instance retained old edits")
 	}
 }
