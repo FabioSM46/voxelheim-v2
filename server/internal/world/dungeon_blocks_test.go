@@ -66,7 +66,7 @@ func TestEveryBlockIdIsClassifiedExhaustively(t *testing.T) {
 		Cobweb:       {cover: true, snares: true},
 		LeverOff:     cube,
 		LeverOn:      cube,
-		RuneStoneLit: cube,
+		RuneStoneLit: {solid: true, immutable: true},
 	}
 	if len(want) != int(RuneStoneLit)+1 {
 		t.Fatalf("the table names %d ids, the palette has %d", len(want), RuneStoneLit+1)

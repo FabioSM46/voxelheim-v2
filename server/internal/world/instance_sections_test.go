@@ -281,3 +281,23 @@ func TestTheInstanceEnvelopeCountsEveryContainedChunk(t *testing.T) {
 		}
 	}
 }
+
+// A layout must name exactly one gate: without one the door would land at the world
+// origin, in a chunk that belongs to nothing, so gated refuses rather than guessing.
+func TestAGatedLayoutWithoutExactlyOneGateAnchorPanics(t *testing.T) {
+	room := func() *Section { return NewSection(9, 9, 9).CarveRoom(Box{1, 1, 1, 7, 7, 7}, Basalt) }
+	for name, s := range map[string]*Section{
+		"none": room(),
+		"two":  room().Anchor(AnchorInstanceGate, 2, 1, 2, 0).Anchor(AnchorInstanceGate, 5, 1, 5, 0),
+	} {
+		l := instanceLayout{drawing: mustBuildSection(t, s)}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: gated accepted the layout", name)
+				}
+			}()
+			l.gated(0, 1, 8, false)
+		}()
+	}
+}

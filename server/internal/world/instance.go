@@ -72,12 +72,15 @@ func (l instanceLayout) generate(seed int64, coord Coord) *Chunk {
 	if !l.chunkContainsShell(seed, coord) {
 		return chunk
 	}
-	facing := l.placement(seed).Facing
+	// The placement is derived once per chunk: it allocates its anchors, and the
+	// loop below runs 32³ times.
+	b := l.placement(seed)
+	facing := b.Facing
 	ox, oy, oz := coord.Origin()
 	for y := range ChunkSize {
 		for z := range ChunkSize {
 			for x := range ChunkSize {
-				lx, ly, lz, ok := l.local(seed, ox+int64(x), oy+int64(y), oz+int64(z))
+				lx, ly, lz, ok := l.localIn(b, ox+int64(x), oy+int64(y), oz+int64(z))
 				if !ok {
 					continue
 				}
@@ -143,7 +146,11 @@ func instanceLocal(seed, x, y, z int64) (int, int, int, bool) {
 }
 
 func (l instanceLayout) local(seed, x, y, z int64) (int, int, int, bool) {
-	b := l.placement(seed)
+	return l.localIn(l.placement(seed), x, y, z)
+}
+
+// localIn is local against a placement the caller already holds.
+func (l instanceLayout) localIn(b Building, x, y, z int64) (int, int, int, bool) {
 	w, d := rotatedFootprint(l.drawing, b.Facing)
 	x, y, z = x-b.OriginX, y-b.OriginY, z-b.OriginZ
 	if x < 0 || x >= int64(w) || z < 0 || z >= int64(d) || y < 0 || y >= int64(l.drawing.H) {

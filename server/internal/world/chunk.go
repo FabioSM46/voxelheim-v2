@@ -662,5 +662,8 @@ func floorDiv(a, b int64) int64 {
 // Portal is a walk-through threshold, not water or replaceable cover.
 func Portal(b Block) bool { return b == PortalVeil || b == PortalHeart }
 
-// ImmutablePortal protects both the frame and its empty-looking doorway.
-func ImmutablePortal(b Block) bool { return b == RuneStone || Portal(b) }
+// ImmutablePortal protects both the frame and its empty-looking doorway. The lit
+// rune carries the same protection as the unlit [RuneStone] it toggles with, so no
+// edit or persisted delta can replace a rune cell in either state; a mechanism
+// changes one only by patching a chunk, as [InstanceGate] does.
+func ImmutablePortal(b Block) bool { return b == RuneStone || b == RuneStoneLit || Portal(b) }

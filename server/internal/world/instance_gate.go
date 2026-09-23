@@ -1,5 +1,7 @@
 package world
 
+import "fmt"
+
 // InstanceGate is the one-way progression door in an ephemeral dungeon. Its
 // state belongs to this cache, never to disk or the open-world edit layer.
 // composeMu protects open and every publication, including a generation that
@@ -20,11 +22,18 @@ func NewGatedInstanceCache(seed int64, workers, capacity int, open bool) (*Cache
 // into every chunk it touches.
 func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Cache, *InstanceGate) {
 	c := l.cache(seed, workers, capacity)
+	// Exactly one gate anchor, or the layout is a programming error: a missing one
+	// would otherwise put the door at the world origin, in some other chunk.
 	var centre PlacedAnchor
+	gates := 0
 	for _, a := range l.placement(seed).Anchors {
 		if a.Kind == AnchorInstanceGate {
 			centre = a
+			gates++
 		}
+	}
+	if gates != 1 {
+		panic(fmt.Sprintf("instance layout has %d gate anchors, want exactly one", gates))
 	}
 	g := &InstanceGate{cache: c, open: open}
 	dx, dz := int64(1), int64(0)
