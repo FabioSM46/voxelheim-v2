@@ -40,8 +40,8 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 		loadDungeon(t, session)
 		s := session.Sim
 		guardian, king, gate := world.InstanceEncounterAnchors(seed)
-		if len(s.mobs) != 2 {
-			t.Fatal("fresh dungeon must hold two stable encounters")
+		if dungeonBossCount(s) != 2 || len(s.mobs) != 2+dungeonPlacedMinors {
+			t.Fatal("fresh dungeon must hold two stable encounters and every placed minor")
 		}
 		d := s.dungeon
 		beast, ruler := s.mobs[d.guardianID], s.mobs[d.kingID]
@@ -73,7 +73,7 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 		// Disappearance is never victory and never a request to replace a boss.
 		delete(s.mobs, d.guardianID)
 		s.directMobsLocked(100, nil, s.sortedMobsLocked())
-		if len(s.mobs) != 1 || d.progress.guardian {
+		if dungeonBossCount(s) != 1 || d.progress.guardian {
 			t.Fatal("director recreated boss or opened the gate")
 		}
 		s.mobs[d.guardianID] = beast
@@ -98,7 +98,7 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 		for tick := uint64(1); tick <= 1000; tick++ {
 			s.directMobsLocked(tick, nil, s.sortedMobsLocked())
 		}
-		if len(s.mobs) != 0 {
+		if dungeonBossCount(s) != 0 || len(s.mobs) != dungeonPlacedMinors {
 			t.Fatal("defeated encounters respawned")
 		}
 	}
@@ -115,7 +115,7 @@ func TestDungeonRestoreOmitsExactlyTheCompletedEncounters(t *testing.T) {
 		session, _ := manager.Lookup(20)
 		loadDungeon(t, session)
 		expected := dungeonProgressFrom(completed)
-		if session.Sim.dungeon.progress != expected || len(session.Sim.mobs) != 2-len(completed) {
+		if session.Sim.dungeon.progress != expected || dungeonBossCount(session.Sim) != 2-len(completed) {
 			t.Fatal("restore forgot or duplicated an encounter")
 		}
 		_, _, gate := world.InstanceEncounterAnchors(3)
@@ -123,7 +123,7 @@ func TestDungeonRestoreOmitsExactlyTheCompletedEncounters(t *testing.T) {
 			t.Fatal("restored door disagrees with completed guardian")
 		}
 		manager.Step()
-		if len(session.Sim.mobs) != 2-len(completed) {
+		if dungeonBossCount(session.Sim) != 2-len(completed) || len(session.Sim.mobs) != 2-len(completed)+dungeonPlacedMinors {
 			t.Fatal("tick repopulated completed encounter")
 		}
 	}

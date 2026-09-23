@@ -79,7 +79,7 @@ func TestRewardOverlayRestoresRemappedRunsThroughRealManager(t *testing.T) {
 		}
 		loadDungeon(t, live)
 		expected := dungeonProgressFrom(records[i].DefeatedBosses)
-		if live.Sim.dungeon.progress != expected || len(live.Sim.mobs) != 2-len(records[i].DefeatedBosses) {
+		if live.Sim.dungeon.progress != expected || dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
 			t.Fatal("dead boss respawned during real restoration")
 		}
 		_, _, gate := world.InstanceEncounterAnchors(live.Seed)
@@ -90,7 +90,7 @@ func TestRewardOverlayRestoresRemappedRunsThroughRealManager(t *testing.T) {
 	manager.Step()
 	for i, row := range overlay {
 		live, _ := manager.Lookup(row.Session.ID)
-		if len(live.Sim.mobs) != 2-len(records[i].DefeatedBosses) {
+		if dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
 			t.Fatal("next manager tick respawned completed boss")
 		}
 	}
