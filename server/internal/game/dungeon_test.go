@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		manager := instanceTestManager(t, 20, 1)
 		manager.mu.Lock()
-		raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil)
+		raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil, DungeonRoute{})
 		manager.mu.Unlock()
 		if err != nil {
 			t.Fatal(err)
@@ -115,7 +116,7 @@ func TestDungeonRestoreOmitsExactlyTheCompletedEncounters(t *testing.T) {
 		session, _ := manager.Lookup(20)
 		loadDungeon(t, session)
 		expected := dungeonProgressFrom(completed)
-		if session.Sim.dungeon.progress != expected || dungeonBossCount(session.Sim) != 2-len(completed) {
+		if !reflect.DeepEqual(session.Sim.dungeon.progress, expected) || dungeonBossCount(session.Sim) != 2-len(completed) {
 			t.Fatal("restore forgot or duplicated an encounter")
 		}
 		_, _, gate := world.InstanceEncounterAnchors(3)

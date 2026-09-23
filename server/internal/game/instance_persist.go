@@ -67,10 +67,10 @@ var (
 //
 // Deliberately not [InstanceSession]: that snapshot carries a simulation, a chunk cache
 // and a lifetime context, all three of which belong to one process and none of which is
-// written down. This is the six things that outlive one — which run, which world, which
-// ruin, when it resets, what it has killed and who owes it — and the mapping to
-// persist.SessionRecord is one field at a time in main, because game and persist do not
-// import each other.
+// written down. This is the seven things that outlive one — which run, which world, which
+// ruin, when it resets, what it has killed, who owes it and how far its party has come —
+// and the mapping to persist.SessionRecord is one field at a time in main, because game
+// and persist do not import each other.
 //
 // **Bound is who owes this run, not who was inside it.** Occupancy is a fact about a
 // process; a binding is a fact about the world. A restored session comes back empty and
@@ -82,6 +82,10 @@ type SavedSession struct {
 	ExpiresUnix    int64
 	DefeatedBosses []vnet.MobKind
 	Bound          []InstanceCharacter
+	// Route is how far the party has come: the checkpoints reached, the puzzles solved
+	// for good and the groups cleared (dungeon_route.go). Read from the simulation when
+	// the run is saved, and rebuilt into a restored one before it is published.
+	Route DungeonRoute
 	// Generation is the run's boss reward journal identity, or zero before one is
 	// allocated. It is not in the sessions file: a restore takes it from the journal.
 	Generation uint64
@@ -135,6 +139,9 @@ func (m *InstanceManager) SavedSessions() []SavedSession {
 			PendingRewards: clonePendingRewards(s.pendingRewards),
 			DefeatedBosses: append([]vnet.MobKind(nil), s.defeated...),
 			Bound:          who,
+			// Under the manager's mutex and then the simulation's, the one order the two
+			// are ever taken in.
+			Route: s.sim.DungeonRoute(),
 		})
 	}
 	slices.SortFunc(saved, func(a, b SavedSession) int { return cmp.Compare(a.ID, b.ID) })
@@ -251,7 +258,7 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 			expired++
 			continue
 		}
-		s, buildErr := m.newSessionLocked(rec.ID, rec.Seed, rec.Ruin, rec.DefeatedBosses)
+		s, buildErr := m.newSessionLocked(rec.ID, rec.Seed, rec.Ruin, rec.DefeatedBosses, rec.Route)
 		if buildErr != nil {
 			// Unwind rather than leave a half-restored server: every session filed by this
 			// call goes back out through the one path that tears one down, and the manager

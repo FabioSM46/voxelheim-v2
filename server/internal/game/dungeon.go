@@ -13,8 +13,13 @@ import (
 // The first dungeon uses the two append-only boss species as stable encounter
 // identities. Entity ids are minted anew, never used to interpret saved progress.
 // This input is deliberately only defeated encounters; binding storage and the
-// first-kill roster stay with their existing owners.
-type dungeonProgress struct{ guardian, king bool }
+// first-kill roster stay with their existing owners. The route beside them is the
+// rest of a restored run's progress: checkpoints, solved puzzles and cleared groups
+// (dungeon_route.go).
+type dungeonProgress struct {
+	guardian, king bool
+	route          DungeonRoute
+}
 
 func dungeonProgressFrom(defeated []vnet.MobKind) dungeonProgress {
 	return dungeonProgress{
@@ -33,6 +38,8 @@ type dungeonEncounters struct {
 	// descent is the minor encounters: placed groups, triggers and the spider waves
 	// (dungeon_waves.go).
 	descent dungeonDescent
+	// checkpoints is the route's checkpoints and how many are reached (dungeon_route.go).
+	checkpoints dungeonCheckpoints
 }
 
 // Construction only, before the manager publishes this session. Both live
@@ -65,6 +72,7 @@ func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progr
 	if err := s.placeDungeonMinorsLocked(seed, d); err != nil {
 		return err
 	}
+	s.placeDungeonCheckpointsLocked(seed, d)
 	s.dungeon = d
 	s.deathTicks = ticksFor(10*time.Second, uint8(math.Round(1/s.dt)))
 	return nil

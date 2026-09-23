@@ -130,6 +130,11 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 				desc.waves.burrows = append(desc.waves.burrows, a)
 				continue
 			}
+			// A group a restored run had cleared stays cleared: its slots are left
+			// empty, as a killed creature's always is.
+			if d.progress.route.cleared(a.Index) {
+				continue
+			}
 			species, known := dungeonGroupSpecies[a.Index]
 			if !known || a.Index >= len(desc.zones) {
 				return fmt.Errorf("game: dungeon minor group %d has no species or zone", a.Index)
@@ -155,6 +160,16 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 			min: [3]float64{float64(min(c[0].X, c[1].X)), float64(min(c[0].Y, c[1].Y)), float64(min(c[0].Z, c[1].Z))},
 			max: [3]float64{float64(max(c[0].X, c[1].X) + 1), float64(max(c[0].Y, c[1].Y) + 1), float64(max(c[0].Z, c[1].Z) + 1)},
 		}})
+	}
+	// A restored run whose cave was cleared has had every wave: the schedule is spent
+	// and the cavern's trigger has nothing left to start.
+	if d.progress.route.cleared(world.CaveBurrowGroup) {
+		desc.waves.started, desc.waves.next = true, len(spiderWaveSizes)
+		for i := range desc.triggers {
+			if desc.triggers[i].index == world.CaveTrigger {
+				desc.triggers[i].fired = true
+			}
+		}
 	}
 	return nil
 }
@@ -183,6 +198,7 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 	if len(players) == 0 {
 		return false // nobody inside: nothing fires and the schedule waits
 	}
+	s.advanceDungeonCheckpointsLocked(players)
 	if w.started && !anyAlive {
 		w.stopped = true
 	}

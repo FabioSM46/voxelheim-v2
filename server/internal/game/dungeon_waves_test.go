@@ -31,7 +31,7 @@ func newWavesSim(t *testing.T, seed int64) *Sim {
 	t.Helper()
 	manager := instanceTestManager(t, 20, 1)
 	manager.mu.Lock()
-	raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil)
+	raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, nil, DungeonRoute{})
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)

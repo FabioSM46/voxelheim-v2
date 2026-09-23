@@ -24,7 +24,7 @@ func newPuzzleDungeon(t *testing.T, seed int64, rate uint8, defeated []vnet.MobK
 	t.Helper()
 	manager := instanceTestManager(t, rate, 1)
 	manager.mu.Lock()
-	raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, defeated)
+	raw, err := manager.newSessionLocked(100, seed, InstanceRuin{}, defeated, DungeonRoute{})
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)

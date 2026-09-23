@@ -1,6 +1,7 @@
 package game
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestRewardOverlayRestoresRemappedRunsThroughRealManager(t *testing.T) {
 		}
 		loadDungeon(t, live)
 		expected := dungeonProgressFrom(records[i].DefeatedBosses)
-		if live.Sim.dungeon.progress != expected || dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
+		if !reflect.DeepEqual(live.Sim.dungeon.progress, expected) || dungeonBossCount(live.Sim) != 2-len(records[i].DefeatedBosses) {
 			t.Fatal("dead boss respawned during real restoration")
 		}
 		_, _, gate := world.InstanceEncounterAnchors(live.Seed)

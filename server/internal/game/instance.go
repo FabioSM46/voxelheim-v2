@@ -213,7 +213,7 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 		id = m.mintEntityID()
 	}
 	// A bijection of ids provides a fresh seed even for two copies of one ruin.
-	s, err := m.newSessionLocked(id, int64(id^0x49a3d758c1e260bf), ruin, nil)
+	s, err := m.newSessionLocked(id, int64(id^0x49a3d758c1e260bf), ruin, nil, DungeonRoute{})
 	if err != nil {
 		return nil, err
 	}
@@ -228,8 +228,9 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 // other property of a live session — its simulation, its chunk cache, its lifetime
 // context — is reconstructed here either way, which is the whole of "the world is never
 // persisted".
-func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin, defeated []vnet.MobKind) (*instanceSession, error) {
+func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin, defeated []vnet.MobKind, route DungeonRoute) (*instanceSession, error) {
 	progress := dungeonProgressFrom(defeated)
+	progress.route = route.clone()
 	// Sized to the layout's whole envelope, so a taller or wider dungeon grows the
 	// cache with it rather than evicting chunks a party is standing in.
 	chunks, gate := world.NewGatedInstanceCache(seed, world.DefaultWorkers, world.InstanceChunkEnvelope(seed), progress.guardian)
