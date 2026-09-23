@@ -197,6 +197,16 @@ fn sand_hall() -> (App, std::sync::Arc<crate::audio::Mixer>) {
     (app, mixer)
 }
 
+/// Holds a frame to 10 ms of real time. The renderer interpolates the drawn scorpion at the
+/// wall clock (`Instant::now()`) and its steps follow the drawn root, so an unpaced loop would
+/// count steps for however much ground the host's speed let it cover — the reasoning
+/// `spider::tests::run` carries, applied here too.
+fn pace(started_at: Instant) {
+    if let Some(rest) = std::time::Duration::from_millis(10).checked_sub(started_at.elapsed()) {
+        std::thread::sleep(rest);
+    }
+}
+
 /// Runs `frames` 10 ms frames with a snapshot every fifth, the scorpion placed by `at`, and
 /// returns every scorpion cue started.
 fn play(
@@ -208,6 +218,7 @@ fn play(
 ) -> Vec<Cue> {
     let mut cues = Vec::new();
     for frame in 0..frames {
+        let started_at = Instant::now();
         if frame % 5 == 0 {
             *tick += 1;
             app.world_mut().resource_mut::<SnapshotInbox>().push(
@@ -223,6 +234,7 @@ fn play(
         cues.extend(started(app));
         // Drain the output as a device would, so a finished cue leaves the mix.
         mixer.render(&mut Buffer(vec![0.0; (RATE / 100 * 2) as usize]));
+        pace(started_at);
     }
     cues
 }
@@ -289,6 +301,7 @@ fn a_crowd_of_scorpions_is_heard_as_its_nearest_few() {
     let (mut app, mixer) = sand_hall();
     let (mut peak, mut legs, mut heard) = (0, 0, 0.0f32);
     for frame in 0..200u32 {
+        let started_at = Instant::now();
         if frame % 5 == 0 {
             let mobs = (0..8u64)
                 .map(|index| {
@@ -328,6 +341,7 @@ fn a_crowd_of_scorpions_is_heard_as_its_nearest_few() {
         let mut buffer = Buffer(vec![0.0; (RATE / 100 * 2) as usize]);
         mixer.render(&mut buffer);
         heard += buffer.0.iter().map(|x| x * x).sum::<f32>();
+        pace(started_at);
     }
     assert!(
         peak <= MAX_SOURCES && legs <= MAX_CLICKS,

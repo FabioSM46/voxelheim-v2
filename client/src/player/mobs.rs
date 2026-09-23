@@ -1521,17 +1521,6 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     }
 }
 
-/// Runs the cosmetic half: the pose easing towards its action's lean, the fall a killed
-/// body is part way through, and the hit flash.
-///
-/// Local time drives all three, and none of them can change an action, a health or whether
-/// a body exists. A flash that outlives its mob simply goes with it, and so does a fall.
-///
-/// **Ordered inside the `ApplySnapshots` chain, after [`apply_snapshots`]**, and declared
-/// there rather than relied on: the fall this advances is started by the action that system
-/// writes, so a frame that ran the two the other way round would begin every death one
-/// frame late.
-#[allow(clippy::too_many_arguments)] // Terrain joined the snapshot, timeline and asset inputs.
 /// Every child mesh of every body: what it draws, its material, its pose, and — for the
 /// parts that come and go, a scorpion's sand — whether it is shown.
 ///
@@ -1554,7 +1543,17 @@ type MobParts<'w, 's> = Query<
 type LocalBody<'w, 's> =
     Query<'w, 's, &'static Transform, (With<super::LocalPlayer>, Without<Mob>, Without<MobVisual>)>;
 
-#[allow(clippy::too_many_arguments)] // A Bevy system: one parameter per resource it reads.
+/// Runs the cosmetic half: the pose easing towards its action's lean, the fall a killed
+/// body is part way through, and the hit flash.
+///
+/// Local time drives all three, and none of them can change an action, a health or whether
+/// a body exists. A flash that outlives its mob simply goes with it, and so does a fall.
+///
+/// **Ordered inside the `ApplySnapshots` chain, after [`apply_snapshots`]**, and declared
+/// there rather than relied on: the fall this advances is started by the action that system
+/// writes, so a frame that ran the two the other way round would begin every death one
+/// frame late.
+#[allow(clippy::too_many_arguments)] // Terrain joined the snapshot, timeline and asset inputs.
 pub(super) fn animate(
     time: Res<Time>,
     session: Option<Res<Session>>,
