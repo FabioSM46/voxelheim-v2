@@ -689,7 +689,7 @@ const COAL_ORE_LINEAR: [f32; 3] = [0.029_557, 0.034_340, 0.042_311];
 const IRON_ORE_LINEAR: [f32; 3] = [0.323_143, 0.130_136, 0.056_128];
 
 /// Pale, faintly warm sand — a cold-world desert rather than a beach. `#C9B383`.
-const SAND_LINEAR: [f32; 3] = [0.584_078, 0.450_786, 0.226_966];
+pub(crate) const SAND_LINEAR: [f32; 3] = [0.584_078, 0.450_786, 0.226_966];
 
 /// Compacted sand, darker and more orange than the loose grains above it. `#A8865A`.
 const SANDSTONE_LINEAR: [f32; 3] = [0.391_572, 0.238_398, 0.102_242];
