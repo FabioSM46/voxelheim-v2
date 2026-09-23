@@ -141,7 +141,8 @@ on `net`, never the reverse, and nothing outside `net` touches a socket.
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
 `player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
-one block that changes what the sky looks like; `player/wards.rs` reads that same answer to hide
+one block that changes what the sky looks like, and reads `transition::CurrentWorld`'s id beside it
+because only an instance's lower zones are graded dark (#1295, `player/cave_light.rs`); `player/wards.rs` reads that same answer to hide
 its presentation under water; `player/ambience.rs` reads a coarse lattice of loaded columns to
 describe their cosmetic ground look; `player/birds.rs` reads one bounded column under each bird,
 because an altitude measured from the eye's anchor says nothing about the ridge the bird is

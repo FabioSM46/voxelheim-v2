@@ -5210,6 +5210,82 @@ fn the_sky_goes_blue_green_when_the_eye_is_under_water() {
 }
 
 #[test]
+fn the_dungeon_cave_is_dark_the_sand_hall_dim_and_warm_and_the_halls_as_they_were() {
+    // #1295. Graded by the eye's height in an instance, eased a second at a time here so
+    // each zone is reached and settled within a few frames.
+    let mut app = headless_player();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+    app.update();
+    let (open_sky, open_ambient) = sky_and_ambient(&mut app);
+    let open_sun = sun(&mut app).0;
+    assert!(open_sun > 0.0);
+
+    let settle = |app: &mut App, eye: Vec3| {
+        put_the_eye_at(app, eye);
+        for _ in 0..8 {
+            app.update();
+        }
+    };
+    let ambient_colour = |app: &mut App| {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&AmbientLight, With<camera::WorldCamera>>();
+        query
+            .single(world)
+            .expect("one world camera")
+            .color
+            .to_linear()
+    };
+
+    // The open world at the cave's depth is not graded: only an instance is.
+    settle(&mut app, Vec3::new(0.5, -30.4, 0.5));
+    assert_eq!(sky_and_ambient(&mut app).1, open_ambient);
+
+    app.insert_resource(crate::world::transition::CurrentWorld {
+        id: 9,
+        seed: 4,
+        exit_arch: Some(crate::net::BlockCoord { x: 0, y: 1, z: 0 }),
+        loading: false,
+    });
+    // Floor 1's halls: as they were.
+    settle(&mut app, Vec3::new(0.5, 2.6, 0.5));
+    assert_eq!(sky_and_ambient(&mut app).1, open_ambient);
+    assert_eq!(sun(&mut app).0, open_sun);
+
+    // The cave: a twentieth of the ambient term, no sun, a cold tint and a black sky.
+    settle(&mut app, Vec3::new(0.5, -30.4, 0.5));
+    let (cave_sky, cave_ambient) = sky_and_ambient(&mut app);
+    assert!(
+        (cave_ambient - open_ambient * 0.05).abs() < 1e-3,
+        "{cave_ambient}"
+    );
+    assert_eq!(sun(&mut app).0, 0.0, "no sun through sixty courses of rock");
+    let cold = ambient_colour(&mut app);
+    assert!(cold.blue > cold.red);
+    let dark = cave_sky.to_linear();
+    assert!(dark.red < 0.02 && dark.green < 0.02 && dark.blue < 0.03);
+    let murk = fog(&mut app).color.to_linear();
+    assert!(
+        murk.red < 0.02 && murk.green < 0.02 && murk.blue < 0.03,
+        "distance fades into the dark, not into a daylit horizon"
+    );
+
+    // The sand hall: dimmer than the day, brighter than the cave, and warm.
+    settle(&mut app, Vec3::new(0.5, -38.4, 0.5));
+    let sand_ambient = sky_and_ambient(&mut app).1;
+    assert!(sand_ambient > cave_ambient && sand_ambient < open_ambient);
+    let warm = ambient_colour(&mut app);
+    assert!(warm.red > warm.blue);
+
+    // And back up to the halls, which get their light back exactly.
+    settle(&mut app, Vec3::new(0.5, 2.6, 0.5));
+    let (back_sky, back_ambient) = sky_and_ambient(&mut app);
+    assert_eq!(back_ambient, open_ambient);
+    assert!(same_colour(back_sky, open_sky));
+    assert_eq!(sun(&mut app).0, open_sun);
+    assert_eq!(ambient_colour(&mut app), Color::WHITE.to_linear());
+}
+
+#[test]
 fn a_server_with_no_clock_still_shows_the_water_it_streams() {
     // Not a time of day, so it overrides the fixed sky too — and a server with no clock
     // is every server in this repository today.
