@@ -75,6 +75,8 @@ use std::sync::Arc;
 
 use super::{BlockId, VoxelChunk, palette};
 
+mod dungeon;
+
 /// How many vertices one quad contributes. Four, never shared: two quads meeting at
 /// an edge disagree about both the normal and the colour there.
 const VERTICES_PER_QUAD: usize = 4;
@@ -345,18 +347,33 @@ pub struct ChunkMesh {
     /// seen from both sides and are drawn with no back-face culling. That is a pipeline,
     /// and a pipeline is an entity.
     pub cover: SurfaceMesh,
+    /// Everything that carries light of its own: today, the rune carved into a lit rune
+    /// stone.
+    ///
+    /// **The fourth surface, and the split is by lighting rather than by blending.** A lit
+    /// rune has to read in a cave with no light in it, and a lit material multiplies every
+    /// vertex colour by the light arriving — so in the dark a lit rune drawn in
+    /// [`Self::opaque`] would be exactly as dark as the stone round it. `render.rs` draws
+    /// this half unlit, which is a pipeline and therefore an entity of its own.
+    pub glow: SurfaceMesh,
 }
 
 impl ChunkMesh {
-    /// How many merged quads the chunk holds across all three halves.
+    /// How many merged quads the chunk holds across all four halves.
     pub fn quad_count(&self) -> usize {
-        self.opaque.quad_count() + self.water.quad_count() + self.cover.quad_count()
+        self.opaque.quad_count()
+            + self.water.quad_count()
+            + self.cover.quad_count()
+            + self.glow.quad_count()
     }
 
     /// Whether there is anything at all to draw. Every half empty, which is the
     /// all-air chunk and the wholly-buried one.
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.water.is_empty() && self.cover.is_empty()
+        self.opaque.is_empty()
+            && self.water.is_empty()
+            && self.cover.is_empty()
+            && self.glow.is_empty()
     }
 }
 
@@ -995,7 +1012,7 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
         }
     }
 
-    build_architecture(&mut mesh.opaque, chunk, neighbours);
+    build_architecture(&mut mesh.opaque, &mut mesh.glow, chunk, neighbours);
     build_cover(&mut mesh.cover, chunk);
 
     mesh
@@ -1066,14 +1083,27 @@ fn push_grille(
 /// partial culling, so this pass pays a 2x2x2 sweep only for a shaped voxel. A full
 /// cube beside one contributes only the uncovered quadrants of their shared face;
 /// every other cube face is still owned by the ordinary sweep.
-fn build_architecture(mesh: &mut SurfaceMesh, chunk: &VoxelChunk, neighbours: &Neighbours) {
+///
+/// The dungeon's levers and lit runes ride the same pass, because it already visits every
+/// voxel: a lever is a shape drawn inside its cell like a grille, and a lit rune's glyph
+/// goes to `glow` beside the cube the sweep drew for its stone.
+fn build_architecture(
+    mesh: &mut SurfaceMesh,
+    glow: &mut SurfaceMesh,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+) {
     let size = chunk.size();
     for y in 0..size {
         for z in 0..size {
             for x in 0..size {
                 let cell = [x, y, z];
                 let block = chunk.block(cell);
-                if palette::is_grille(block) {
+                if palette::is_lever(block) {
+                    dungeon::push_lever(mesh, cell, block);
+                } else if palette::glows(block) {
+                    dungeon::push_rune(glow, chunk, neighbours, cell);
+                } else if palette::is_grille(block) {
                     push_grille(mesh, chunk, neighbours, cell, block);
                 } else if half_grid_shape(block) {
                     push_architectural_shape(mesh, chunk, neighbours, cell, block);
@@ -1502,6 +1532,8 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
                     push_desert_bramble(mesh, floor, seed);
                 } else if block == palette::WINTER_BRAMBLE {
                     push_winter_bramble(mesh, floor, seed);
+                } else if block == palette::COBWEB {
+                    dungeon::push_cobweb(mesh, floor, seed);
                 } else {
                     push_flower(mesh, floor, seed, palette::linear_rgba(block));
                 }
@@ -6759,6 +6791,195 @@ mod tests {
                     &mesh.water.positions[other * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
                 assert_ne!(corners, against, "a quad is in both meshes");
             }
+        }
+    }
+
+    // The first dungeon's blocks (#1295)
+
+    /// The centroid of one quad's four corners.
+    fn quad_centre(mesh: &SurfaceMesh, quad: usize) -> [f32; 3] {
+        let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+        let mut centre = [0.0f32; 3];
+        for corner in corners {
+            for axis in 0..3 {
+                centre[axis] += corner[axis] / VERTICES_PER_QUAD as f32;
+            }
+        }
+        centre
+    }
+
+    #[test]
+    fn a_cobweb_is_threads_on_two_crossed_planes_that_leave_the_cave_showing_through() {
+        let mut chunk = air(SIZE);
+        chunk.set(5, 6, 7, palette::COBWEB);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(mesh.opaque.is_empty() && mesh.water.is_empty() && mesh.glow.is_empty());
+        assert_eq!(mesh.cover.quad_count(), dungeon::QUADS_PER_WEB);
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, [5.0, 6.0, 7.0]);
+        assert!(
+            mesh.cover
+                .colors
+                .iter()
+                .all(|colour| *colour == palette::linear_rgba(palette::COBWEB))
+        );
+
+        // Translucent the way a web is: the silk covers a small fraction of the two
+        // planes it is spun on, and the rest is the cave behind it. A sheet drawn in the
+        // web's colour would cover the whole of the box each plane's web spans.
+        let silk: f32 = (0..mesh.cover.quad_count())
+            .map(|quad| quad_area(&mesh.cover, quad))
+            .sum();
+        let planes = 2.0 * (2.0 * 0.64) * (2.0 * 0.45);
+        assert!(
+            silk < 0.15 * planes,
+            "{silk} square blocks of silk is a sheet, not a web"
+        );
+        // Both planes are vertical and cross on the voxel's diagonals: every thread's
+        // normal is horizontal and at forty-five degrees to both axes.
+        for quad in 0..mesh.cover.quad_count() {
+            let normal = mesh.cover.normals[quad * VERTICES_PER_QUAD];
+            assert!(
+                normal[1].abs() < 1e-5,
+                "quad {quad} is not in a vertical plane"
+            );
+            assert!((normal[0].abs() - normal[2].abs()).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn two_webs_side_by_side_are_two_webs() {
+        let mut chunk = air(SIZE);
+        chunk.set(5, 6, 7, palette::COBWEB);
+        chunk.set(6, 6, 7, palette::COBWEB);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+        assert_eq!(mesh.cover.quad_count(), 2 * dungeon::QUADS_PER_WEB);
+        let first = quad_centre(&mesh.cover, 0);
+        let second = quad_centre(&mesh.cover, dungeon::QUADS_PER_WEB);
+        assert_ne!(
+            [first[1], first[2]],
+            [second[1], second[2]],
+            "the second web is the first one moved a block"
+        );
+    }
+
+    #[test]
+    fn a_lever_is_a_plinth_and_a_handle_thrown_one_way_off_and_the_other_on() {
+        let grip_z = |block: BlockId| {
+            let mut chunk = air(SIZE);
+            chunk.set(5, 6, 7, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            assert!(mesh.cover.is_empty() && mesh.water.is_empty() && mesh.glow.is_empty());
+            assert_eq!(
+                mesh.opaque.quad_count(),
+                dungeon::QUADS_PER_LEVER,
+                "lever {block} is its own three boxes and never a swept cube"
+            );
+            winding_agrees_with_every_normal(&mesh.opaque);
+            stays_inside_the_voxel(&mesh.opaque, [5.0, 6.0, 7.0]);
+            let grip = opaque(palette::LEVER_GRIP_LINEAR);
+            let quads: Vec<usize> = (0..mesh.opaque.quad_count())
+                .filter(|quad| mesh.opaque.colors[quad * VERTICES_PER_QUAD] == grip)
+                .collect();
+            assert_eq!(quads.len(), 6, "one bronze grip");
+            quads
+                .iter()
+                .map(|quad| quad_centre(&mesh.opaque, *quad)[2])
+                .sum::<f32>()
+                / 6.0
+                - 7.5
+        };
+        let off = grip_z(palette::LEVER_OFF);
+        let on = grip_z(palette::LEVER_ON);
+        assert!(off < -0.2, "an off lever leans towards -z: {off}");
+        assert!(on > 0.2, "an on lever leans towards +z: {on}");
+        assert!((off + on).abs() < 1e-5, "the same throw, mirrored");
+    }
+
+    #[test]
+    fn the_ground_under_a_lever_keeps_its_top_face() {
+        // Solid to a body, yet not opaque: the sweep has to draw the floor it stands on
+        // and the wall beside it, or the plinth would sit over a hole.
+        let mut chunk = air(SIZE);
+        chunk.set(5, 5, 7, palette::STONE);
+        let bare = mesh_chunk(&chunk, &alone()).quad_count();
+        chunk.set(5, 6, 7, palette::LEVER_OFF);
+        assert_eq!(
+            mesh_chunk(&chunk, &alone()).quad_count(),
+            bare + dungeon::QUADS_PER_LEVER
+        );
+        assert!(palette::is_solid(palette::LEVER_OFF) && palette::is_solid(palette::LEVER_ON));
+    }
+
+    #[test]
+    fn a_lit_rune_glows_on_every_exposed_side_and_an_unlit_one_on_none() {
+        let cell = [5usize, 6, 7];
+        let mut chunk = air(SIZE);
+        chunk.set(cell[0], cell[1], cell[2], palette::RUNE_STONE_LIT);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+        // The stone is a swept cube like any other; the rune is on top of it.
+        assert_eq!(mesh.opaque.quad_count(), 6);
+        assert_eq!(
+            mesh.glow.quad_count(),
+            4 * dungeon::quads_per_rune_side(cell),
+            "the four sides and not the top or the bottom"
+        );
+        winding_agrees_with_every_normal(&mesh.glow);
+        let glow = opaque(palette::RUNE_GLOW_LINEAR);
+        assert!(mesh.glow.colors.iter().all(|colour| *colour == glow));
+        for quad in 0..mesh.glow.quad_count() {
+            let normal = mesh.glow.normals[quad * VERTICES_PER_QUAD];
+            assert_eq!(normal[1], 0.0);
+            for (axis, floor) in cell
+                .map(|coordinate| coordinate as f32)
+                .into_iter()
+                .enumerate()
+            {
+                let (minimum, maximum) = quad_extent(&mesh.glow, quad, axis);
+                assert!(
+                    minimum >= floor - dungeon::RUNE_LIFT - 1e-5
+                        && maximum <= floor + 1.0 + dungeon::RUNE_LIFT + 1e-5,
+                    "rune quad {quad} strays beyond its face on axis {axis}"
+                );
+            }
+        }
+
+        // Set into a wall, only the side facing the room is carved.
+        let mut wall = air(SIZE);
+        for z in 6..=8 {
+            for x in 3..=7 {
+                wall.set(x, 6, z, palette::STONE);
+            }
+        }
+        wall.set(5, 6, 8, palette::RUNE_STONE_LIT);
+        let mesh = super::mesh_chunk(&wall, &alone());
+        assert_eq!(
+            mesh.glow.quad_count(),
+            dungeon::quads_per_rune_side([5, 6, 8])
+        );
+        assert!(
+            (0..mesh.glow.quad_count())
+                .all(|quad| mesh.glow.normals[quad * VERTICES_PER_QUAD] == [0.0, 0.0, 1.0])
+        );
+
+        let mut dark = air(SIZE);
+        dark.set(cell[0], cell[1], cell[2], palette::RUNE_STONE);
+        assert!(super::mesh_chunk(&dark, &alone()).glow.is_empty());
+    }
+
+    #[test]
+    fn only_a_lit_rune_stone_puts_anything_in_the_glow_half() {
+        const EDGE: usize = 4;
+        for block in palette::PALETTE {
+            let mut chunk = air(EDGE);
+            chunk.set(2, 2, 2, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            assert_eq!(
+                !mesh.glow.is_empty(),
+                block == palette::RUNE_STONE_LIT,
+                "block {block}"
+            );
         }
     }
 }

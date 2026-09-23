@@ -222,10 +222,16 @@ func placeStaticProps(seed int64, building Building, poses []StaticPropPose) ([]
 	if building.Kind != BuildingKeep {
 		return nil, fmt.Errorf("world: static props belong only to the capital keep")
 	}
+	return placeStaticPropsIn(seed, building, SchematicFor(building.Kind), poses)
+}
+
+// placeStaticPropsIn turns authored slots in drawing s by the building's placement.
+// The keep and the dungeon share it; the dungeon's drawing is not one SchematicFor
+// knows, so the caller names the drawing its slots are written in.
+func placeStaticPropsIn(seed int64, building Building, s *Schematic, poses []StaticPropPose) ([]PlacedStaticProp, error) {
 	if len(poses) > MaxCapitalProps {
 		return nil, fmt.Errorf("world: capital exceeds %d static props", MaxCapitalProps)
 	}
-	s := SchematicFor(building.Kind)
 	result := make([]PlacedStaticProp, 0, len(poses))
 	var slots [MaxCapitalProps + 1]bool
 	// The high55bits name this world's placed building. The low9bits are the explicit
@@ -253,4 +259,26 @@ func placeStaticProps(seed int64, building Building, poses []StaticPropPose) ([]
 		result = append(result, p)
 	}
 	return result, nil
+}
+
+// dungeonStaticProps are the first dungeon's lights: sparse wall sconces in the cave,
+// by its entrance, its lever and its grille, and four in the sand hall's side walls.
+// The cave is meant to be dark, so these are the whole of its light; the upper halls
+// and the arenas have none of their own. Each stands in the clear cell against a wall
+// and faces away from it.
+var dungeonStaticProps = []StaticPropPose{
+	{Slot: 1, Kind: PropWallSconce, X: caveX0, Y: dungeonShore + 1, Z: 80, Facing: 2},
+	{Slot: 2, Kind: PropWallSconce, X: caveX1, Y: dungeonShore + 1, Z: 66, Facing: 4},
+	{Slot: 3, Kind: PropWallSconce, X: caveX0, Y: dungeonShore + 1, Z: 52, Facing: 2},
+	{Slot: 4, Kind: PropWallSconce, X: sandX0, Y: dungeonSandFloor + 1, Z: 10, Facing: 2},
+	{Slot: 5, Kind: PropWallSconce, X: sandX1, Y: dungeonSandFloor + 1, Z: 10, Facing: 4},
+	{Slot: 6, Kind: PropWallSconce, X: sandX0, Y: dungeonSandFloor + 1, Z: 30, Facing: 2},
+	{Slot: 7, Kind: PropWallSconce, X: sandX1, Y: dungeonSandFloor + 1, Z: 30, Facing: 4},
+}
+
+// InstanceStaticProps places the dungeon's lights for one seed's instance, turned with
+// the drawing. Like the capital's, they are immutable world data a simulation indexes
+// once, never entities and never saved.
+func InstanceStaticProps(seed int64) ([]PlacedStaticProp, error) {
+	return placeStaticPropsIn(seed, instancePlacement(seed), instanceDungeon, dungeonStaticProps)
 }

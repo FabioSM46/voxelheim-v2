@@ -240,7 +240,13 @@ func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceR
 	// The one arch a body can walk into here is this copy's own return. NewInstanceManager
 	// refuses WithPortals, so there is no configured threshold for this to replace.
 	sim.portalSheets = []portalSheet{newPortalSheet(world.InstanceExitThreshold(seed))}
+	if err := sim.indexDungeonLights(seed); err != nil {
+		return nil, err
+	}
 	if err := sim.placeDungeonEncounters(seed, gate, progress); err != nil {
+		return nil, err
+	}
+	if err := sim.placeDungeonPuzzles(seed); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())

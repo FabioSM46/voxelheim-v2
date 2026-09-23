@@ -56,9 +56,10 @@ use bevy::prelude::*;
 
 use super::Weather;
 use super::camera::WorldCamera;
+use super::cave_light::{self, Grade};
 use crate::net::{BlockCoord, Session, WeatherKind, WeatherState, WorldClock};
 use crate::settings::Settings;
-use crate::world::{ChunkStore, palette};
+use crate::world::{ChunkStore, palette, transition::CurrentWorld};
 
 /// How long dusk and dawn take, in seconds of real time.
 ///
@@ -1463,6 +1464,11 @@ pub(super) struct SkyInputs<'w> {
     /// enumerates it beside the other three.
     store: Option<Res<'w, ChunkStore>>,
     settings: Option<Res<'w, Settings>>,
+    /// Which world the eye is in, for [`cave_light::depth_at`]: only an instance's lower
+    /// zones are graded.
+    current: Option<Res<'w, CurrentWorld>>,
+    /// How long the last frame was, for easing a [`Grade`] between zones.
+    time: Option<Res<'w, Time>>,
 }
 
 /// Everything the sky is *drawn* on, as one parameter: the mesh whose colour the hour
@@ -1503,6 +1509,8 @@ pub(super) struct SkyMemory {
     /// guard is the one that matters most: a server with no clock would otherwise
     /// re-extract 325 vertices into the render world on every frame of the session.
     dome: Option<(Color, Color)>,
+    /// The grade the light was last drawn with, eased towards the eye's zone.
+    grade: Grade,
 }
 
 /// Puts the sun, the sky, the ambient term and the fog where the server's clock says they
@@ -1552,6 +1560,8 @@ pub(super) fn drive_the_sky(
         weather,
         store,
         settings,
+        current,
+        time,
     } = read;
     let Some(session) = session else {
         return;
@@ -1598,10 +1608,32 @@ pub(super) fn drive_the_sky(
         ApparentSky::at(&params.clock, tick_of_day, params.tick_rate, lunar_phase)
     });
 
-    if declared {
+    // **The one thing in this module that is a function of where the player is.** `AimCamera`
+    // moves the camera after the set this system runs in, so the position read here is the one
+    // the previous frame drew from — which is why crossing the surface changes the sky on the
+    // next frame rather than this one.
+    let eye = eyes.iter().next().map(|eye| eye.translation);
+    let submerged =
+        eye.is_some_and(|eye| submerged_at(store.as_deref(), eye, usize::from(params.chunk_size)));
+    // The dungeon's lower zones grade all of the above: `cave_light` says why and how.
+    let depth = cave_light::depth_at(
+        current.as_deref().map_or(0, |world| world.id),
+        eye.map(|eye| eye.y),
+        submerged,
+    );
+    let grade = memory.grade.approach(
+        Grade::of(depth),
+        time.as_deref().map_or(f32::NAN, Time::delta_secs),
+    );
+    let grade_moved = grade != memory.grade;
+    memory.grade = grade;
+
+    if declared || grade_moved {
         for (mut directional, mut transform) in &mut sun {
-            directional.illuminance = light.sun_illuminance;
-            *transform = Transform::default().looking_to(light.sun_direction, Vec3::Y);
+            directional.illuminance = light.sun_illuminance * grade.sun;
+            if declared {
+                *transform = Transform::default().looking_to(light.sun_direction, Vec3::Y);
+            }
         }
     }
 
@@ -1635,19 +1667,8 @@ pub(super) fn drive_the_sky(
     // an orange band under a white one. The two colours differ by the hour, never by the
     // weather.
     let weather_horizon = weather_tint(light.horizon, current_weather);
-    let ambient_brightness = light.ambient_brightness * brightness_scale;
+    let ambient_brightness = light.ambient_brightness * brightness_scale * grade.ambient;
 
-    // **The one thing in this module that is a function of where the player is.** `AimCamera`
-    // moves the camera after the set this system runs in, so the position read here is the one
-    // the previous frame drew from — which is why crossing the surface changes the sky on the
-    // next frame rather than this one.
-    let submerged = eyes.iter().next().is_some_and(|eye| {
-        submerged_at(
-            store.as_deref(),
-            eye.translation,
-            usize::from(params.chunk_size),
-        )
-    });
     let (sky, horizon, start, end) = if submerged {
         // One colour for both under water: there is no rim down here, and the fog reaching
         // ten blocks is what the eye reads as the edge of what water lets through.
@@ -1658,7 +1679,12 @@ pub(super) fn drive_the_sky(
             UNDERWATER_VISIBILITY,
         )
     } else {
-        (weather_sky, weather_horizon, start, end)
+        (
+            grade.shrouded(weather_sky),
+            grade.shrouded(weather_horizon),
+            start,
+            end,
+        )
     };
     let weather_changed = memory.weather != current_weather;
 
@@ -1678,7 +1704,7 @@ pub(super) fn drive_the_sky(
         // what carries the second of those: `ClearColorConfig` has no `PartialEq` to
         // compare against, so the restoring write is triggered by the transition rather
         // than by a difference.
-        if declared || submerged || memory.submerged || weather_changed {
+        if declared || submerged || memory.submerged || weather_changed || grade_moved {
             camera.clear_color = ClearColorConfig::Custom(sky);
         }
         // Outside the `declared` gate and guarded instead, because the brightness setting
@@ -1687,6 +1713,11 @@ pub(super) fn drive_the_sky(
         // was there for.
         if ambient.brightness != ambient_brightness {
             ambient.brightness = ambient_brightness;
+        }
+        // Compared in linear space, because the open grade's white and the camera's default
+        // white are the same colour in two representations and must not count as a change.
+        if ambient.color.to_linear() != grade.ambient_colour().to_linear() {
+            ambient.color = grade.ambient_colour();
         }
         match fog {
             // Read through `Deref` and written only on a difference. `Mut` marks a

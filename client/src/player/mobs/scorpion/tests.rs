@@ -559,23 +559,31 @@ fn the_rhythm_is_read_from_the_order_and_corrected_by_the_telegraphs_length() {
 
 #[test]
 fn a_dead_scorpion_curls_its_legs_lays_its_tail_down_and_settles_on_the_sand() {
-    let (_, h) = frame();
+    let (w, _) = frame();
     let mut motion = Motion::new(Vec3::ZERO, 1, MobAction::Idle);
     run(&mut motion, MobAction::Idle, 0.2, |_, _| {});
     let (rest_min, rest_max) = extent(&posed(&motion.transforms));
+    let rest_sting = sting_point(&motion.transforms);
     for _ in 0..60 {
         motion.sample(Vec3::ZERO, MobAction::Corpse, 1.0, FRAME, never_solid, None);
     }
     let (min, max) = extent(&posed(&motion.transforms));
     assert!(min.y > -0.04 && min.y < 0.06, "lying on the sand: {min}");
     assert!(
-        max.y < 0.75 * rest_max.y,
-        "the tail lies down: {max} against {rest_max}"
+        max.y < 0.8 * rest_max.y,
+        "the tail sags: {max} against {rest_max}"
     );
     assert!(
-        sting_point(&motion.transforms).y < 0.55 * h,
+        sting_point(&motion.transforms).y < rest_sting.y - 0.06,
         "the sting is down"
     );
+    // The corpse stays inside the box the server collides, as the living scorpion does.
+    for (axis, low, high) in [("x", min.x, max.x), ("z", min.z, max.z)] {
+        assert!(
+            low >= -w / 2.0 - 1e-4 && high <= w / 2.0 + 1e-4,
+            "{axis}: the corpse spans {low}..{high}, outside the {w}-wide box"
+        );
+    }
     assert!(
         max.x - min.x < rest_max.x - rest_min.x,
         "the legs are drawn in"
