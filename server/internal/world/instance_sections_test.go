@@ -300,23 +300,24 @@ func firstAnchor(l instanceLayout, seed int64, kind AnchorKind) PlacedAnchor {
 	return PlacedAnchor{}
 }
 
-// The envelope a game sizes its cache from is the chamber's 72 chunks today, and it
-// counts every chunk the layout's Contains accepts.
+// The envelope a game sizes its cache from is the dungeon's 120 chunks today — two by
+// four by three chunks of drawing and a halo of one — and it counts every chunk the
+// layout's Contains accepts.
 func TestTheInstanceEnvelopeCountsEveryContainedChunk(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
-		lo, hi := chamberLayout.chunkBounds(seed)
+		lo, hi := dungeonLayout.chunkBounds(seed)
 		n := 0
 		for x := lo.X - 3; x <= hi.X+3; x++ {
 			for y := lo.Y - 3; y <= hi.Y+3; y++ {
 				for z := lo.Z - 3; z <= hi.Z+3; z++ {
-					if chamberLayout.containsChunk(seed, Coord{X: x, Y: y, Z: z}) {
+					if dungeonLayout.containsChunk(seed, Coord{X: x, Y: y, Z: z}) {
 						n++
 					}
 				}
 			}
 		}
-		if got := InstanceChunkEnvelope(seed); got != n || got != 72 {
-			t.Errorf("seed %d: envelope %d, contained %d, want 72", seed, got, n)
+		if got := InstanceChunkEnvelope(seed); got != n || got != 120 {
+			t.Errorf("seed %d: envelope %d, contained %d, want 120", seed, got, n)
 		}
 	}
 }

@@ -33,6 +33,9 @@ func TestLiveSessionsAreIsolatedAcrossWorldChanges(t *testing.T) {
 			a, fa := admit(t, cfg, chunks, open, peers, 1)
 			b, fb := admit(t, cfg, chunks, open, peers, 2)
 			scopes := []*session.Registry{peers, peers}
+			// The chunk each session stands in: the open world's origin until it moves,
+			// then its dungeon's arrival chunk, which a turned dungeon puts anywhere.
+			coords := []world.Coord{{}, {}}
 			move := func(id uint64) {
 				inst, e := manager.Create(game.InstanceRuin{})
 				if e != nil {
@@ -45,6 +48,7 @@ func TestLiveSessionsAreIsolatedAcrossWorldChanges(t *testing.T) {
 					t.Fatal(e)
 				}
 				scopes[id-1] = peers.ForWorld(inst.Chunks)
+				coords[id-1] = world.ChunkOf(anchor.X, anchor.Y, anchor.Z)
 			}
 			move(1)
 			if pair {
@@ -61,7 +65,6 @@ func TestLiveSessionsAreIsolatedAcrossWorldChanges(t *testing.T) {
 					t.Error("foreign position or health")
 				}
 			}
-			coord := world.Coord{}
 
 			// Wait on the state the assertion below reads, not on a client's receipts.
 			//
@@ -81,8 +84,8 @@ func TestLiveSessionsAreIsolatedAcrossWorldChanges(t *testing.T) {
 			// the coordinate in two worlds — into a timeout that names nothing, which is
 			// the isolation defect this whole test exists to catch.
 			waitUntil(t, "each world's registry holds the coordinate", func() bool {
-				for _, scope := range scopes {
-					if scope.Holders(coord) < 1 {
+				for i, scope := range scopes {
+					if scope.Holders(coords[i]) < 1 {
 						return false
 					}
 				}
@@ -90,7 +93,7 @@ func TestLiveSessionsAreIsolatedAcrossWorldChanges(t *testing.T) {
 			})
 			for i, scope := range scopes {
 				update := protocol.EncodeBlockUpdate(protocol.BlockUpdate{Pos: [3]int32{int32(i), 1, 0}, BlockID: uint16(world.Stone)})
-				if count := scope.BroadcastChunk(coord, update); count != 1 {
+				if count := scope.BroadcastChunk(coords[i], update); count != 1 {
 					t.Fatalf("world %d block update reached %d sessions", i, count)
 				}
 			}

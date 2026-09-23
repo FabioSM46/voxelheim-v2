@@ -40,7 +40,7 @@ func TestPortalBlocksAreImmutableAndOldDeltasCannotEraseThem(t *testing.T) {
 }
 
 func TestEveryPortalHasOneHeartAndAnOpenProtectedDoorway(t *testing.T) {
-	for _, s := range []*Schematic{brokenHallRuin, brokenGableRuin, instanceChamber} {
+	for _, s := range []*Schematic{brokenHallRuin, brokenGableRuin, instanceDungeon} {
 		hearts := 0
 		for _, b := range s.Voxels {
 			if b == PortalHeart {
@@ -54,7 +54,11 @@ func TestEveryPortalHasOneHeartAndAnOpenProtectedDoorway(t *testing.T) {
 			if a.Kind != AnchorRuinArch && a.Kind != AnchorInstanceExit {
 				continue
 			}
+			// A ruin's heart is the upper doorway course; the dungeon's stands on the sill.
 			floor := 1
+			if a.Kind == AnchorInstanceExit {
+				floor = a.Y
+			}
 			for y := floor; y < floor+2; y++ {
 				for x := a.X - 2; x <= a.X+2; x++ {
 					if !Portal(s.At(x, y, a.Z)) {
@@ -63,7 +67,7 @@ func TestEveryPortalHasOneHeartAndAnOpenProtectedDoorway(t *testing.T) {
 				}
 			}
 			for x := a.X - 3; x <= a.X+3; x++ {
-				if s.At(x, 0, a.Z) != RuneStone || s.At(x, 4, a.Z) != RuneStone {
+				if s.At(x, floor-1, a.Z) != RuneStone || s.At(x, floor+3, a.Z) != RuneStone {
 					t.Fatal("unprotected frame")
 				}
 			}

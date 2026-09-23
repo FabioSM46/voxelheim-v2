@@ -2,7 +2,6 @@ package game
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
@@ -10,14 +9,18 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
+// loadDungeon makes every chunk of the instance resident: floor 1 and everything
+// below the chasm, whichever way the seed turned the dungeon.
 func loadDungeon(t *testing.T, session InstanceSession) {
 	t.Helper()
-	for x := int32(-2); x <= 1; x++ {
-		for z := int32(-2); z <= 1; z++ {
-			coord := world.Coord{X: x, Z: z}
-			if session.Chunks.Contains(coord) {
-				if _, _, err := session.Chunks.Get(context.Background(), coord); err != nil {
-					t.Fatal(err)
+	for x := int32(-3); x <= 2; x++ {
+		for y := int32(-3); y <= 1; y++ {
+			for z := int32(-3); z <= 2; z++ {
+				coord := world.Coord{X: x, Y: y, Z: z}
+				if session.Chunks.Contains(coord) {
+					if _, _, err := session.Chunks.Get(context.Background(), coord); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 		}
@@ -50,14 +53,18 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 				t.Fatal("boss spawned in scenery")
 			}
 		}
-		dx, dz := float64(king.X-guardian.X)/38, float64(king.Z-guardian.Z)/38
-		start := [3]float64{float64(gate.X) + .5 - dx*3, 1, float64(gate.Z) + .5 - dz*3}
-		delta := [3]float64{dx * 6, 0, dz * 6}
+		// The gate is the trapdoor over the chasm: a body swept down onto it from
+		// above the arena floor stops on it while it is shut.
+		start := [3]float64{float64(gate.X) + .5, float64(gate.Y) + 2, float64(gate.Z) + .5}
+		delta := [3]float64{0, -6, 0}
 		for _, bd := range []body{playerBody, beast.species().body, ruler.species().body} {
 			out, _ := moveAndCollideWithStep(s.terrain, bd, start, delta, 0)
-			if math.Hypot(out[0]-start[0], out[2]-start[2]) >= 3 {
+			if out[1] < float64(gate.Y)+1-1e-9 {
 				t.Fatal("closed gate was crossed by a swept body")
 			}
+		}
+		if guardian.Y != gate.Y+1 || king.Y >= gate.Y {
+			t.Fatal("the king does not stand below the guardian's trapdoor")
 		}
 		health := ruler.health
 		if s.damageMobLocked(ruler, health) || ruler.health != health {
@@ -77,7 +84,7 @@ func TestDungeonBossOrderAndSweptGateAtEveryRotation(t *testing.T) {
 			t.Fatal("authoritative death did not open the gate")
 		}
 		out, _ := moveAndCollideWithStep(s.terrain, playerBody, start, delta, 0)
-		if math.Hypot(out[0]-start[0], out[2]-start[2]) < 5.9 {
+		if out[1] > start[1]+delta[1]+1e-9 {
 			t.Fatal("open gate still blocks the route")
 		}
 		manager.Step()
