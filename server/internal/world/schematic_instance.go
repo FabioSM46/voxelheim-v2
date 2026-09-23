@@ -161,6 +161,7 @@ func buildDungeon() *Schematic {
 	s.FillVoid(Box{0, 0, 0, dungeonWidth - 1, caveRockTop, caveRockZ1}, roughRock)
 	carveCave(s)
 	carveDescents(s)
+	carveReturnShortcut(s)
 
 	s.Anchor(AnchorInstanceArrival, 17, f, arrivalZ, 0)
 	s.Anchor(AnchorInstanceExit, 17, f, exitPortalZ, 0)

@@ -81,10 +81,11 @@ func TestTheChasmIsASmoothShaftIntoDeepStillWater(t *testing.T) {
 	}
 }
 
-// With puzzle 1's door open, every slot on floor 1 and the rim of the open chasm are
-// reached on foot from the arrival slot, and nothing below is. From the shore, the
-// tunnel reaches the king, and nothing on floor 1 is reachable: the drop is one way.
-// Shut, the door keeps the arena out of reach while leaving the exit in the court.
+// With puzzle 1's door open and the return shortcut shut, every slot on floor 1 and
+// the rim of the open chasm are reached on foot from the arrival slot, and nothing
+// below is. From the shore, the route down reaches the king, and nothing on floor 1 is
+// reachable: until the king falls, the drop is one way. Shut, the rune door keeps the
+// arena out of reach while leaving the exit in the court.
 func TestFloorOneLeadsToTheChasmAndTheShoreNeverLeadsBack(t *testing.T) {
 	for _, seed := range dungeonTestSeeds {
 		byKind := dungeonAnchorsByKind(seed)
@@ -102,6 +103,7 @@ func TestFloorOneLeadsToTheChasmAndTheShoreNeverLeadsBack(t *testing.T) {
 		}
 
 		open := newDungeonWorld(t, seed, true, true)
+		open.shut[ReturnShortcutDoor] = true // the king has not fallen
 		upper := open.walk(arrival)
 		for _, a := range append([]PlacedAnchor{exit, guardian}, byKind[AnchorInstanceMinorSpawn][:16]...) {
 			if !upper[[3]int64{a.X, a.Y, a.Z}] {

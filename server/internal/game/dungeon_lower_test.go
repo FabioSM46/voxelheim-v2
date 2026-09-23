@@ -11,6 +11,12 @@ import (
 // what decides whether each race is winnable. The timers are the mechanisms issue's
 // numbers (#1293): the grille stays open 12 seconds after its lever is pulled, and each
 // of the sand hall's twin levers stays on 10 seconds.
+//
+// **The two races end in different places, and that is the mechanisms' rule, not this
+// layout's choice.** The grille closes again, so its race runs until the runner is
+// through it. The sand hall's door does not: #1293 opens it permanently the moment both
+// levers are on together, so that race ends at the second lever, and the walk on to
+// the door afterwards is untimed.
 const (
 	grilleWindowSeconds    = 12.0
 	twinLeverWindowSeconds = 10.0

@@ -311,3 +311,67 @@ func TestTheShoreReachesTheKingOnlyThroughBothPuzzles(t *testing.T) {
 		}
 	}
 }
+
+// The return shortcut joins the king's arena to the arrival court, and only once its
+// door is open: open, the exit slot in the court is reached on foot from the king's
+// centre at every rotation; shut, nothing above the chasm is. Its door cells are drawn
+// shut, twelve of them in two grilles, one at each end.
+//
+// It is also no way down past a puzzle. With the shortcut open and the grille and the
+// sand hall's door shut, the arrival court reaches the arena — the walk back up, the
+// other way — and nothing of the cave or the sand hall, and the shore still does not
+// reach the king.
+func TestTheReturnShortcutLeadsFromTheKingToTheExitOnlyWhenOpen(t *testing.T) {
+	for _, seed := range dungeonTestSeeds {
+		slots := lowerSlotsOf(t, seed)
+		arrival, exit := InstanceAnchors(seed)
+		king, shore := slots.king, slots.checkpoints[0]
+
+		shut := newDungeonWorld(t, seed, true, false)
+		cells := 0
+		for p, puzzle := range shut.doors {
+			if puzzle != ReturnShortcutDoor {
+				continue
+			}
+			cells++
+			if b := shut.at(p[0], p[1], p[2]); b != IronGrilleX && b != IronGrilleZ {
+				t.Fatalf("seed %d: shortcut door cell %v holds %d, not a grille", seed, p, b)
+			}
+		}
+		if cells != 12 {
+			t.Fatalf("seed %d: the shortcut has %d door cells", seed, cells)
+		}
+
+		open := newDungeonWorld(t, seed, true, true)
+		if !open.walk(king)[cell(exit)] {
+			t.Fatalf("seed %d: the exit slot is not reached from the king with the shortcut open", seed)
+		}
+		sealed := newDungeonWorld(t, seed, true, true)
+		sealed.shut[ReturnShortcutDoor] = true
+		for p := range sealed.walk(king) {
+			if p[1] >= arrival.Y-1 {
+				t.Fatalf("seed %d: the king reaches %v above the chasm with the shortcut shut", seed, p)
+			}
+		}
+
+		skip := newDungeonWorld(t, seed, true, true)
+		skip.shut[GrillePuzzle] = true
+		skip.shut[TwinLeverPuzzle] = true
+		down := skip.walk(arrival)
+		if !down[cell(king)] {
+			t.Fatalf("seed %d: the open shortcut does not lead from the court to the arena", seed)
+		}
+		behind := append(append([]PlacedAnchor{slots.checkpoints[1], shore}, slots.burrows...), slots.buried...)
+		for _, lever := range append([]PlacedAnchor{slots.grilleLever}, slots.twinLevers...) {
+			behind = append(behind, skip.standBeside(lever))
+		}
+		for _, a := range behind {
+			if down[cell(a)] {
+				t.Fatalf("seed %d: the shortcut reaches %+v past a shut puzzle door", seed, a)
+			}
+		}
+		if skip.walk(shore)[cell(king)] {
+			t.Fatalf("seed %d: the shore reaches the king through the shortcut with both puzzles shut", seed)
+		}
+	}
+}

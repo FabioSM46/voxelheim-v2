@@ -16,7 +16,7 @@ package world
 //   - Minor-spawn groups: 0–3 floor 1's halls, [CaveBurrowGroup] the burrows the
 //     spider waves come out of, [SandBuriedGroup] the scorpions under the sand.
 //   - Puzzles: 1 the rune hall, [GrillePuzzle] the timed grille, [TwinLeverPuzzle]
-//     the sand hall's two levers.
+//     the sand hall's two levers, and [ReturnShortcutDoor], which no lever opens.
 //   - Trigger zones: [CaveTrigger] the cavern, [SandTrigger] the sand hall.
 const (
 	// CaveBurrowGroup is the minor-spawn group of the cave's burrows. A burrow is a
@@ -31,6 +31,13 @@ const (
 	GrillePuzzle = 2
 	// TwinLeverPuzzle is the sand hall's two levers and the door both open together.
 	TwinLeverPuzzle = 3
+
+	// ReturnShortcutDoor is the index of the return shortcut's door cells: the way from
+	// the king's arena back up to the arrival court, since the chasm is one way. The
+	// passage has a door at each end — in the arena's south wall and in the court's
+	// east wall — both drawn shut, and nothing but the king's death opens them (#1293).
+	// It is a door index and not a puzzle: no mechanism anchor carries it.
+	ReturnShortcutDoor = 4
 
 	// CaveTrigger is the cavern's trigger volume, spanning it from wall to wall.
 	CaveTrigger = 0
@@ -63,6 +70,19 @@ const (
 	sandDoorZ                      = sandZ1 + 1
 	sandLeverZ                     = 20
 	kingStairTopZ, kingStairSteps  = 41, dungeonSandFloor - dungeonKingFloor
+
+	// The return shortcut: a doorway in the king arena's south wall, a flight climbing
+	// south beside the pool chamber, a landing at the drawing's south end, a flight
+	// climbing north, a long corridor under floor 1's east side and a last flight up
+	// to a landing behind the arrival court's east wall.
+	shortcutArenaX0, shortcutArenaX1 = 31, 32
+	shortcutUpX0, shortcutUpX1       = 28, 29
+	shortcutFirstSteps               = 19
+	shortcutLandingZ0                = kingZ1 + 2 + shortcutFirstSteps
+	shortcutSecondSteps              = 23
+	shortcutCorridorZ0               = 12
+	shortcutCourtDoorX               = 25
+	shortcutCourtZ0, shortcutCourtZ1 = 2, 3
 )
 
 // caveBurrows are the burrows' slots: two in each side wall of the cavern and two in
@@ -226,6 +246,42 @@ func carveDescents(s *Section) {
 	s.CarveRoom(Box{sandDoorX0, dungeonKingFloor, foot + 1, sandDoorX1, dungeonKingFloor + 3, kingZ0 - 1}, Stone)
 }
 
+// carveReturnShortcut cuts the passage from the king's arena up to the arrival court.
+// Every flight is cut step by step as a column of rooms, so wherever it crosses void
+// rather than rock it is shelled like any other room and nothing a body stands in
+// opens onto the drawing's outside.
+func carveReturnShortcut(s *Section) {
+	flight := func(x, y, z int, facing Facing, steps int) {
+		dz := 1
+		if facing == FacingMinusZ {
+			dz = -1
+		}
+		for i := range steps {
+			s.CarveRoom(Box{min(x, x+1), y + i, z + dz*i, max(x, x+1), y + i + 3, z + dz*i}, Basalt)
+		}
+	}
+	// The doorway through the arena's south wall, and the first flight south from it.
+	s.CarveRoom(Box{shortcutArenaX0, dungeonKingFloor, kingZ1 + 1, shortcutArenaX1, dungeonKingFloor + 2, kingZ1 + 1}, Basalt)
+	s.Fill(Box{shortcutArenaX0, dungeonKingFloor, kingZ1 + 1, shortcutArenaX1, dungeonKingFloor + 2, kingZ1 + 1}, IronGrilleX)
+	flight(shortcutArenaX0, dungeonKingFloor, kingZ1+2, FacingPlusZ, shortcutFirstSteps)
+	s.PlaceStairs(shortcutArenaX1, dungeonKingFloor, kingZ1+2, FacingPlusZ, shortcutFirstSteps, 2, Stone)
+	// The landing at the south end, across to the second flight.
+	top := dungeonKingFloor + shortcutFirstSteps
+	s.CarveRoom(Box{shortcutUpX0, top, shortcutLandingZ0, shortcutArenaX1, top + 2, shortcutLandingZ0 + 1}, Basalt)
+	flight(shortcutUpX0, top, shortcutLandingZ0-1, FacingMinusZ, shortcutSecondSteps)
+	s.PlaceStairs(shortcutUpX0, top, shortcutLandingZ0-1, FacingMinusZ, shortcutSecondSteps, 2, Stone)
+	// The corridor north, level with the second flight's top step.
+	level := top + shortcutSecondSteps
+	north := shortcutLandingZ0 - shortcutSecondSteps // the second flight's top step
+	s.CarveRoom(Box{shortcutUpX0, level, shortcutCorridorZ0, shortcutUpX1, level + 2, north - 1}, Basalt)
+	// The last flight, up to floor 1's level, and the landing behind the court's wall.
+	last := dungeonUpperFloor - level
+	flight(shortcutUpX0, level, shortcutCorridorZ0-1, FacingMinusZ, last)
+	s.PlaceStairs(shortcutUpX0, level, shortcutCorridorZ0-1, FacingMinusZ, last, 2, Stone)
+	s.CarveRoom(Box{shortcutCourtDoorX + 1, dungeonUpperFloor, shortcutCourtZ0, shortcutUpX1, dungeonUpperFloor + 2, shortcutCourtZ1}, Basalt)
+	s.Fill(Box{shortcutCourtDoorX, dungeonUpperFloor, shortcutCourtZ0, shortcutCourtDoorX, dungeonUpperFloor + 2, shortcutCourtZ1}, IronGrilleZ)
+}
+
 // lowerAnchors declares the slots below the chasm, after every slot of the upper
 // halls so none of theirs moves in the list.
 func lowerAnchors(s *Section) {
@@ -250,6 +306,16 @@ func lowerAnchors(s *Section) {
 	for yy := dungeonSandFloor; yy <= dungeonSandFloor+2; yy++ {
 		for x := sandDoorX0; x <= sandDoorX1; x++ {
 			s.Anchor(AnchorInstanceDoor, x, yy, sandDoorZ, TwinLeverPuzzle)
+		}
+	}
+	for yy := dungeonKingFloor; yy <= dungeonKingFloor+2; yy++ {
+		for x := shortcutArenaX0; x <= shortcutArenaX1; x++ {
+			s.Anchor(AnchorInstanceDoor, x, yy, kingZ1+1, ReturnShortcutDoor)
+		}
+	}
+	for yy := dungeonUpperFloor; yy <= dungeonUpperFloor+2; yy++ {
+		for z := shortcutCourtZ0; z <= shortcutCourtZ1; z++ {
+			s.Anchor(AnchorInstanceDoor, shortcutCourtDoorX, yy, z, ReturnShortcutDoor)
 		}
 	}
 	s.Anchor(AnchorInstanceTrigger, caveX0, y, caveCavernZ0, CaveTrigger)

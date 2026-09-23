@@ -25,9 +25,14 @@ func (s *Sim) indexDungeonLights(seed int64) error {
 	if err != nil {
 		return err
 	}
-	s.staticProps = index
-	if cached, ok := s.terrain.(*CacheTerrain); ok {
-		cached.staticProps = index
+	// The terrain's copy is what collision and sight lines read; a terrain that cannot
+	// hold one would leave the two views of the same props disagreeing, so it is an
+	// error rather than a skipped step.
+	cached, ok := s.terrain.(*CacheTerrain)
+	if !ok {
+		return fmt.Errorf("game: dungeon lights: terrain %T cannot hold a prop index", s.terrain)
 	}
+	s.staticProps = index
+	cached.staticProps = index
 	return nil
 }

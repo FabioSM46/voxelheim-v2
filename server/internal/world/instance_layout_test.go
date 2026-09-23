@@ -72,7 +72,7 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		for kind, want := range map[AnchorKind]int{
 			AnchorInstanceArrival: 1, AnchorInstanceExit: 1, AnchorInstanceGuardian: 1, AnchorInstanceKing: 1,
 			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 3, AnchorInstanceMinorSpawn: 16 + 6 + 8,
-			AnchorInstanceMechanism: 4 + 1 + 2, AnchorInstanceDoor: 25 + 9 + 9, AnchorInstanceTrigger: 4,
+			AnchorInstanceMechanism: 4 + 1 + 2, AnchorInstanceDoor: 25 + 9 + 9 + 12, AnchorInstanceTrigger: 4,
 		} {
 			if got := len(byKind[kind]); got != want {
 				t.Fatalf("seed %d: %d %s anchors, want %d", seed, got, kind, want)
@@ -272,8 +272,8 @@ func TestDungeonSceneryRemainsImmutableAtEveryRotation(t *testing.T) {
 }
 
 // Floor 1 stands on basalt everywhere a body can stand: every air cell of its standing
-// course sits on a basalt floor course, except over the portal frame's rune sill and
-// the chasm's open column. A course left to a room's brick shell, or a gap between two
+// course sits on a basalt floor course, except over the portal frame's rune sill, the
+// chasm's open column and the return shortcut's last flight. A course left to a room's brick shell, or a gap between two
 // floor fills, fails here.
 func TestFloorOneStandsOnBasaltThroughout(t *testing.T) {
 	const f = dungeonUpperFloor
@@ -284,8 +284,11 @@ func TestFloorOneStandsOnBasaltThroughout(t *testing.T) {
 			}
 			under := instanceDungeon.At(x, f-1, z)
 			sill := z == exitPortalZ && under == RuneStone
+			// The return shortcut's last flight and landing, behind the court's east wall,
+			// are a stair and not floor 1.
+			stair := x > shortcutCourtDoorX && z < shortcutCorridorZ0
 			chasm := x >= chasmX0 && x <= chasmX1 && z >= chasmZ0 && z <= chasmZ1 && under == Air
-			if under != Basalt && !sill && !chasm {
+			if under != Basalt && !sill && !chasm && !stair {
 				t.Fatalf("floor 1 at %d,%d stands on %d, not basalt", x, z, under)
 			}
 		}
