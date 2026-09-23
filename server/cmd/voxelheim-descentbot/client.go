@@ -85,12 +85,19 @@ type client struct {
 	updates  map[cell]int
 	stacks   []uint16
 	chunksIn int
+	// roster is how many characters the latest snapshot's party roster names.
+	roster int
+	// believed is every region the latest EncounterTimeline announced, and believedAt
+	// when it arrived; see reader.go.
+	believed   []region
+	believedAt time.Time
 
 	// The facts the report is built from, written by the reader.
 	stats *runStats
 
 	changes  chan worldChange
 	offers   chan uint64
+	invites  chan string
 	chat     chan string
 	refusals chan string
 }
@@ -125,7 +132,7 @@ func join(ctx context.Context, addr, fingerprint, name string, credential []byte
 		name: name, conn: conn, reader: bufio.NewReaderSize(conn, 64<<10),
 		view: newBlockView(), mobs: make(map[uint64]mobView), updates: make(map[cell]int),
 		stats: stats, alive: true,
-		changes: make(chan worldChange, 4), offers: make(chan uint64, 4),
+		changes: make(chan worldChange, 4), offers: make(chan uint64, 4), invites: make(chan string, 4),
 		chat: make(chan string, 64), refusals: make(chan string, 64),
 	}
 	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
@@ -254,6 +261,17 @@ func (c *client) absorb(envelope *vnet.Envelope) {
 		case c.offers <- offer.OfferId():
 		default:
 		}
+	case vnet.PayloadEncounterTimeline:
+		var timeline vnet.EncounterTimeline
+		timeline.Init(table.Bytes, table.Pos)
+		c.absorbTimeline(&timeline)
+	case vnet.PayloadPartyInvite:
+		var invite vnet.PartyInvite
+		invite.Init(table.Bytes, table.Pos)
+		select {
+		case c.invites <- string(invite.FromName()):
+		default:
+		}
 	case vnet.PayloadChatMessage:
 		var message vnet.ChatMessage
 		message.Init(table.Bytes, table.Pos)
@@ -312,6 +330,7 @@ func (c *client) absorbSnapshot(table flatbuffers.Table) {
 		c.alive, c.health, c.maxHealth = alive, vitals.Health(), vitals.MaxHealth()
 		c.level, c.energy = vitals.Level(), vitals.Energy()
 	}
+	c.roster = snapshot.PartyRosterLength()
 	seen := make(map[uint64]bool, snapshot.MobsLength())
 	var m vnet.MobState
 	for i := range snapshot.MobsLength() {
@@ -441,6 +460,12 @@ func (c *client) mobList() []mobView {
 		out = append(out, m)
 	}
 	return out
+}
+
+func (c *client) rosterSize() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.roster
 }
 
 func (c *client) updateCount(at cell) int {

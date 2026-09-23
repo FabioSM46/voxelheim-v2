@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -33,17 +32,17 @@ const (
 )
 
 type pilot struct {
-	c     *client
-	stats *runStats
-	rate  int
-	say   func(format string, args ...any)
-	// immortal mirrors the last /immortal the server accepted.
-	immortal      bool
-	immortalSince time.Time
-	lastSwing     time.Time
-	lastReport    time.Time
+	c          *client
+	stats      *runStats
+	rate       int
+	say        func(format string, args ...any)
+	lastSwing  time.Time
+	lastReport time.Time
 	// unreachable is every creature fight gave up on; see fight.
 	unreachable map[uint64]bool
+	// allies are the party's entity ids, this member's own among them: a creature that has
+	// turned on any of them is this member's fight too.
+	allies map[uint64]bool
 }
 
 // pause waits a duration, answering errDied if the bot dies in it.
@@ -73,20 +72,6 @@ func (p *pilot) tickWait(ctx context.Context) error {
 	return nil
 }
 
-// waitAlive waits out a death and the respawn after it.
-func (p *pilot) waitAlive(ctx context.Context) error {
-	p.c.stand()
-	for !p.c.self().alive {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	// The respawn is a relocation: give the stream a moment to deliver where it put us.
-	return sleep(ctx, time.Second)
-}
-
 func sleep(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -96,27 +81,6 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-// setImmortal turns the development toggle on or off and records how long it was on.
-func (p *pilot) setImmortal(ctx context.Context, on bool) error {
-	if p.immortal == on {
-		return nil
-	}
-	answer, err := p.c.command(ctx, fmt.Sprintf("/immortal %t", on))
-	if err != nil {
-		return err
-	}
-	if !strings.HasPrefix(answer, "Immortality") {
-		return fmt.Errorf("/immortal answered %q", answer)
-	}
-	if on {
-		p.immortalSince = time.Now()
-	} else {
-		p.stats.addImmortal(p.stats.currentPhase(), time.Since(p.immortalSince))
-	}
-	p.immortal = on
-	return nil
 }
 
 // yawToward is the yaw that makes "forward" point along (dx, dz): yaw 0 looks along -Z
@@ -142,8 +106,8 @@ func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, f
 			continue
 		}
 		if fight {
-			if threat, ok := p.threat(); ok {
-				if err := p.fight(ctx, func(m mobView) bool { return m.id == threat.id }); err != nil {
+			if _, ok := p.threat(); ok {
+				if err := p.fight(ctx, p.hostile); err != nil {
 					return err
 				}
 				route, nextPlan, lastProgress, best = nil, time.Time{}, time.Now(), math.Inf(1)
@@ -272,6 +236,13 @@ func (p *pilot) assist(ctx context.Context, next cell) error {
 		}
 	})
 	if !ok {
+		// No clear corner: the cell itself, but only while the stream still shows it open —
+		// a door that shut since the route was planned is never assisted through.
+		open := false
+		p.c.withView(func(v *blockView) { open = v.open(next[0], next[1], next[2]) && v.open(next[0], next[1]+1, next[2]) })
+		if !open {
+			return nil
+		}
 		chosen = [2]int64{next[0], next[2]}
 	}
 	line := fmt.Sprintf("/teleport %d %d %d", chosen[0], next[1], chosen[1])
@@ -314,21 +285,41 @@ func (p *pilot) buried(m mobView) bool {
 	return ok && world.Solid(b)
 }
 
-// threat is the nearest living creature that has turned on the bot.
+// threat is the nearest living creature that has turned on a member of the party near
+// this one.
 func (p *pilot) threat() (mobView, bool) {
 	self := p.c.self()
 	var best mobView
 	bestD := math.Inf(1)
 	for _, m := range p.c.mobList() {
-		if m.dying() || m.targetID() != p.c.entityID || p.buried(m) || boss(m.kind) {
+		if m.dying() || !p.allies[m.targetID()] || p.buried(m) || boss(m.kind) {
 			continue
 		}
 		if d := math.Hypot(m.pos[0]-self.pos[0], m.pos[2]-self.pos[2]); d < bestD && math.Abs(m.pos[1]-self.pos[1]) < 6 {
 			best, bestD = m, d
 		}
 	}
-	return best, bestD < 24
+	return best, bestD < threatRadius
 }
+
+// threatRadius is how far off a creature that has turned on the party is still this
+// member's fight.
+const threatRadius = 24
+
+// hostile picks what a member fights when the party is set on: every creature that has
+// turned on a member, within threatRadius and a few courses of this one.
+func (p *pilot) hostile(m mobView) bool {
+	if !p.allies[m.targetID()] || boss(m.kind) {
+		return false
+	}
+	self := p.c.self()
+	return math.Hypot(m.pos[0]-self.pos[0], m.pos[2]-self.pos[2]) < threatRadius && math.Abs(m.pos[1]-self.pos[1]) < 6
+}
+
+// focusRadius is how near a creature must be for the party to converge on it: within it a
+// member strikes the most wounded creature rather than the nearest, so the blades that can
+// reach one creature bring it down together instead of each wearing at its own.
+const focusRadius = 10
 
 func boss(kind vnet.MobKind) bool {
 	return kind == vnet.MobKindVargrGuardian || kind == vnet.MobKindDraugrKing
@@ -347,15 +338,22 @@ func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 			return err
 		}
 		self := p.c.self()
-		var target mobView
-		bestD := math.Inf(1)
+		var target, focus mobView
+		bestD, focusD := math.Inf(1), math.Inf(1)
 		for _, m := range p.c.mobList() {
 			if m.dying() || p.buried(m) || !pick(m) || p.stats.isKilled(m.id) || p.unreachable[m.id] {
 				continue
 			}
-			if d := math.Hypot(m.pos[0]-self.pos[0], m.pos[2]-self.pos[2]); d < bestD {
+			d := math.Hypot(m.pos[0]-self.pos[0], m.pos[2]-self.pos[2])
+			if d < bestD {
 				target, bestD = m, d
 			}
+			if d <= focusRadius && (math.IsInf(focusD, 1) || m.health < focus.health || (m.health == focus.health && m.id < focus.id)) {
+				focus, focusD = m, d
+			}
+		}
+		if !math.IsInf(focusD, 1) {
+			target, bestD = focus, focusD
 		}
 		if math.IsInf(bestD, 1) {
 			p.c.stand()
@@ -382,6 +380,24 @@ func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 		if !known {
 			want = 1.9 + half
 		}
+		dx, dz := target.pos[0]-self.pos[0], target.pos[2]-self.pos[2]
+		dy := target.pos[1] + middle - (self.pos[1] + game.PlayerHeight/2)
+		face := intent{yaw: yawToward(dx, dz), pitch: math.Atan2(dy, math.Hypot(dx, dz))}
+		danger := p.c.danger()
+		if touches(danger, self.pos) {
+			// Standing where a blow is announced: out first, facing the target, still
+			// swinging if it is in reach. See reader.go.
+			if walk, ok := p.escapeBearing(self.pos, danger); ok {
+				face.moveX, face.moveZ = relative(walk, face.yaw)
+			}
+			p.c.setIntent(face)
+			if bestD <= want {
+				if err := p.swing(target, half, want, reach, misses, previous); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if bestD > want {
 			if time.Now().After(nextPlan) {
 				goal := func(c cell) bool {
@@ -395,41 +411,61 @@ func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 			for len(route) > 0 && horizontal(self.pos, route[0]) < arriveRadius {
 				route = route[1:]
 			}
+			toward := [2]float64{dx, dz}
+			if len(route) > 0 {
+				toward = [2]float64{float64(route[0][0]) + .5 - self.pos[0], float64(route[0][2]) + .5 - self.pos[2]}
+			}
+			if l := math.Hypot(toward[0], toward[1]); l > 0 && len(danger) > 0 {
+				// Never step into an announced region on the way in: wait at its edge.
+				step := 2 * game.WalkSpeed / float64(p.rate)
+				ahead := [3]float64{self.pos[0] + toward[0]/l*step, self.pos[1], self.pos[2] + toward[1]/l*step}
+				if touches(danger, ahead) {
+					p.c.setIntent(face)
+					continue
+				}
+			}
 			if len(route) > 0 {
 				p.steer(self.pos, route[0], len(route) > 1, false)
 			} else {
 				// Nothing to plan over — open floor the stream has not shown yet, or water:
 				// walk straight at it.
-				p.c.setIntent(intent{moveZ: 1, yaw: yawToward(target.pos[0]-self.pos[0], target.pos[2]-self.pos[2])})
+				p.c.setIntent(intent{moveZ: 1, yaw: yawToward(dx, dz)})
 			}
 			continue
 		}
 		route, nextPlan = nil, time.Time{}
-		dx, dz := target.pos[0]-self.pos[0], target.pos[2]-self.pos[2]
-		dy := target.pos[1] + middle - (self.pos[1] + game.PlayerHeight/2)
-		p.c.setIntent(intent{yaw: yawToward(dx, dz), pitch: math.Atan2(dy, math.Hypot(dx, dz))})
-		if time.Since(p.lastSwing) < swingEvery || self.energy < game.AttackEnergyCost {
-			continue
-		}
-		// Four swings without landing: come closer. A swing is judged on the next tick, so
-		// this one learns whether the previous one landed.
-		if hit := p.stats.lastHit(target.id); hit.Equal(previous[target.id]) {
-			misses[target.id]++
-		} else {
-			misses[target.id], previous[target.id] = 0, hit
-		}
-		if misses[target.id] >= 4 {
-			// Never into the body: from inside it the arc has no direction to judge.
-			reach[target.id] = math.Max(half+0.6, want-0.4)
-			misses[target.id] = 0
-		}
-		if err := p.c.send(protocol.EncodeAttackRequest(protocol.AttackRequest{
-			Slot: mainHandSlot, ClientTick: p.c.tick(),
-		})); err != nil {
+		p.c.setIntent(face)
+		if err := p.swing(target, half, want, reach, misses, previous); err != nil {
 			return err
 		}
-		p.lastSwing = time.Now()
 	}
+}
+
+// swing strikes the target when the blade and the energy reserve allow, learning from
+// blows that do not land to come closer.
+func (p *pilot) swing(target mobView, half, want float64, reach map[uint64]float64, misses map[uint64]int, previous map[uint64]time.Time) error {
+	if time.Since(p.lastSwing) < swingEvery || p.c.self().energy < game.AttackEnergyCost {
+		return nil
+	}
+	// Four swings without landing: come closer. A swing is judged on the next tick, so
+	// this one learns whether the previous one landed.
+	if hit := p.stats.lastOwnHit(target.id); hit.Equal(previous[target.id]) {
+		misses[target.id]++
+	} else {
+		misses[target.id], previous[target.id] = 0, hit
+	}
+	if misses[target.id] >= 4 {
+		// Never into the body: from inside it the arc has no direction to judge.
+		reach[target.id] = math.Max(half+0.6, want-0.4)
+		misses[target.id] = 0
+	}
+	if err := p.c.send(protocol.EncodeAttackRequest(protocol.AttackRequest{
+		Slot: mainHandSlot, ClientTick: p.c.tick(),
+	})); err != nil {
+		return err
+	}
+	p.lastSwing = time.Now()
+	return nil
 }
 
 // mainHandSlot is the worn main hand: the last slot of the table since V44.

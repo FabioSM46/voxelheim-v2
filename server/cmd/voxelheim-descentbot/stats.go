@@ -8,31 +8,58 @@ import (
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
 
-// killWindow is how recently the bot must have hit a creature for its disappearance to be a
-// kill; one that leaves the snapshot otherwise — out of view, or reset by a wipe — is not.
+// killWindow is how recently a member must have hit a creature for its disappearance to be
+// a kill; one that leaves the snapshot otherwise — out of view, or reset by a wipe — is not.
 const killWindow = 3 * time.Second
 
-// runStats is everything the report says, gathered as it happens.
+// tally is what the party saw and killed, shared by every member so a creature two blades
+// brought down is one kill and a member's route knows what another member has finished.
+type tally struct {
+	mu      sync.Mutex
+	seen    map[vnet.MobKind]map[uint64]bool
+	killed  map[vnet.MobKind]int
+	hitAt   map[uint64]time.Time
+	counted map[uint64]bool
+}
+
+func newTally() *tally {
+	return &tally{
+		seen: map[vnet.MobKind]map[uint64]bool{}, killed: map[vnet.MobKind]int{},
+		hitAt: map[uint64]time.Time{}, counted: map[uint64]bool{},
+	}
+}
+
+func (t *tally) countKillLocked(m mobView) {
+	if t.counted[m.id] {
+		return
+	}
+	if _, hit := t.hitAt[m.id]; !hit {
+		return
+	}
+	t.counted[m.id] = true
+	t.killed[m.kind]++
+}
+
+// runStats is everything the report says about one member, gathered as it happens. The
+// creatures are the party's and live in the shared tally.
 type runStats struct {
 	mu sync.Mutex
 
+	*tally
+
+	// ownHit is when this member's own blows last landed on each creature: the pilot's
+	// reach judgement, which another member's blows must not satisfy.
+	ownHit   map[uint64]time.Time
 	phase    string
 	phases   []phaseRecord
 	deaths   map[string]int
-	seen     map[vnet.MobKind]map[uint64]bool
-	killed   map[vnet.MobKind]int
-	hitAt    map[uint64]time.Time
-	counted  map[uint64]bool
 	taken    int
 	commands []string
-	// immortal is the time spent under /immortal, per phase, so the report can say how
-	// much of the run a player would have had to survive on their own.
-	immortal map[string]time.Duration
-	// assists are the places the bot was stuck and /teleport moved it on.
+	// assists are the places the member was stuck and /teleport moved it on.
 	assists []string
-	// portalPlacements are the /teleports that put the bot beside the open world's portal.
+	// portalPlacements are the /teleports that put the member beside the open world's portal.
 	portalPlacements int
-	// unreachedMobs names every creature the bot gave up on because no walk reached it.
+	// unreachedMobs names every creature the member gave up on because no walk reached it.
 	unreachedMobs []string
 }
 
@@ -42,11 +69,8 @@ type phaseRecord struct {
 	deaths     int
 }
 
-func newRunStats() *runStats {
-	return &runStats{
-		deaths: map[string]int{}, seen: map[vnet.MobKind]map[uint64]bool{}, killed: map[vnet.MobKind]int{},
-		hitAt: map[uint64]time.Time{}, counted: map[uint64]bool{}, immortal: map[string]time.Duration{},
-	}
+func newRunStats(t *tally) *runStats {
+	return &runStats{tally: t, deaths: map[string]int{}, ownHit: map[uint64]time.Time{}}
 }
 
 func (s *runStats) begin(name string) {
@@ -83,10 +107,30 @@ func (s *runStats) deathsIn(phase string) int {
 	return s.deaths[phase]
 }
 
-func (s *runStats) blowLanded(target uint64) {
+func (s *runStats) totalDeaths() int {
 	s.mu.Lock()
-	s.hitAt[target] = time.Now()
+	defer s.mu.Unlock()
+	total := 0
+	for _, n := range s.deaths {
+		total += n
+	}
+	return total
+}
+
+func (s *runStats) blowLanded(target uint64) {
+	now := time.Now()
+	s.tally.mu.Lock()
+	s.hitAt[target] = now
+	s.tally.mu.Unlock()
+	s.mu.Lock()
+	s.ownHit[target] = now
 	s.mu.Unlock()
+}
+
+func (s *runStats) lastOwnHit(id uint64) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ownHit[id]
 }
 
 func (s *runStats) blowTaken() {
@@ -107,15 +151,9 @@ func (s *runStats) assist(where string) {
 	s.mu.Unlock()
 }
 
-func (s *runStats) addImmortal(phase string, d time.Duration) {
-	s.mu.Lock()
-	s.immortal[phase] += d
-	s.mu.Unlock()
-}
-
 func (s *runStats) sawMob(m mobView) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
 	if s.seen[m.kind] == nil {
 		s.seen[m.kind] = map[uint64]bool{}
 	}
@@ -125,42 +163,32 @@ func (s *runStats) sawMob(m mobView) {
 	}
 }
 
-// lostMob is a creature the snapshot stopped carrying: a kill when the bot hit it within
-// killWindow and is alive, since a wipe discards creatures only once the party is dead.
+// lostMob is a creature the snapshot stopped carrying: a kill when a member hit it within
+// killWindow and this member is alive, since a wipe discards creatures only once the whole
+// party is dead.
 func (s *runStats) lostMob(m mobView, alive bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
 	if hit, ok := s.hitAt[m.id]; ok && alive && time.Since(hit) < killWindow {
 		s.countKillLocked(m)
 	}
 }
 
-func (s *runStats) countKillLocked(m mobView) {
-	if s.counted[m.id] {
-		return
-	}
-	if _, hit := s.hitAt[m.id]; !hit {
-		return
-	}
-	s.counted[m.id] = true
-	s.killed[m.kind]++
-}
-
 func (s *runStats) killedCount(kind vnet.MobKind) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
 	return s.killed[kind]
 }
 
 func (s *runStats) isKilled(id uint64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
 	return s.counted[id]
 }
 
 func (s *runStats) lastHit(id uint64) time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
 	return s.hitAt[id]
 }
 
@@ -181,4 +209,27 @@ func (s *runStats) portalPlacement() {
 	s.mu.Lock()
 	s.portalPlacements++
 	s.mu.Unlock()
+}
+
+// reached is whether this member began a part of the route.
+func (s *runStats) reached(phase string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.phases {
+		if p.name == phase {
+			return true
+		}
+	}
+	return false
+}
+
+// killTotal is every kill the party has made.
+func (s *runStats) killTotal() int {
+	s.tally.mu.Lock()
+	defer s.tally.mu.Unlock()
+	total := 0
+	for _, n := range s.killed {
+		total += n
+	}
+	return total
 }

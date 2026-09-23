@@ -8,7 +8,149 @@
 
 None of the three changes a gameplay rule, balance number, schema or layout.
 
+**#1333 re-ran the descent with a party.** #1332 sized the dungeon for three to five players
+and made it impractical solo, so the solo run below measured a premise the owner has since
+replaced. The group runs are in [Group runs (#1333)](#group-runs-1333). The solo figures under
+[The run](#the-run) are **superseded by the 3–5 rule** and are kept only as the record of
+#1298.
+
+## Group runs (#1333)
+
+`server/cmd/voxelheim-descentbot` now plays with `-party N` bots, from 1 to 5. Each bot is its
+own account and character on its own TLS session. The leader invites the others with the
+client's `PartyRequest`, each one accepts, and each one walks through the open world's portal.
+The server's party rule then puts them all in the same instance, and the bot checks that it did.
+
+- **The party moves one part of the route at a time.** Nobody starts a part until every member
+  has finished the one before it. A member that is waiting still fights any creature that turns
+  on the party.
+- **The puzzles belong to the leader.** The leader presses the rune stones, cuts the web curtain
+  and runs the twin levers, and the others wait for the doors to open. The timed grille is for
+  everyone: each member must get through it, and whoever finds the lever up pulls it.
+- **Every member fights.** Each one strikes whatever has turned on any member. Within 10 blocks,
+  each one strikes the most wounded creature, so the party focuses its blows.
+- **The members read the bosses.** Each member reads the regions the server announces in each
+  `EncounterTimeline` as the client receives them. A member inside one walks the bearing that
+  leaves every region soonest, and never steps into one on the way in. This is the #1099
+  harness's reader, working over the wire. The #1298 bot never stepped aside, and a party like
+  that could not win. An earlier party of three with no reading killed the guardian after 27
+  deaths and two wipes, then wiped three times in a row at the king, having taken about 900 of its
+  19,800 health.
+- **Deaths are real.** No member is ever made immortal. A dead member respawns where the server
+  puts it, at the furthest checkpoint the party has reached, and walks back into the part where
+  it died. A wipe is every member dead at once. The run gives up after three wipes in a row with
+  no kill between them (`-max-wipes`).
+- **`/teleport` is used only for portal placement and stuck assists.** A stuck assist now
+  teleports only to a cell that the stream still shows as open.
+
+```sh
+go build -o <output-directory>/voxelheimd ./cmd/voxelheimd
+go run ./cmd/voxelheim-descentbot -server <output-directory>/voxelheimd -party 3
+```
+
+All three runs used seed 1 at view distance 4, built from this branch on a shared 16-thread
+workstation. The parties of 3 and 5 ran at the same time on separate servers. Every member is a
+fresh level-1 character carrying the #1099 iron blade and rusty armour.
+
+### Result
+
+| | Party of 3 | Party of 5 |
+| --- | ---: | ---: |
+| Instance seed | 5306321562182508718 | 5306321562182508716 |
+| Result | cleared, portal to portal | cleared, portal to portal |
+| Party wall clock, portal to portal | **21.9 min** | **22.1 min** |
+| Estimated human clear | **21.7 min, inside 17–23** | **21.3 min, inside 17–23** |
+| Guardian, first pull to kill | 209.9 s | 205.6 s |
+| King, first pull to kill | 333.6 s | 375.1 s |
+| Deaths per member | 2, 2, 3 | 2, 2, 2, 2, 2 |
+| Wipes | 2, both in the upper halls | 2, both in the upper halls |
+| Blows taken per member | 28, 37, 34 | 33, 29, 29, 28, 39 |
+| `/immortal` | 0 | 0 |
+| `/teleport` for portal placement | 6 (2 per member) | 10 (2 per member) |
+| `/teleport` stuck assists | 2, both at the timed grille | 0 |
+
+| Part | Party of 3 | Deaths | Party of 5 | Deaths |
+| --- | ---: | ---: | ---: | ---: |
+| Upper halls | 78.5 s | 7 (2 wipes) | 66.7 s | 10 (2 wipes) |
+| Rune hall | 11.6 s | 0 | 12.0 s | 0 |
+| Guardian | 213.1 s | 0 | 208.8 s | 0 |
+| Chasm and pool | 14.8 s | 0 | 10.4 s | 0 |
+| Cave waves | 503.7 s | 0 | 504.6 s | 0 |
+| Web curtain | 8.9 s | 0 | 9.3 s | 0 |
+| Timed grille | 23.1 s | 0 | 16.3 s | 0 |
+| Sand hall | 43.2 s | 0 | 42.5 s | 0 |
+| Twin levers | 15.1 s | 0 | 15.3 s | 0 |
+| King | 345.0 s | 0 | 386.2 s | 0 |
+| Return shortcut | 44.5 s | 0 | 44.1 s | 0 |
+
+Each part's time runs from the moment the party sets off into it to the moment the last member
+is through it.
+
+**Creatures killed by the party:**
+
+- **Party of 3:** 6 draugr and 6 vargr, which is four packs of three. Also 36 of 36 spiders
+  (twelve waves of three), 3 scorpions, the guardian and the king.
+- **Party of 5:** 10 draugr and 10 vargr, which is four packs of five. Also 60 of 60 spiders,
+  5 scorpions, the guardian and the king.
+
+The creatures seen include the fresh identities each wipe put back in the upper halls. The
+party of 3 saw 5 scorpions because all five buried slots are placed before the hall wakes and
+trims them to the pack.
+
+The puzzles held for both parties:
+
+- **Rune hall:** the leader read the order off the inscription, and it matched
+  `world.InstanceRuneOrder`.
+- **Web curtain:** 15 webs cut.
+- **Timed grille:** the leader went from lever to checkpoint in 9.2 s and 9.1 s, inside the
+  12 s hold.
+- **Twin levers:** 7.6 s and 7.5 s, inside the 10 s window.
+
+### The estimate
+
+The estimate keeps the party's own clock and swaps only the two boss fights for the
+energy-economy reader kills at that party size. For a party of 3 those are 206.65 s and 324.70 s.
+For a party of 5 they are 204.55 s and 324.70 s. These are the figures
+`TestTheRouteTakesSeventeenToTwentyThreeMinutes` adds.
+
+The swap barely moves the number. The bots now read the bosses, so their fights came within
+seconds of the readers' at three (209.9 s and 333.6 s) and within a minute at five (205.6 s and
+375.1 s). The raw clock sits inside the band too: 21.9 and 22.1 minutes.
+
+Two things add to the #1332 estimate's 20.0 minutes:
+
+- **Walking the route as a group.** Each part waits for the slowest member.
+- **The two wipes in the upper halls.** Each wipe sends the party back to fight the pack it lost.
+
+### Solo: dies before the king
+
+A solo attempt (`-party 1`, instance seed 5306321562182508727) **did not reach the guardian**.
+The first placed pack in the upper halls is sized for three, and it killed the lone iron delver
+three times running without losing a creature. The run gave up at that point, as the 3–5 rule
+intends:
+
+- 3 deaths and 3 wipes, with nothing killed.
+- 24 blows taken.
+- 0 `/immortal`.
+
+### Findings
+
+No defect was found that stops a party of three to five, so no issue was filed. Two observations
+are reported, not filed:
+
+- **The upper halls are the hardest part for a level-1 party.** Both parties wiped twice there
+  and nowhere else. The hall creatures announce no regions for the members to read, and the
+  dungeon tier prices their blows for a mid-level member (`dungeon_balance.go`). A level-1 party
+  is below that on purpose.
+- **Two members of the party of 3 needed a stuck assist in the timed grille's opening.** Both
+  were moved one cell to the checkpoint while the grille still stood open in their stream. That
+  is the bot's walker, not the grille.
+
 ## The run
+
+> **Superseded by the 3–5 rule (#1332, #1333).** This is the #1298 solo run, with `/immortal`
+> on through both boss fights. It is kept as the record of #1298. The group runs above replace it
+> as the dungeon's acceptance evidence.
 
 `server/cmd/voxelheim-descentbot` starts `voxelheimd` with an ephemeral world and joins one
 character over the real TLS transport. It then plays the route with the same messages the client
@@ -63,7 +205,7 @@ portal, in 37.3 minutes** of wall clock:
 - **Creatures seen:** 9 draugr and 10 vargr, counting the fresh identities that each wipe
   re-placed; 1 guardian, 2 king identities, 20 spiders and 11 scorpion identities.
 
-### Estimated human time: outside the band, filed as #1328
+### Estimated human time: outside the band, filed as #1328 (superseded)
 
 The bot does not evade, so its boss kill times are not a player's. The estimate therefore keeps
 the bot's own clock and swaps only its two boss fights for the #1099 solo iron-reader kill times
