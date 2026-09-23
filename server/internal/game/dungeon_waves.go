@@ -23,8 +23,9 @@ import (
 // the waves come out of.
 //
 // Which species a group holds is the room's: the first hall is the draugr's, the
-// second the vargr's, and the sand hall's scorpions lie buried. How many of a group's
-// slots a smaller party meets is the balance issue's number; every slot is filled.
+// second the vargr's, and the sand hall's scorpions lie buried. Every slot is filled;
+// how many of them a smaller party meets is decided when the party first steps into the
+// group's zone (dungeon_balance.go).
 //
 // # Triggers
 //
@@ -37,13 +38,12 @@ import (
 // Three waves, each from the burrows in turn, [spiderWaveInterval] apart — or
 // [spiderWaveBreather] after the previous wave's last spider dies, when that is
 // sooner, so a party that clears a wave quickly is not left waiting but always gets a
-// breath. A wipe — somebody inside and every one of them dead — stops the waves for
-// good; what comes back after one is the persistence issue's wipe rule, not this
-// file's. An instance with nobody in it is not a wipe: a party that has disconnected
-// has not lost, so the schedule only pauses, and an overdue wave comes out on the
-// first tick somebody is back. That is deliberately narrower than
-// [Sim.resetWipedDungeonLocked], which treats an empty instance as abandoned combat:
-// resetting a boss is transient, while stopping the waves is permanent.
+// breath. A wipe — somebody inside and every one of them dead — puts the waves back to
+// before the first, with the cavern's trigger armed again (dungeon_wipe.go). An
+// instance with nobody in it is not a wipe: a party that has disconnected has not lost,
+// so the schedule only pauses, and an overdue wave comes out on the first tick somebody
+// is back. That is deliberately narrower than [Sim.resetWipedDungeonLocked], which
+// treats an empty instance as abandoned combat.
 //
 // The layout makes the cavern's trigger the first thing a party reaches, ahead of the
 // web curtain across the neck beyond it, so the trigger is the one start the waves
@@ -84,9 +84,17 @@ type dungeonDescent struct {
 	zones []box
 	// groups is every placed creature's identity, by group. A spider wave's are
 	// appended to world.CaveBurrowGroup as the wave comes out.
-	groups   map[int][]uint64
+	groups map[int][]uint64
+	// homes is the slot every placed creature was put on, which a wipe puts it back on.
+	homes    map[uint64]world.PlacedAnchor
 	triggers []dungeonTrigger
 	waves    spiderWaves
+	// woken is every group whose zone a live player has stepped into, and so whose
+	// share of its slots the party's size has already decided (dungeon_balance.go).
+	woken map[int]bool
+	// wiped is set on the tick every player inside is dead and cleared once one lives,
+	// so a wipe resets the descent once however many ticks it lasts.
+	wiped bool
 }
 
 // dungeonTrigger is one trigger volume and whether it has fired.
@@ -99,8 +107,9 @@ type dungeonTrigger struct {
 // spiderWaves is the cave's wave schedule.
 type spiderWaves struct {
 	burrows []world.PlacedAnchor
-	// started is set when the cavern's trigger fires; stopped by a wipe.
-	started, stopped bool
+	// started is set when the cavern's trigger fires, and cleared by a wipe that finds
+	// the cave uncleared.
+	started bool
 	// next is the wave to come, and due the tick it comes on.
 	next int
 	due  uint64
@@ -115,6 +124,8 @@ type spiderWaves struct {
 func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 	desc := &d.descent
 	desc.groups = make(map[int][]uint64)
+	desc.homes = make(map[uint64]world.PlacedAnchor)
+	desc.woken = make(map[int]bool)
 	for _, z := range world.InstanceDungeonZones(seed) {
 		desc.zones = append(desc.zones, box{
 			min: [3]float64{float64(z.Min[0]), float64(z.Min[1]), float64(z.Min[2])},
@@ -144,6 +155,7 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 				return fmt.Errorf("game: could not place dungeon minor %s in group %d", species.kind, a.Index)
 			}
 			desc.groups[a.Index] = append(desc.groups[a.Index], id)
+			desc.homes[id] = a
 		case world.AnchorInstanceTrigger:
 			if corners[a.Index] == nil {
 				triggerOrder = append(triggerOrder, a.Index)
@@ -199,9 +211,16 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 		return false // nobody inside: nothing fires and the schedule waits
 	}
 	s.advanceDungeonCheckpointsLocked(players)
-	if w.started && !anyAlive {
-		w.stopped = true
+	changed := false
+	if !anyAlive {
+		if !desc.wiped {
+			desc.wiped = true
+			changed = s.resetWipedDescentLocked(players)
+		}
+		return changed
 	}
+	desc.wiped = false
+	changed = s.wakeDungeonGroupsLocked(players) || changed
 	for i := range desc.triggers {
 		t := &desc.triggers[i]
 		if t.fired {
@@ -217,8 +236,8 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 			}
 		}
 	}
-	if !w.started || w.stopped || w.next >= len(spiderWaveSizes) {
-		return false
+	if !w.started || w.next >= len(spiderWaveSizes) {
+		return changed
 	}
 	rate := uint8(math.Round(1 / s.dt))
 	if w.next > 0 && !w.cleared && s.allDeadLocked(w.current) {
@@ -226,19 +245,20 @@ func (s *Sim) advanceDungeonDescentLocked(tick uint64, players []*Player) bool {
 		w.due = min(w.due, tick+uint64(ticksFor(spiderWaveBreather, rate)))
 	}
 	if tick < w.due {
-		return false
+		return changed
 	}
-	w.current = s.releaseSpiderWaveLocked(w.next)
+	w.current = s.releaseSpiderWaveLocked(w.next, len(players))
 	w.cleared = false
 	w.next++
 	w.due = tick + uint64(ticksFor(spiderWaveInterval, rate))
 	return true
 }
 
-// releaseSpiderWaveLocked brings wave n out of the burrows, each spider from the next
-// burrow in turn after where the previous wave left off, so the waves come from every
-// wall rather than always the same holes.
-func (s *Sim) releaseSpiderWaveLocked(n int) []uint64 {
+// releaseSpiderWaveLocked brings wave n out of the burrows for a party of members, each
+// spider from the next burrow in turn after where the previous wave left off, so the
+// waves come from every wall rather than always the same holes. The wave is the party's
+// share of its full size (dungeon_balance.go), decided as it comes out.
+func (s *Sim) releaseSpiderWaveLocked(n, members int) []uint64 {
 	desc := &s.dungeon.descent
 	w := &desc.waves
 	if len(w.burrows) == 0 {
@@ -249,8 +269,9 @@ func (s *Sim) releaseSpiderWaveLocked(n int) []uint64 {
 		first += size
 	}
 	zone := desc.zones[world.CaveBurrowGroup]
-	wave := make([]uint64, 0, spiderWaveSizes[n])
-	for i := range spiderWaveSizes[n] {
+	size := minorShare(spiderWaveSizes[n], members)
+	wave := make([]uint64, 0, size)
+	for i := range size {
 		burrow := w.burrows[(first+i)%len(w.burrows)]
 		id, made := s.placeMinorMobLocked(vnet.MobKindCaveSpider, anchorStanding(burrow), zone, false)
 		if !made {
