@@ -207,6 +207,9 @@ func TestStaticPropSnapshotsUseCompleteViewSets(t *testing.T) {
 		t.Fatal("view exit retained prop")
 	}
 }
+
+// An instance indexes the dungeon's own lights and nothing of the capital's: every
+// prop is a sconce, and none has a solid member.
 func TestStaticPropInstancesHaveNoCapitalCatalogue(t *testing.T) {
 	manager := instanceTestManager(t, 20, 1)
 	instance, err := manager.Create(InstanceRuin{})
@@ -214,8 +217,13 @@ func TestStaticPropInstancesHaveNoCapitalCatalogue(t *testing.T) {
 		t.Fatal(err)
 	}
 	terrain, ok := instance.Sim.terrain.(*CacheTerrain)
-	if !ok || !terrain.cache.Finite() || terrain.staticProps != nil || instance.Sim.staticProps != nil {
-		t.Fatal("finite instance acquired capital solids")
+	if !ok || !terrain.cache.Finite() || terrain.staticProps != instance.Sim.staticProps || instance.Sim.staticProps == nil {
+		t.Fatal("finite instance has no dungeon catalogue of its own")
+	}
+	for _, p := range instance.Sim.staticProps.props {
+		if p.state.Kind != vnet.StaticPropKindWallSconce || len(p.solids) != 0 {
+			t.Fatalf("finite instance acquired capital furniture: %+v", p.state)
+		}
 	}
 }
 func TestStaticPropWorldVocabularyMatchesWire(t *testing.T) {

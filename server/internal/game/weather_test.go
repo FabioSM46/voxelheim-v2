@@ -72,6 +72,7 @@ func TestEveryReachDecisionUsesTheWeatherAwareReach(t *testing.T) {
 	}
 
 	wantCallers := map[string]int{
+		"dungeon_puzzles.go:UseMechanism": 1,
 		"edit.go:Edit":                    1,
 		"loot.go:accessibleCorpseLocked":  1,
 		"loot.go:canOpenCorpseLocked":     1,

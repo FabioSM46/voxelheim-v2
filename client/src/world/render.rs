@@ -184,9 +184,17 @@ struct WaterMaterial(Handle<FlowingWater>);
 #[derive(Resource, Debug)]
 struct CoverMaterial(Handle<StandardMaterial>);
 
-/// The three materials a chunk is drawn with, as one system parameter.
+/// The material every glowing face shares: the rune on a lit rune stone.
 ///
-/// Three resources and not one, because they answer three different questions and a
+/// The fourth material, and the split is by **lighting**: `unlit` is what makes a vertex
+/// colour reach the screen whatever light arrives at it, which is the whole of how a rune
+/// glows in a cave with no light in it. White for the reason the other three are.
+#[derive(Resource, Debug)]
+struct GlowMaterial(Handle<StandardMaterial>);
+
+/// The four materials a chunk is drawn with, as one system parameter.
+///
+/// Four resources and not one, because they answer four different questions and a
 /// system that needs only one should say so. Bundled for the reason
 /// `player/camera.rs`'s `Aim` is: it names the set, and it keeps
 /// [`apply_finished_meshes`] inside the argument budget the second material took it
@@ -196,6 +204,7 @@ struct ChunkMaterials<'w> {
     opaque: Option<Res<'w, TerrainMaterial>>,
     water: Option<Res<'w, WaterMaterial>>,
     cover: Option<Res<'w, CoverMaterial>>,
+    glow: Option<Res<'w, GlowMaterial>>,
 }
 
 /// Marks the entities this module spawns for chunks, so a query can find them
@@ -425,6 +434,14 @@ fn create_materials(
         // sort water needs.
         ..default()
     })));
+
+    commands.insert_resource(GlowMaterial(materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        // Light of its own: the vertex colour is the colour, and neither the sun nor the
+        // dark of a cave changes it.
+        unlit: true,
+        ..default()
+    })));
 }
 
 /// Turns the store's change log into meshing work and starts as much of it as the
@@ -532,8 +549,19 @@ fn apply_finished_meshes(
 ) {
     // All four exist from the first frame after startup. A frame without them is a
     // frame before there is a world, and there is nothing to place a chunk relative to.
-    let (Some(material), Some(water_material), Some(cover_material), Some(session)) =
-        (materials.opaque, materials.water, materials.cover, session)
+    let (
+        Some(material),
+        Some(water_material),
+        Some(cover_material),
+        Some(glow_material),
+        Some(session),
+    ) = (
+        materials.opaque,
+        materials.water,
+        materials.cover,
+        materials.glow,
+        session,
+    )
     else {
         return;
     };
@@ -600,6 +628,7 @@ fn apply_finished_meshes(
             opaque,
             water: water_surface,
             cover: cover_surface,
+            glow: glow_surface,
         } = outcome.mesh;
 
         // The chunk's own entity: the transform every half is placed by, and the opaque
@@ -638,6 +667,14 @@ fn apply_finished_meshes(
             commands.spawn((
                 Mesh3d(meshes.add(to_bevy_mesh(cover_surface))),
                 MeshMaterial3d(cover_material.0.clone()),
+                Transform::default(),
+                ChildOf(entity),
+            ));
+        }
+        if !glow_surface.is_empty() {
+            commands.spawn((
+                Mesh3d(meshes.add(to_bevy_mesh(glow_surface))),
+                MeshMaterial3d(glow_material.0.clone()),
                 Transform::default(),
                 ChildOf(entity),
             ));
@@ -1189,7 +1226,7 @@ mod tests {
     }
 
     /// Every `StandardMaterial` handle hanging off a chunk entity's children — which is
-    /// the cover half and nothing else, since water's handle is a `FlowingWater`.
+    /// the cover and glow halves, since water's handle is a `FlowingWater`.
     fn cover_child_materials(app: &mut App) -> Vec<Handle<StandardMaterial>> {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<ChildOf>>();
@@ -1320,6 +1357,65 @@ mod tests {
             AlphaMode::Opaque,
             "cover has no alpha, so it stays out of the sort water needs"
         );
+    }
+
+    #[test]
+    fn a_lit_rune_glows_from_an_unlit_child_and_an_unlit_rune_does_not() {
+        // The fourth half's rendering split. A lit stone is still an opaque cube on the
+        // chunk entity; its rune is a child drawn with the unlit material, which is what
+        // lets it read in a cave the ambient term has all but switched off.
+        const LAYER: u16 = SIZE * SIZE;
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: vec![
+                    palette::STONE,
+                    LAYER,
+                    palette::RUNE_STONE_LIT,
+                    1,
+                    palette::AIR,
+                    VOLUME - LAYER - 1,
+                ],
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        assert_eq!(
+            chunk_entities(&mut app),
+            vec![(true, 1)],
+            "the stone on the chunk entity and one glow child"
+        );
+        let glow = app.world().resource::<GlowMaterial>().0.clone();
+        assert_eq!(cover_child_materials(&mut app), vec![glow.clone()]);
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let material = materials.get(&glow).expect("glow material");
+        assert!(material.unlit, "a rune carries its own light");
+        assert_eq!(material.base_color, Color::WHITE);
+
+        // The same stone dark grows no child at all.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: vec![
+                    palette::STONE,
+                    LAYER,
+                    palette::RUNE_STONE,
+                    1,
+                    palette::AIR,
+                    VOLUME - LAYER - 1,
+                ],
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+        assert_eq!(chunk_entities(&mut app), vec![(true, 0)]);
     }
 
     #[test]

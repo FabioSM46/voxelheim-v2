@@ -55,6 +55,7 @@ mod armour;
 mod birds;
 mod camera;
 mod castle_lighting;
+mod cave_light;
 mod combat;
 mod combat_audio;
 mod constants;

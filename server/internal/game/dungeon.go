@@ -7,7 +7,6 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -28,13 +27,18 @@ type dungeonEncounters struct {
 	gate               *world.InstanceGate
 	guardianID, kingID uint64
 	progress           dungeonProgress
+	puzzles            *dungeonPuzzles
 	changes            [][]byte
 	pending            map[*Player]int
+	// descent is the minor encounters: placed groups, triggers and the spider waves
+	// (dungeon_waves.go).
+	descent dungeonDescent
 }
 
 // Construction only, before the manager publishes this session. Both live
 // encounters use the ordinary spawn path exactly once; the open-world director
-// never owns this simulation, and no missing mob is interpreted as a respawn.
+// never owns this simulation, and no missing mob is interpreted as a respawn. The
+// minor-spawn groups are placed here too, on the same terms (dungeon_waves.go).
 func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progress dungeonProgress) error {
 	d := &dungeonEncounters{gate: gate, progress: progress, pending: make(map[*Player]int)}
 	guardian, king, _ := world.InstanceEncounterAnchors(seed)
@@ -58,6 +62,9 @@ func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progr
 			return err
 		}
 	}
+	if err := s.placeDungeonMinorsLocked(seed, d); err != nil {
+		return err
+	}
 	s.dungeon = d
 	s.deathTicks = ticksFor(10*time.Second, uint8(math.Round(1/s.dt)))
 	return nil
@@ -75,22 +82,19 @@ func (s *Sim) dungeonDefeatLocked(m *mob) {
 	if d == nil {
 		return
 	}
-	if m.entityID == d.kingID {
+	if m.entityID == d.kingID && !d.progress.king {
 		d.progress.king = true
+		s.openReturnShortcutLocked()
 	}
 	if m.entityID != d.guardianID || d.progress.guardian {
 		return
 	}
 	d.progress.guardian = true
+	var cells []world.InstanceCell
 	for _, p := range d.gate.Open() {
-		d.changes = append(d.changes, protocol.EncodeBlockUpdate(protocol.BlockUpdate{
-			Pos: [3]int32{int32(p.X), int32(p.Y), int32(p.Z)}, BlockID: uint16(world.Air),
-		}))
+		cells = append(cells, world.InstanceCell{X: p.X, Y: p.Y, Z: p.Z, Block: world.Air})
 	}
-	for _, p := range s.players {
-		d.pending[p] = 0
-	}
-	s.flushDungeonGateLocked()
+	s.announceDungeonCellsLocked(cells)
 }
 
 // A full outbound queue retains the unsent suffix. Late arrivals read the open

@@ -7,11 +7,12 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
-// A mechanism use is a payload an admitted session accepts, and until levers and rune stones
-// exist every cell answers NotAMechanism under UseMechanism, echoing the cell it named. A
+// A mechanism use is a payload an admitted session accepts, and in the open world, which has
+// no levers or rune stones, every cell answers NotAMechanism under UseMechanism, echoing the
+// cell it named. A
 // request that named no cell answers MalformedNoAnchor with no anchor, never the origin.
 // Neither ends the session: the second answer arriving proves the first was survived.
-func TestAMechanismUseIsRefusedAsNotAMechanismUntilMechanismsExist(t *testing.T) {
+func TestAMechanismUseOutsideADungeonIsRefusedAsNotAMechanism(t *testing.T) {
 	t.Parallel()
 
 	cfg := editConfig()
