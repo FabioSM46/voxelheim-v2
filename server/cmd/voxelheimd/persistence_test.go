@@ -1089,6 +1089,11 @@ func TestASavedDungeonRunSurvivesARestart(t *testing.T) {
 		ExpiresUnix:    time.Now().AddDate(0, 0, 7).Unix(),
 		DefeatedBosses: []vnet.MobKind{vnet.MobKindVargrGuardian},
 		Bound:          []persist.SessionCharacter{{PlayerID: character.PlayerID, CharacterID: character.CharacterID}},
+		// The route crosses main's mapping in both directions too (#1294): rebuilt into
+		// the simulation as open doors and empty halls, and read back out of it.
+		Checkpoints:   2,
+		SolvedPuzzles: []uint8{1, 3},
+		ClearedGroups: []uint8{0, 5},
 	}}
 	if err := openSessionStore(t, dir).Save(stored); err != nil {
 		t.Fatalf("Save: %v", err)

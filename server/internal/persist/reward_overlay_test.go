@@ -64,3 +64,36 @@ func TestRewardOverlayRefusesAmbiguousOrUnboundedRestoration(t *testing.T) {
 		})
 	}
 }
+
+// The journal knows what a run killed and never where its party stands, so a run the
+// journal overlays keeps the route progress sessions.bin recorded for it — and a copy
+// of it, so the caller cannot reach back into the file's lists.
+func TestRewardOverlayKeepsTheRouteProgressOfAJournaledRun(t *testing.T) {
+	players, rewards, _, _, _ := transitionFixture(t)
+	rec := SessionRecord{ID: 7, Seed: 20, Ruin: [2]int64{3, 4}, ExpiresUnix: 200}
+	if err := rewards.AllocateRun(players, 2, rec, world.WorldgenVersion); err != nil {
+		t.Fatal(err)
+	}
+	saved := rec
+	saved.Checkpoints, saved.SolvedPuzzles, saved.ClearedGroups = 2, []uint8{1, 3}, []uint8{0, 4}
+	live, err := rewards.OverlaySessions([]SessionRecord{saved}, 100, world.WorldgenVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *SessionRecord
+	for i := range live {
+		if live[i].Generation == 2 {
+			got = &live[i].Session
+		}
+	}
+	if got == nil {
+		t.Fatalf("the journaled run was not restored: %#v", live)
+	}
+	if got.Checkpoints != 2 || !reflect.DeepEqual(got.SolvedPuzzles, []uint8{1, 3}) || !reflect.DeepEqual(got.ClearedGroups, []uint8{0, 4}) {
+		t.Fatalf("the overlay lost the route progress: %#v", *got)
+	}
+	got.SolvedPuzzles[0] = 9
+	if saved.SolvedPuzzles[0] != 1 {
+		t.Fatal("the overlay aliases the saved record's progress")
+	}
+}

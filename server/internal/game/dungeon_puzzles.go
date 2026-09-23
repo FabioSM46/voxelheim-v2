@@ -18,7 +18,8 @@ import (
 // into every composition, so a use that succeeds is answered by the `BlockUpdate`s it
 // produces and by nothing else, and an eviction or a regeneration shows exactly the
 // state this file last set. Nothing here is persisted: a solved puzzle belongs to this
-// instance's lifetime (keeping one across a restart is the persistence issue's).
+// instance's lifetime; a restart keeps the puzzles solved for good (dungeon_route.go),
+// and a restore opens their doors here before anybody can see them shut.
 //
 //   - The rune hall ([world.RunePuzzle]): four stones pressed in the seed's order,
 //     which the inscription over the door draws. The right next stone lights; any other
@@ -95,8 +96,28 @@ func (s *Sim) placeDungeonPuzzles(seed int64) error {
 		}
 	}
 	d.puzzles = p
+	// One atomic update for everything a restored run had opened: the shortcut on the
+	// king's death, and each permanent puzzle's door with its mechanisms showing solved —
+	// every rune lit, both twin levers up — so the cells read as the party left them.
+	restore := world.InstanceUpdate{Doors: map[int]bool{}}
 	if d.progress.king {
-		d.gate.Update(world.InstanceUpdate{Doors: map[int]bool{world.ReturnShortcutDoor: true}})
+		restore.Doors[world.ReturnShortcutDoor] = true
+	}
+	if d.progress.route.solved(world.RunePuzzle) {
+		restore.Doors[world.RunePuzzle] = true
+		p.lit = len(p.order)
+		for ordinal := range p.cells[world.RunePuzzle] {
+			restore.Mechanisms = append(restore.Mechanisms, p.showing(world.RunePuzzle, ordinal, world.RuneStoneLit))
+		}
+	}
+	if d.progress.route.solved(world.TwinLeverPuzzle) {
+		restore.Doors[world.TwinLeverPuzzle] = true
+		for ordinal := range p.cells[world.TwinLeverPuzzle] {
+			restore.Mechanisms = append(restore.Mechanisms, p.showing(world.TwinLeverPuzzle, ordinal, world.LeverOn))
+		}
+	}
+	if len(restore.Doors) != 0 {
+		d.gate.Update(restore)
 	}
 	return nil
 }
