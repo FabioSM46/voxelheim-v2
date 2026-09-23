@@ -3473,3 +3473,5 @@ pub(crate) fn arrival_body_width(world: &World) -> f32 {
 
 #[cfg(test)]
 mod castle_capture;
+#[cfg(test)]
+mod dungeon_capture_fixture;
