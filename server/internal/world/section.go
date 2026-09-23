@@ -88,6 +88,29 @@ func (s *Section) Fill(b Box, block Block) *Section {
 	return s
 }
 
+// FillVoid writes pick's block into every cell of the box the section has not drawn
+// yet, and leaves every drawn cell alone. It is how a zone is set into solid rock: the
+// rooms drawn before it keep their own shells, and the rooms carved after it take
+// the rock as their walls, since a shell is only ever written over void.
+func (s *Section) FillVoid(b Box, pick func(x, y, z int) Block) *Section {
+	if s.check("fill void", b) {
+		s.each(b, func(x, y, z int) {
+			if i := s.index(x, y, z); s.voxels[i] == keepTerrain {
+				s.voxels[i] = pick(x, y, z)
+			}
+		})
+	}
+	return s
+}
+
+// at is the section's cell, or void outside its frame.
+func (s *Section) at(x, y, z int) Block {
+	if s.err != nil || !s.inside(x, y, z) {
+		return keepTerrain
+	}
+	return s.voxels[s.index(x, y, z)]
+}
+
 // CarveRoom makes the box air and wraps it in a one-block shell of wall wherever the
 // shell would otherwise be void. The shell may fall outside the frame, in which case
 // that face is simply open to the void — so leave a margin of one around every room.

@@ -103,7 +103,7 @@ func TestFloorOneLeadsToTheChasmAndTheShoreNeverLeadsBack(t *testing.T) {
 
 		open := newDungeonWorld(t, seed, true, true)
 		upper := open.walk(arrival)
-		for _, a := range append([]PlacedAnchor{exit, guardian}, byKind[AnchorInstanceMinorSpawn]...) {
+		for _, a := range append([]PlacedAnchor{exit, guardian}, byKind[AnchorInstanceMinorSpawn][:16]...) {
 			if !upper[[3]int64{a.X, a.Y, a.Z}] {
 				t.Fatalf("seed %d: %s %+v is not reached from the arrival slot", seed, a.Kind, a)
 			}
