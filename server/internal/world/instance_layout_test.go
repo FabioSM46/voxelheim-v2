@@ -82,7 +82,7 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		byKind := dungeonAnchorsByKind(seed)
 		for kind, want := range map[AnchorKind]int{
 			AnchorInstanceArrival: 1, AnchorInstanceExit: 1, AnchorInstanceGuardian: 1, AnchorInstanceKing: 1,
-			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 3, AnchorInstanceMinorSpawn: 16 + 6 + 8,
+			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 3, AnchorInstanceMinorSpawn: 20 + 6 + 5,
 			AnchorInstanceMechanism: 4 + 1 + 2, AnchorInstanceDoor: 25 + 9 + 9 + 12, AnchorInstanceTrigger: 4,
 		} {
 			if got := len(byKind[kind]); got != want {
@@ -102,9 +102,9 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 				t.Fatalf("seed %d: minor spawn %+v has no floor or headroom", seed, a)
 			}
 		}
-		if len(groups) != 6 || groups[0] != 4 || groups[1] != 4 || groups[2] != 4 || groups[3] != 4 ||
-			groups[CaveBurrowGroup] != 6 || groups[SandBuriedGroup] != 8 {
-			t.Fatalf("seed %d: spawn groups %v, want four groups of four, six burrows and eight scorpions", seed, groups)
+		if len(groups) != 6 || groups[0] != 5 || groups[1] != 5 || groups[2] != 5 || groups[3] != 5 ||
+			groups[CaveBurrowGroup] != 6 || groups[SandBuriedGroup] != 5 {
+			t.Fatalf("seed %d: spawn groups %v, want four groups of five, six burrows and five scorpions", seed, groups)
 		}
 		for _, a := range byKind[AnchorInstanceMechanism][:4] {
 			if a.Index != runePuzzle || w.at(a.X, a.Y, a.Z) != RuneStone {

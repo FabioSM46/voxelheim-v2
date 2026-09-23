@@ -542,17 +542,11 @@ func (r *runner) drop(ctx context.Context) error {
 	return r.walkTo(ctx, "the shore checkpoint", exactly(shore), false)
 }
 
-// expectedSpiders is how many spiders the twelve waves bring for a party of one: each
-// wave's full size (internal/game's spiderWaveSizes, 4, 5 and 6 four times over) scaled
-// to the party's share the way minorShare scales it, rounded up.
+// expectedSpiders is how many spiders the twelve waves bring for a party of members: each
+// wave is a pack of one spider per member the dungeon is sized for, three to five
+// (internal/game's spiderWaveCount and dungeonPackSize).
 func expectedSpiders(members int) int {
-	total := 0
-	for range 4 {
-		for _, size := range []int{4, 5, 6} {
-			total += max(1, (size*members+3)/4)
-		}
-	}
-	return total
+	return 12 * min(max(members, 3), 5)
 }
 
 // caveWaves walks into the cavern — which starts the waves — and holds it until every

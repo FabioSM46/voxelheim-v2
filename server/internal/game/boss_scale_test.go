@@ -47,22 +47,27 @@ func TestBossScaleForRepresentativeParties(t *testing.T) {
 		members       uint16
 		damagePercent uint16
 	}{
-		{"solo at level one", guardian, []uint16{1}, 1, 100},
-		{"solo at the level cap", guardian, []uint16{30}, 1, 245},
-		{"two at level ten", king, []uint16{10, 10}, 2, 145},
+		// Clamped at the low end (#1332): one and two members meet a boss sized for three,
+		// struck at their own levels.
+		{"solo at level one", guardian, []uint16{1}, 3, 100},
+		{"solo at the level cap", guardian, []uint16{30}, 3, 245},
+		{"two at level ten", king, []uint16{10, 10}, 3, 145},
+		{"three at level one", guardian, []uint16{1, 1, 1}, 3, 100},
 		// 100 + 145 + 195 + 245 = 685 over four members is 171.25.
 		{"mixed party of four", king, []uint16{1, 10, 20, 30}, 4, 171},
 		{"full party of four at level one", guardian, []uint16{1, 1, 1, 1}, 4, 100},
-		// Clamped at the low end: no level below one, and an empty party is one member.
-		{"a level below one reads as one", guardian, []uint16{0}, 1, 100},
-		{"nobody reads as one member at level one", king, nil, 1, 100},
-		// Clamped at the high end: no level above the cap, and a fifth member adds no health.
-		{"a level above the cap reads as the cap", king, []uint16{MaxLevel + 9}, 1, 245},
-		{"a fifth member adds no health", guardian, []uint16{1, 1, 1, 1, 1}, 4, 100},
-		{"five at the cap", king, []uint16{30, 30, 30, 30, 30}, 4, 245},
-		// A fifth member adds no health and still counts toward the damage mean, because every
-		// member present is struck: 4 × 100 + 245 = 645 over five is 129.
-		{"a fifth member moves the blows but not the health", guardian, []uint16{1, 1, 1, 1, 30}, 4, 129},
+		// No level below one, and an empty party is the smallest the scale knows.
+		{"a level below one reads as one", guardian, []uint16{0}, 3, 100},
+		{"nobody reads as three members at level one", king, nil, 3, 100},
+		// Clamped at the high end: no level above the cap, and five is the largest party.
+		{"a level above the cap reads as the cap", king, []uint16{MaxLevel + 9}, 3, 245},
+		{"a fifth member adds their health", guardian, []uint16{1, 1, 1, 1, 1}, 5, 100},
+		{"five at the cap", king, []uint16{30, 30, 30, 30, 30}, 5, 245},
+		// Every member present counts toward the damage mean: 4 × 100 + 245 = 645 over five
+		// is 129.
+		{"a fifth member at the cap moves the blows", guardian, []uint16{1, 1, 1, 1, 30}, 5, 129},
+		// Past the largest party — which a run cannot hold — the health stays at five's.
+		{"a sixth adds nothing", guardian, []uint16{1, 1, 1, 1, 1, 1}, 5, 100},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := bossScaleFor(c.def, c.levels)
@@ -229,8 +234,8 @@ func TestAScaledBlowCostsALevelledPlayerTheSameShare(t *testing.T) {
 
 // A boss whose encounter is cleared while it survives, and which is then pulled again, keeps
 // the health it had rather than multiplying an already scaled value a second time. Four
-// members pull the king to 65,532, which a second multiplication by the scale would wrap to
-// 65,520. No production path clears an encounter on a surviving boss today; this pins the
+// members pull the king to 26,400, which a second multiplication by the scale would carry
+// past the wire's ceiling. No production path clears an encounter on a surviving boss today; this pins the
 // invariant before one does.
 func TestAScaledBossPulledAgainIsNotScaledTwice(t *testing.T) {
 	t.Parallel()
@@ -246,8 +251,8 @@ func TestAScaledBossPulledAgainIsNotScaledTwice(t *testing.T) {
 	defer h.sim.mu.Unlock()
 	m := h.sim.mobs[id]
 	full := m.encounter.scale.maxHealth
-	if full != 65532 {
-		t.Fatalf("four members pulled the king to %d, want 65532", full)
+	if full != 26400 {
+		t.Fatalf("four members pulled the king to %d, want 26400", full)
 	}
 	for _, health := range []uint16{full, full - 1000} {
 		m.health = health

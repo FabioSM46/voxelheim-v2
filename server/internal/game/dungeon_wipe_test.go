@@ -33,36 +33,29 @@ func killAll(party []*Player) {
 	}
 }
 
-// The share of a group or a wave each party size meets, as dungeon_balance.go tabulates.
-func TestAPartyMeetsItsShareOfEverySlot(t *testing.T) {
-	for _, tc := range []struct {
-		slots int
-		want  [6]int // members 0 (read as one) through 5 (read as four)
-	}{
-		{4, [6]int{1, 1, 2, 3, 4, 4}},
-		{8, [6]int{2, 2, 4, 6, 8, 8}},
-		{5, [6]int{2, 2, 3, 4, 5, 5}},
-		{6, [6]int{2, 2, 3, 5, 6, 6}},
-		{1, [6]int{1, 1, 1, 1, 1, 1}},
-	} {
-		for members, want := range tc.want {
-			if got := minorShare(tc.slots, members); got != want {
-				t.Fatalf("minorShare(%d, %d) = %d, want %d", tc.slots, members, got, want)
-			}
+// The pack each party size meets, as dungeon_balance.go tabulates: one creature for each
+// member the dungeon is sized for, never fewer than three and never more than five.
+func TestAPartyMeetsAPackOfThreeToFive(t *testing.T) {
+	for members, want := range []int{3, 3, 3, 3, 4, 5, 5, 5} {
+		if got := dungeonPackSize(members); got != want {
+			t.Fatalf("dungeonPackSize(%d) = %d, want %d", members, got, want)
 		}
+	}
+	if dungeonPackMax != MaxPartySize {
+		t.Fatalf("the largest pack is %d, want one per member of the largest party, %d", dungeonPackMax, MaxPartySize)
 	}
 }
 
-// A group keeps the party's share the tick its zone wakes, the first slots declared, and
+// A group keeps the party's pack the tick its zone wakes, the first slots declared, and
 // a member who joins afterwards changes nothing; a wave is sized by who is inside as it
 // comes out.
-func TestAGroupAndAWaveAreTheirPartysShare(t *testing.T) {
-	for members := 1; members <= 4; members++ {
+func TestAGroupAndAWaveAreTheirPartysPack(t *testing.T) {
+	for members := 1; members <= MaxPartySize; members++ {
 		t.Run(fmt.Sprint(members), func(t *testing.T) {
 			s := newWavesSim(t, int64(members))
 			desc := &s.dungeon.descent
 			// Groups 0 and 1 share the first hall, and wake together.
-			if len(desc.groups[2]) != 4 {
+			if len(desc.groups[2]) != dungeonPackMax {
 				t.Fatal("the second hall was trimmed before anybody came")
 			}
 			for _, group := range []int{0, 1, 2, 3, world.SandBuriedGroup} {
@@ -74,14 +67,17 @@ func TestAGroupAndAWaveAreTheirPartysShare(t *testing.T) {
 							before = append(before, 0)
 						}
 					}
-					if want := minorShare(len(before), members); len(desc.groups[group]) != want {
+					if want := dungeonPackSize(members); len(desc.groups[group]) != want {
 						t.Fatalf("group %d, sharing a hall already woken, holds %d, want %d", group, len(desc.groups[group]), want)
 					}
 					continue
 				}
 				party := partyAt(members, zoneCentre(s, group))
 				s.advanceDungeonDescentLocked(1, party)
-				want := minorShare(len(before), members)
+				want := dungeonPackSize(members)
+				if len(before) != dungeonPackMax {
+					t.Fatalf("group %d holds %d slots, want a pack of the largest size", group, len(before))
+				}
 				if !slices.Equal(desc.groups[group], before[:want]) {
 					t.Fatalf("group %d kept %v of %v, want the first %d", group, desc.groups[group], before, want)
 				}
@@ -97,7 +93,7 @@ func TestAGroupAndAWaveAreTheirPartysShare(t *testing.T) {
 			}
 			cave := triggerCentre(t, s, world.CaveTrigger)
 			s.advanceDungeonDescentLocked(10, partyAt(members, cave))
-			if got, want := len(desc.waves.current), minorShare(spiderWaveSizes[0], members); got != want {
+			if got, want := len(desc.waves.current), dungeonPackSize(members); got != want {
 				t.Fatalf("the first wave brought %d spiders for %d members, want %d", got, members, want)
 			}
 		})
@@ -231,8 +227,8 @@ func TestAWipeElsewhereRestartsTheWavesUnlessTheyWereBeaten(t *testing.T) {
 		restart bool
 	}{
 		{"the first wave cleared, the rest to come", 1, true, true},
-		{"the last wave out and alive", len(spiderWaveSizes), false, true},
-		{"every wave beaten", len(spiderWaveSizes), true, false},
+		{"the last wave out and alive", spiderWaveCount, false, true},
+		{"every wave beaten", spiderWaveCount, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newWavesSim(t, 1)

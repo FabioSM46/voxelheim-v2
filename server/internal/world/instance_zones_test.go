@@ -25,7 +25,7 @@ func TestEveryMinorSlotStandsInItsGroupsZone(t *testing.T) {
 				t.Errorf("seed %d: slot %+v stands outside its zone %+v", seed, a, zones[a.Index])
 			}
 		}
-		if slots != 16+6+8 {
+		if slots != 20+6+5 {
 			t.Errorf("seed %d: %d minor slots", seed, slots)
 		}
 	}

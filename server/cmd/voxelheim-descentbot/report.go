@@ -11,15 +11,21 @@ import (
 )
 
 // The human time is the bot's own clock with its two boss fights replaced. The bot does not
-// evade, so it fights both bosses under /immortal; those fights are swapped for the #1099
-// solo iron-reader kill times, the ones TestTheRouteTakesSeventeenToTwentyThreeMinutes adds.
-// Everything else stands as the bot walked, waited and fought it.
+// evade, so it fights both bosses under /immortal; those fights are swapped for a solo iron
+// reader's kill times. Everything else stands as the bot walked, waited and fought it.
+//
+// **A solo run is not held to the band any more (#1332)**: the dungeon is sized for three to
+// five, and one player meets it sized for three, so the verdict below is expected to read
+// OUTSIDE for this solo bot. The band is TestTheRouteTakesSeventeenToTwentyThreeMinutes's,
+// at three, four and five.
 
-// soloIronReaderKills are the #1099 solo iron readers' kill times in seconds
-// (docs/reviews/boss-balance-1099.md, "Kill times"), the Vargr and then the Draugr.
-var soloIronReaderKills = [2]float64{222.65, 355.45}
+// soloIronReaderKills are a solo iron reader's kill times in seconds against bosses sized for
+// three, under the energy economy — the #1099 harness at zero delay, measured on #1332 —
+// the Vargr and then the Draugr. A scripted reader is never struck, so these are a floor on
+// what a person alone could do rather than a time anybody is expected to reach.
+var soloIronReaderKills = [2]float64{629.75, 988.90}
 
-// humanBand is the acceptance band for one clear.
+// humanBand is the acceptance band for one clear by a party of three to five.
 var humanBand = [2]time.Duration{17 * time.Minute, 23 * time.Minute}
 
 func humanEstimate(total, guardianFight, kingFight time.Duration) time.Duration {

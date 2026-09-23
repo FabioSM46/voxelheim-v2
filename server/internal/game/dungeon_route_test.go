@@ -212,7 +212,7 @@ func TestARestoredRunKeepsItsRoute(t *testing.T) {
 			}
 		}
 	}
-	s.dungeon.descent.waves.started, s.dungeon.descent.waves.next = true, len(spiderWaveSizes)
+	s.dungeon.descent.waves.started, s.dungeon.descent.waves.next = true, spiderWaveCount
 	// A party that killed the king had passed every checkpoint on the way to him.
 	s.dungeon.checkpoints.reached = 3
 	s.mu.Unlock()
@@ -258,7 +258,7 @@ func TestARestoredRunKeepsItsRoute(t *testing.T) {
 		}
 	}
 	desc := &r.dungeon.descent
-	for group, n := range map[int]int{0: 0, 1: 4, 2: 4, 3: 4, world.SandBuriedGroup: 0} {
+	for group, n := range map[int]int{0: 0, 1: dungeonPackMax, 2: dungeonPackMax, 3: dungeonPackMax, world.SandBuriedGroup: 0} {
 		if len(desc.groups[group]) != n {
 			t.Fatalf("group %d came back with %d creatures, want %d", group, len(desc.groups[group]), n)
 		}
