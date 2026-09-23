@@ -254,6 +254,37 @@ fn a_player_building_and_the_open_world_are_never_a_door() {
         )
         .is_empty()
     );
+    // Several players' single edits landing in one frame, however many, are not adjacent
+    // and never add up to a door (review on #1326).
+    let scattered: Vec<BlockReplaced> = (0..12)
+        .map(|n| change(at(n * 3, 0, n % 2), palette::STONE, palette::AIR))
+        .collect();
+    assert!(hear(&scattered, true).is_empty());
+    // Nor does a short run: five in a row is somebody digging, six a door.
+    let five: Vec<BlockReplaced> = (0..5)
+        .map(|y| change(at(0, y, 0), palette::BASALT, palette::AIR))
+        .collect();
+    assert!(hear(&five, true).is_empty());
+    // The shortcut's arena door, two wide and three tall, is the smallest door there is.
+    let arena: Vec<BlockReplaced> = (0..2)
+        .flat_map(|x| (0..3).map(move |y| (x, y)))
+        .map(|(x, y)| change(at(31 + x, y, 83), palette::BASALT, palette::AIR))
+        .collect();
+    assert_eq!(hear(&arena, true).len(), 1);
+    // Two doors opening in one update are two doors, each heard from its own middle.
+    let both: Vec<BlockReplaced> = arena
+        .iter()
+        .copied()
+        .chain(
+            arena
+                .iter()
+                .map(|c| change(at(c.pos.x, c.pos.y, c.pos.z + 40), c.before, c.after)),
+        )
+        .collect();
+    let heard = hear(&both, true);
+    assert_eq!(heard.len(), 2);
+    assert_eq!(heard[0], (Cue::Door, Vec3::new(32.0, 1.5, 83.5)));
+    assert_eq!(heard[1], (Cue::Door, Vec3::new(32.0, 1.5, 123.5)));
     // A whole wall knocked through in the open world is a crew at work, not a door.
     let wall: Vec<BlockReplaced> = (0..9)
         .map(|y| change(at(20, y, 0), palette::STONE, palette::AIR))

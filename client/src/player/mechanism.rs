@@ -16,6 +16,10 @@
 //! the server would refuse as `NotAMechanism`. A press where the guess is wrong costs one
 //! request and one refusal sentence, never an outcome.
 //!
+//! **The prompt shows only when the key would reach the mechanism.** The interact key means
+//! a corpse at the feet first and an aimed station second (`loot.rs`), so the prompt stands
+//! down while either is there rather than promise a lever the press would not pull.
+//!
 //! Aimed rather than nearest, like a station: the crosshair is on the lever, and
 //! `target.rs` has already limited the ray to the reach the client aims with. The server
 //! measures its own reach from the body to the cell, and that measure is the one that
@@ -23,8 +27,10 @@
 
 use bevy::prelude::*;
 
-use super::{ApplyInputMode, InputGate};
-use crate::net::BlockCoord;
+use super::constants::MAX_REACH;
+use super::structures::{AimStructures, StationTarget};
+use super::{ApplyInputMode, ApplySnapshots, InputGate, SnapshotBuffer};
+use crate::net::{BlockCoord, Session};
 use crate::settings::{Control, Settings, key_name};
 use crate::world::{BlockId, palette};
 
@@ -103,6 +109,8 @@ impl Plugin for MechanismPlugin {
                 Update,
                 show_hint
                     .after(super::target::AimBlocks)
+                    .after(AimStructures)
+                    .after(ApplySnapshots)
                     .after(ApplyInputMode),
             );
     }
@@ -131,9 +139,37 @@ fn spawn_hint(mut commands: Commands) {
     ));
 }
 
+/// What else could take the interact key this frame, read so the prompt never promises a
+/// press the dispatcher in `loot.rs` would spend on something else.
+#[derive(bevy::ecs::system::SystemParam)]
+struct KeyOwners<'w> {
+    session: Option<Res<'w, Session>>,
+    buffer: Res<'w, SnapshotBuffer>,
+    station: Option<Res<'w, StationTarget>>,
+}
+
+impl KeyOwners<'_> {
+    /// Whether a corpse or a station outranks a mechanism for the key right now. The same
+    /// two questions, asked the same way, as `send_loot_intents` asks them before it reaches
+    /// the mechanism — review on #1326 found the prompt showing over a corpse at the feet.
+    fn outranked(&self) -> bool {
+        let corpse = self.session.as_deref().is_some_and(|session| {
+            self.buffer
+                .nearest_accessible_corpse(session.0.entity_id, MAX_REACH)
+                .is_some()
+        });
+        let station = self
+            .station
+            .as_deref()
+            .is_some_and(|target| target.0.is_some());
+        corpse || station
+    }
+}
+
 fn show_hint(
     gate: InputGate<'_>,
     aimed: Res<AimedMechanism>,
+    owners: KeyOwners<'_>,
     settings: Option<Res<Settings>>,
     mut hints: Query<(&mut Text, &mut Visibility), With<MechanismHint>>,
 ) {
@@ -143,7 +179,7 @@ fn show_hint(
     );
     let line = aimed
         .0
-        .filter(|_| gate.may_aim())
+        .filter(|_| gate.may_aim() && !owners.outranked())
         .and_then(|aimed| prompt(aimed.block, key));
     for (mut text, mut visibility) in &mut hints {
         let next = if line.is_some() {

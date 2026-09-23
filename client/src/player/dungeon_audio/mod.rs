@@ -13,13 +13,15 @@
 //! - `LeverOff` ↔ `LeverOn` is a lever thrown.
 //! - `RuneStone` → `RuneStoneLit` is a rune waking; the reverse is one going dark.
 //! - `Cobweb` → air is a web torn.
-//! - An iron grille ↔ air is a grille moving. A grille is only ever drawn as a door, so
-//!   every one of its cells that moves in one frame is one grille, heard once from the
-//!   middle of them.
-//! - A solid block ↔ air in an instance is a stone door only when at least [`DOOR_CELLS`] of
-//!   them move the same way in one frame. A door is nine cells or more and opens in one
-//!   update; a player placing or breaking a block moves one. Below the threshold it is
-//!   somebody building, and the mining sounds already answer for that.
+//! - An iron grille ↔ air is a grille moving. A grille is only ever drawn as a door, so each
+//!   connected run of grille cells that moves the same way in one frame is one grille, heard
+//!   once from its middle.
+//! - A solid block ↔ air in an instance is a stone door only when a **connected** run of at
+//!   least [`DOOR_CELLS`] cells moves the same way in one frame. The smallest stone door in the
+//!   first dungeon, the return shortcut's arena door, is two cells wide and three tall, and
+//!   opens in one update; a player placing or breaking a block moves one. Several players'
+//!   edits landing in the same frame are not adjacent to one another, so they never add up
+//!   to a door — review on #1326 found that counting every cell in the frame would.
 //!
 //! Placed through `spatial::place` on [`Bus::Sfx`] like every other effect, occluded by
 //! whatever stands between the listener and the cell, and capped at [`MAX_PLAYING`] at once.
@@ -44,9 +46,9 @@ const RANGE: f32 = 36.0;
 /// played late.
 const MAX_PLAYING: usize = 6;
 const OCCLUSION_PERIOD: Duration = Duration::from_millis(100);
-/// How many solid cells turning to air (or back) in one frame make a door rather than a
-/// player's edit. The smallest door in the first dungeon is nine cells.
-const DOOR_CELLS: usize = 4;
+/// How many connected solid cells turning to air (or back) in one frame make a door rather
+/// than a player's edit: the smallest stone door in the first dungeon, two by three.
+const DOOR_CELLS: usize = 6;
 /// How far towards the listener the occlusion ray stops short of a cell's centre, so the
 /// solid lever or stone that is making the sound does not muffle itself.
 const SOURCE_CLEARANCE: f32 = 0.75;
@@ -102,8 +104,9 @@ fn door_stone(block: BlockId) -> bool {
 /// crew raising a wall in the open world is never taken for one.
 fn hear(changes: &[BlockReplaced], instance: bool) -> Vec<(Cue, Vec3)> {
     let mut heard = Vec::new();
-    // Grilles up, grilles down, doors open, doors shut: cells gathered and heard once each.
-    let mut groups: [Vec<Vec3>; 4] = Default::default();
+    // Grilles up, grilles down, doors open, doors shut: cells gathered, then heard once per
+    // connected run.
+    let mut groups: [Vec<BlockCoord>; 4] = Default::default();
     for change in changes {
         let at = centre(change.pos);
         let (before, after) = (change.before, change.after);
@@ -132,7 +135,7 @@ fn hear(changes: &[BlockReplaced], instance: bool) -> Vec<(Cue, Vec3)> {
             None
         };
         if let Some(group) = group {
-            groups[group].push(at);
+            groups[group].push(change.pos);
         }
     }
     for (index, cells) in groups.iter().enumerate() {
@@ -141,12 +144,44 @@ fn hear(changes: &[BlockReplaced], instance: bool) -> Vec<(Cue, Vec3)> {
             1 => (Cue::GrilleDown, 1),
             _ => (Cue::Door, DOOR_CELLS),
         };
-        if cells.len() >= least {
-            let middle = cells.iter().copied().sum::<Vec3>() / cells.len() as f32;
-            heard.push((cue, middle));
+        for run in connected(cells) {
+            if run.len() >= least {
+                let middle = run.iter().copied().map(centre).sum::<Vec3>() / run.len() as f32;
+                heard.push((cue, middle));
+            }
         }
     }
     heard
+}
+
+/// `cells` split into runs that touch face to face, each in the order its cells were found.
+/// Quadratic, and that is fine: a frame's door cells number in the tens.
+fn connected(cells: &[BlockCoord]) -> Vec<Vec<BlockCoord>> {
+    let touches = |a: BlockCoord, b: BlockCoord| {
+        (a.x - b.x).abs() + (a.y - b.y).abs() + (a.z - b.z).abs() == 1
+    };
+    let mut seen = vec![false; cells.len()];
+    let mut runs = Vec::new();
+    for start in 0..cells.len() {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut run = vec![cells[start]];
+        let mut next = 0;
+        while next < run.len() {
+            let here = run[next];
+            for (index, cell) in cells.iter().enumerate() {
+                if !seen[index] && touches(here, *cell) {
+                    seen[index] = true;
+                    run.push(*cell);
+                }
+            }
+            next += 1;
+        }
+        runs.push(run);
+    }
+    runs
 }
 
 impl DungeonSounds {
