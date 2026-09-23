@@ -66,6 +66,7 @@ func writeReport(out io.Writer, r *runner, failure error) {
 		fmt.Fprintf(&b, "  %-18s %8.1f s\n", phase, d.Seconds())
 		immortal += d
 	}
+	fmt.Fprintf(&b, "portal placements (/teleport beside the open world's portal): %d\n", s.portalPlacements)
 	fmt.Fprintf(&b, "stuck assists (/teleport): %d %v\n", len(s.assists), s.assists)
 	fmt.Fprintf(&b, "creatures left unreachable: %d %v\n", len(s.unreachedMobs), s.unreachedMobs)
 	fmt.Fprintf(&b, "development commands sent: %d\n", len(s.commands))

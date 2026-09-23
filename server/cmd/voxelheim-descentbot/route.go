@@ -23,7 +23,9 @@ import (
 //
 // /additem gives the iron blade and rusty armour before the portal. /immortal is on for
 // the boss fights, which the bot plays without evading, and for the rest of any phase that
-// has cost maxDeaths deaths. /teleport is only [pilot.assist]. None of them opens a door,
+// has cost maxDeaths deaths. /teleport places the bot beside the open world's portal
+// before it walks in (a veil is never a path cell, so no walk reaches it from spawn), and
+// is otherwise only [pilot.assist]; the report counts both. None of them opens a door,
 // lights a rune, kills a creature or moves the bot past anything the server has not opened.
 
 // maxDeaths is how many deaths one phase may cost before the bot finishes it under
@@ -42,7 +44,7 @@ type layout struct {
 	caveLow, caveHigh, sandCentre cell
 }
 
-func layoutFor(seed int64) layout {
+func layoutFor(seed int64) (layout, error) {
 	l := layout{seed: seed, minors: map[int][]world.PlacedAnchor{}}
 	l.arrival, l.exit = world.InstanceAnchors(seed)
 	l.guardian, l.king, l.gate = world.InstanceEncounterAnchors(seed)
@@ -50,6 +52,9 @@ func layoutFor(seed int64) layout {
 	for _, a := range world.InstanceDungeonAnchors(seed) {
 		switch a.Kind {
 		case world.AnchorInstanceCheckpoint:
+			if a.Index < 0 || a.Index >= len(l.checkpoints) {
+				return l, fmt.Errorf("checkpoint anchor index %d outside the route's %d", a.Index, len(l.checkpoints))
+			}
 			l.checkpoints[a.Index] = a
 		case world.AnchorInstanceMinorSpawn:
 			l.minors[a.Index] = append(l.minors[a.Index], a)
@@ -75,6 +80,18 @@ func layoutFor(seed int64) layout {
 			}
 		}
 	}
+	// A layout the route cannot be played over is a failed run with a report, not a panic.
+	switch {
+	case len(triggers[world.CaveTrigger]) != 2 || len(triggers[world.SandTrigger]) != 2:
+		return l, fmt.Errorf("the cave and sand triggers have %d and %d corner anchors, want 2 each",
+			len(triggers[world.CaveTrigger]), len(triggers[world.SandTrigger]))
+	case len(l.stones) != 4 || len(l.runeDoor) == 0:
+		return l, fmt.Errorf("%d rune stones and %d rune door cells, want 4 and at least one", len(l.stones), len(l.runeDoor))
+	case len(l.twins) != 2 || len(l.twinDoor) == 0 || len(l.shortcut) == 0:
+		return l, fmt.Errorf("%d twin levers, %d twin door cells and %d shortcut door cells", len(l.twins), len(l.twinDoor), len(l.shortcut))
+	case len(l.minors[world.SandBuriedGroup]) == 0:
+		return l, errors.New("the layout has no buried scorpion slots")
+	}
 	corners := func(t []world.PlacedAnchor) (cell, cell) {
 		return cell{min(t[0].X, t[1].X), min(t[0].Y, t[1].Y), min(t[0].Z, t[1].Z)},
 			cell{max(t[0].X, t[1].X), max(t[0].Y, t[1].Y), max(t[0].Z, t[1].Z)}
@@ -82,7 +99,7 @@ func layoutFor(seed int64) layout {
 	l.caveLow, l.caveHigh = corners(triggers[world.CaveTrigger])
 	lo, hi := corners(triggers[world.SandTrigger])
 	l.sandCentre = cell{(lo[0] + hi[0]) / 2, lo[1], (lo[2] + hi[2]) / 2}
-	return l
+	return l, nil
 }
 
 func at(a world.PlacedAnchor) cell { return cell{a.X, a.Y, a.Z} }
@@ -259,6 +276,7 @@ func (r *runner) enterPortal(ctx context.Context) error {
 		// corner, so the corner half a block into the heart column along the opening.
 		across := 2 - axis
 		spot[across]++
+		r.stats.portalPlacement()
 		if _, err := r.c.command(ctx, fmt.Sprintf("/teleport %d %d %d", spot[0], spot[1], spot[2])); err != nil {
 			return err
 		}
@@ -285,7 +303,11 @@ func (r *runner) enterPortal(ctx context.Context) error {
 				if change.id == 0 {
 					continue
 				}
-				r.lay = layoutFor(change.seed)
+				lay, err := layoutFor(change.seed)
+				if err != nil {
+					return fmt.Errorf("instance seed %d: %w", change.seed, err)
+				}
+				r.lay = lay
 				r.say("entered instance %d, seed %d (attempt %d)", change.id, change.seed, attempt+1)
 				return r.waitTerrain(ctx, at(r.lay.arrival))
 			case <-ctx.Done():

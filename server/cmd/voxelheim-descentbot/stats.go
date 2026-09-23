@@ -30,6 +30,8 @@ type runStats struct {
 	immortal map[string]time.Duration
 	// assists are the places the bot was stuck and /teleport moved it on.
 	assists []string
+	// portalPlacements are the /teleports that put the bot beside the open world's portal.
+	portalPlacements int
 	// unreachedMobs names every creature the bot gave up on because no walk reached it.
 	unreachedMobs []string
 }
@@ -172,5 +174,11 @@ func (s *runStats) unreached(m mobView) {
 	s.mu.Lock()
 	s.unreachedMobs = append(s.unreachedMobs, fmt.Sprintf("%s in %s at (%.1f, %.1f, %.1f)",
 		vnet.EnumNamesMobKind[m.kind], s.phase, m.pos[0], m.pos[1], m.pos[2]))
+	s.mu.Unlock()
+}
+
+func (s *runStats) portalPlacement() {
+	s.mu.Lock()
+	s.portalPlacements++
 	s.mu.Unlock()
 }

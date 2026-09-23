@@ -126,8 +126,11 @@ func yawToward(dx, dz float64) float64 { return math.Atan2(-dx, -dz) }
 // walkTo walks to the first standing cell goal accepts, fighting whatever turns on the
 // bot on the way when fight is set.
 func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, fight bool) error {
+	// nextPlan throttles the search on time alone, success or failure: a failed search
+	// leaves route nil, and the path search holds the lock the reader absorbs frames under.
+	// Clearing a route on purpose clears nextPlan with it, so that replans at once.
 	var route []cell
-	var planned time.Time
+	var nextPlan time.Time
 	lastProgress, best := time.Now(), math.Inf(1)
 	var noPath, hopUntil time.Time
 	for {
@@ -143,7 +146,7 @@ func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, f
 				if err := p.fight(ctx, func(m mobView) bool { return m.id == threat.id }); err != nil {
 					return err
 				}
-				route, lastProgress, best = nil, time.Now(), math.Inf(1)
+				route, nextPlan, lastProgress, best = nil, time.Time{}, time.Now(), math.Inf(1)
 				continue
 			}
 		}
@@ -152,11 +155,11 @@ func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, f
 			p.c.stand()
 			return nil
 		}
-		if route == nil || time.Since(planned) > 2*time.Second {
+		if time.Now().After(nextPlan) {
 			start := p.standingCell(self.pos)
 			var found []cell
 			p.c.withView(func(v *blockView) { found = v.path(start, goal) })
-			planned = time.Now()
+			nextPlan = time.Now().Add(2 * time.Second)
 			if found == nil && !goal(start) {
 				p.c.stand()
 				if noPath.IsZero() {
@@ -185,7 +188,7 @@ func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, f
 			}
 		}
 		if len(route) == 0 {
-			route = nil
+			route, nextPlan = nil, time.Time{}
 			continue
 		}
 		next := route[0]
@@ -201,7 +204,7 @@ func (p *pilot) walkTo(ctx context.Context, what string, goal func(cell) bool, f
 			if err := p.assist(ctx, next); err != nil {
 				return err
 			}
-			route, best, lastProgress = nil, math.Inf(1), time.Now()
+			route, nextPlan, best, lastProgress = nil, time.Time{}, math.Inf(1), time.Now()
 		case stalled > 1500*time.Millisecond && time.Now().After(hopUntil.Add(time.Second)):
 			// A hop clears most snags on a corner or a lip the step-up does not climb.
 			hopUntil = time.Now().Add(300 * time.Millisecond)
@@ -334,7 +337,7 @@ func boss(kind vnet.MobKind) bool {
 // fight closes on and strikes the nearest creature pick accepts until none is left alive.
 func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 	var route []cell
-	var planned time.Time
+	var nextPlan time.Time // throttled on time alone, as walkTo's is
 	reach := map[uint64]float64{}
 	misses := map[uint64]int{}
 	previous := map[uint64]time.Time{}
@@ -380,14 +383,14 @@ func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 			want = 1.9 + half
 		}
 		if bestD > want {
-			if route == nil || time.Since(planned) > 500*time.Millisecond {
+			if time.Now().After(nextPlan) {
 				goal := func(c cell) bool {
 					return math.Hypot(float64(c[0])+.5-target.pos[0], float64(c[2])+.5-target.pos[2]) <= want-0.3 &&
 						math.Abs(float64(c[1])-target.pos[1]) < 2.5
 				}
 				start := p.standingCell(self.pos)
 				p.c.withView(func(v *blockView) { route = v.path(start, goal) })
-				planned = time.Now()
+				nextPlan = time.Now().Add(500 * time.Millisecond)
 			}
 			for len(route) > 0 && horizontal(self.pos, route[0]) < arriveRadius {
 				route = route[1:]
@@ -401,7 +404,7 @@ func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
 			}
 			continue
 		}
-		route = nil
+		route, nextPlan = nil, time.Time{}
 		dx, dz := target.pos[0]-self.pos[0], target.pos[2]-self.pos[2]
 		dy := target.pos[1] + middle - (self.pos[1] + game.PlayerHeight/2)
 		p.c.setIntent(intent{yaw: yawToward(dx, dz), pitch: math.Atan2(dy, math.Hypot(dx, dz))})
