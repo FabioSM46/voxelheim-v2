@@ -43,6 +43,7 @@ mod guardian;
 mod king;
 #[cfg(test)]
 mod reduced_effects;
+mod spider;
 
 pub(super) use king::regalia::{present as present_regalia, setup as setup_regalia};
 
@@ -119,17 +120,19 @@ const DRAUGR_KING_BODY: Body = Body {
     height: 2.8,
 };
 
-/// The V46 descent species' boxes: low and wide, the plan of a crawling creature, and the
-/// placeholder each is drawn as until its rig exists.
+/// The V46 descent species' boxes: low and wide, the plan of a crawling creature.
 ///
-/// **These lead the server rather than mirror it, and that is the one place in this file
-/// they do.** #1287 puts the two kinds on the wire before any issue gives them stats, so
-/// `mobRegistry` has no row to copy yet. The issue that adds the server rows owns the
-/// numbers and must move these to match; `the_drawn_body_is_the_box_the_server_collides`
-/// then keeps the placeholder mesh on whatever box that is.
+/// The cave spider's is mirrored from its `mobRegistry` row (#1291): 0.9 across its legs
+/// and 0.6 to the top of its knees. `spider.rs` reads every dimension of its rig out of
+/// this row, so a change to the server's box is this one line and nothing else.
+///
+/// **The scorpion's leads the server rather than mirrors it.** #1287 put it on the wire
+/// before any issue gave it stats; the issue that adds its row owns the number and must
+/// move this one to match, and `the_drawn_body_is_the_box_the_server_collides` then keeps
+/// the placeholder mesh on whatever box that is.
 const CAVE_SPIDER_BODY: Body = Body {
-    width: 1.2,
-    height: 0.7,
+    width: 0.9,
+    height: 0.6,
 };
 const SCORPION_BODY: Body = Body {
     width: 1.3,
@@ -332,7 +335,7 @@ const VARGR_EYE_EMISSIVE: LinearRgba = LinearRgba::rgb(7.0, 4.2, 0.15);
 const DEER_BODY_COLOUR: Color = Color::srgb(0.48, 0.30, 0.18);
 const DEER_HEAD_COLOUR: Color = Color::srgb(0.66, 0.46, 0.28);
 
-/// The neutral grey both V46 placeholders are drawn in. Deliberately no species colour: a
+/// The neutral grey V46's scorpion placeholder is drawn in. Deliberately no species colour: a
 /// placeholder that looked finished would hide that the rig is still owed.
 const PLACEHOLDER_BODY_COLOUR: Color = Color::srgb(0.42, 0.42, 0.44);
 const PLACEHOLDER_HEAD_COLOUR: Color = Color::srgb(0.52, 0.52, 0.54);
@@ -370,6 +373,7 @@ struct SpeciesVisuals {
     head_material: Handle<StandardMaterial>,
     king_parts: Option<Vec<(king::Segment, Handle<Mesh>)>>,
     guardian_parts: Option<Vec<(guardian::Segment, Handle<Mesh>)>>,
+    spider_parts: Option<Vec<(spider::Segment, Handle<Mesh>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,9 +398,10 @@ pub(super) struct MobVisuals {
     deer: SpeciesVisuals,
     guardian: SpeciesVisuals,
     king: SpeciesVisuals,
-    /// V46's two, drawn as neutral placeholder boxes of their own size until their rigs
-    /// exist, so the server placing one costs this build a box rather than the session.
+    /// The cave spider's procedural rig, from `spider.rs`.
     cave_spider: SpeciesVisuals,
+    /// V46's scorpion, drawn as a neutral placeholder box of its own size until its rig
+    /// exists, so the server placing one costs this build a box rather than the session.
     scorpion: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
@@ -503,6 +508,7 @@ pub(super) struct Mob {
     falling: Option<Duration>,
     guardian_motion: Option<Box<guardian::Motion>>,
     king_motion: Option<Box<king::motion::Motion>>,
+    spider_motion: Option<Box<spider::Motion>>,
 }
 
 /// Which part of a body one child mesh draws.
@@ -514,6 +520,7 @@ pub(super) struct Mob {
 pub(super) enum MobPart {
     King(king::Segment),
     Guardian(guardian::Segment),
+    Spider(spider::Segment),
     Body,
     Head,
     Legs,
@@ -555,6 +562,7 @@ pub(super) fn create_visuals(
         draugr: SpeciesVisuals {
             king_parts: None,
             guardian_parts: None,
+            spider_parts: None,
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
@@ -566,6 +574,7 @@ pub(super) fn create_visuals(
         vargr: SpeciesVisuals {
             king_parts: None,
             guardian_parts: None,
+            spider_parts: None,
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
@@ -585,6 +594,7 @@ pub(super) fn create_visuals(
         deer: SpeciesVisuals {
             king_parts: None,
             guardian_parts: None,
+            spider_parts: None,
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
@@ -595,7 +605,7 @@ pub(super) fn create_visuals(
         },
         guardian: guardian::visuals(&mut meshes, &mut materials),
         king: king::visuals(&mut meshes, &mut materials),
-        cave_spider: placeholder_visuals(MobKind::CaveSpider, &mut meshes, &mut materials),
+        cave_spider: spider::visuals(&mut meshes, &mut materials),
         scorpion: placeholder_visuals(MobKind::Scorpion, &mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
@@ -972,7 +982,7 @@ fn placeholder_head_mesh(kind: MobKind) -> Mesh {
     ))
 }
 
-/// The meshes and materials a V46 placeholder is drawn from: two boxes and no legs, arms
+/// The meshes and materials V46's scorpion placeholder is drawn from: two boxes and no legs, arms
 /// or eyes, because nothing here poses them yet.
 fn placeholder_visuals(
     kind: MobKind,
@@ -982,6 +992,7 @@ fn placeholder_visuals(
     SpeciesVisuals {
         king_parts: None,
         guardian_parts: None,
+        spider_parts: None,
         body: meshes.add(placeholder_body_mesh(kind)),
         head: meshes.add(placeholder_head_mesh(kind)),
         legs: None,
@@ -1158,6 +1169,16 @@ fn spawn_mob(
                 }),
                 guardian_motion: (state.kind == MobKind::VargrGuardian)
                     .then(|| Box::new(guardian::Motion::new(state.pos, state.yaw))),
+                // Only a first sight that could be a spider leaving its burrow may play the
+                // emergence — see `spider::fresh_sight`, and `spider::burrow` for the wall
+                // it then looks for.
+                spider_motion: (state.kind == MobKind::CaveSpider).then(|| {
+                    Box::new(spider::Motion::new(
+                        state.pos,
+                        entity_id,
+                        spider::fresh_sight(state),
+                    ))
+                }),
                 kind: state.kind,
                 action: state.action,
                 action_elapsed: Duration::ZERO,
@@ -1185,6 +1206,32 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
+        if let Some(parts) = species.spider_parts {
+            let eyes = species
+                .eyes
+                .as_ref()
+                .expect("the spider's eyes carry their own material");
+            for (segment, mesh) in parts {
+                let material = if segment == spider::Segment::Eyes {
+                    eyes.material.clone()
+                } else {
+                    species.body_material.clone()
+                };
+                parent.spawn((
+                    MobVisual {
+                        owner,
+                        part: MobPart::Spider(segment),
+                    },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::IDENTITY,
+                ));
+            }
+            if hunts_local {
+                parent.spawn(aggro_marker_bundle(visuals, owner, state.kind));
+            }
+            return;
+        }
         if let Some(parts) = species.guardian_parts {
             for (segment, mesh) in parts {
                 parent.spawn((
@@ -1357,12 +1404,11 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
         // Articulated torso and arms carry the king's weight; planted feet keep the root upright.
         MobKind::DraugrKing => 0.0,
         MobKind::VargrGuardian => lean * 0.65,
-        MobKind::Vargr
-        | MobKind::Deer
-        | MobKind::Villager
-        | MobKind::Horse
-        | MobKind::CaveSpider
-        | MobKind::Scorpion => lean,
+        // The spider's rig rears and lunges on its own joints; the root stays level.
+        MobKind::CaveSpider => 0.0,
+        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse | MobKind::Scorpion => {
+            lean
+        }
     }
 }
 
@@ -1460,10 +1506,11 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
-        // Placeholders roll onto their side like the other low bodies until a rig owns it.
-        MobKind::CaveSpider | MobKind::Scorpion => {
-            Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen)
-        }
+        // The scorpion's placeholder rolls onto its side like the other low bodies until a
+        // rig owns it. The spider does not roll at all: it curls its legs in on its own
+        // joints and settles where it stood, in `spider::Motion::sample`.
+        MobKind::Scorpion => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
+        MobKind::CaveSpider => Quat::IDENTITY,
         // The guardian loses its heavy shoulder; the king folds forward rather
         // than sharing the common draugr's backward fall. Cosmetic snapshot poses.
         MobKind::VargrGuardian => Quat::from_rotation_z(1.05 * fallen),
@@ -1542,6 +1589,7 @@ pub(super) fn animate(
     let mut flashing = HashSet::new();
     let mut guardian_poses = HashMap::new();
     let mut king_poses = HashMap::new();
+    let mut spider_poses = HashMap::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
         // and never overshoots into a lean the server did not ask for. The timings the
@@ -1576,6 +1624,13 @@ pub(super) fn animate(
                 .is_some_and(|(inbox, snapshots)| {
                     guardian::choreography::travelling(inbox, snapshots, mob.entity_id)
                 });
+        if let Some(motion) = mob.spider_motion.as_mut() {
+            motion.sample(transform.translation, yaw, action, down, delta, |voxel| {
+                solid_voxel(session.as_deref(), terrain.as_deref(), voxel)
+            });
+            spider_poses.insert(entity, motion.transforms);
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
         if let Some(motion) = mob.guardian_motion.as_mut() {
             motion.fast_travel = fast_travel;
             motion.sample(transform.translation, yaw, action, elapsed, down, delta);
@@ -1646,7 +1701,10 @@ pub(super) fn animate(
         // Vargr eyes are deliberately the exception to both presentation washes. Their
         // emissive material is what makes the face visible in darkness; the other three
         // parts still flash or turn amber, so preserving the eyes hides neither state.
-        let next = if part.part == MobPart::Eyes {
+        let next = if matches!(
+            part.part,
+            MobPart::Eyes | MobPart::Spider(spider::Segment::Eyes)
+        ) {
             species
                 .eyes
                 .as_ref()
@@ -1692,6 +1750,11 @@ pub(super) fn animate(
             && let Some(pose) = king_poses.get(&part.owner)
         {
             *transform = pose[segment as usize];
+        }
+        if let MobPart::Spider(segment) = part.part
+            && let Some(pose) = spider_poses.get(&part.owner)
+        {
+            *transform = pose[spider::index(segment)];
         }
         if kind == MobKind::VargrGuardian && matches!(part.part, MobPart::Head | MobPart::Eyes) {
             // Encounter neck poses are frame-local overrides, not persistent rig state.
@@ -3103,14 +3166,7 @@ mod tests {
                 MobKind::Deer,
                 vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
             ),
-            // V46's placeholders are held to the same box as every drawn species.
-            (
-                MobKind::CaveSpider,
-                vec![
-                    placeholder_body_mesh(MobKind::CaveSpider),
-                    placeholder_head_mesh(MobKind::CaveSpider),
-                ],
-            ),
+            // V46's scorpion placeholder is held to the same box as every drawn species.
             (
                 MobKind::Scorpion,
                 vec![
@@ -3128,7 +3184,7 @@ mod tests {
         // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
         // `CLASSIFICATION` are.
         //
-        // **Five members have no row, for separate reasons.** `Unknown` is never drawn at
+        // **Six members have no row, for separate reasons.** `Unknown` is never drawn at
         // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
@@ -3138,9 +3194,12 @@ mod tests {
         // Boss rigs have their own mesh containment test in `bosses`: unlike
         // these older primitives, their silhouettes deliberately leave room inside
         // the collision envelope. The server-mirror test below still pins their boxes.
+        // The cave spider is the same case: a spider is legs around a small body, so its
+        // rig is held inside the box and made to fill most of it in `spider::tests`
+        // (`the_rest_pose_fills_the_box_the_server_collides_and_stands_on_its_feet`).
         assert_eq!(
             drawn.len(),
-            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 5,
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 6,
             "a species the contract names is drawn by nobody here, so its box is unchecked"
         );
         for (seen, (kind, _)) in drawn.iter().enumerate() {
