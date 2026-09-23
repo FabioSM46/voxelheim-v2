@@ -393,6 +393,69 @@ fn a_standing_spider_twitches_one_leg_at_a_time_and_a_crowd_out_of_step() {
     }
 }
 
+/// The stamp the combat audio ticks from: one per set of four feet landing, twice a gait
+/// cycle, and none for standing, a correction, an attack pose or a corpse.
+#[test]
+fn a_step_is_stamped_each_time_four_feet_land_and_never_otherwise() {
+    let mut motion = Motion::new(Vec3::ZERO, 8, false);
+    let mut position = Vec3::ZERO;
+    let mut stamps = 0;
+    // Six blocks of running: 6 x radians_per_block / PI half-cycles.
+    for _ in 0..120 {
+        position.z -= 0.05;
+        let serial = motion.audio_serial;
+        motion.sample(position, 0.0, MobAction::Chase, 0.0, FRAME, never_solid);
+        if let Some((contact, speed)) = motion.audio_step {
+            assert_eq!(motion.audio_serial, serial.wrapping_add(1));
+            assert_eq!(contact, position);
+            assert!(speed > 0.0);
+            stamps += 1;
+        } else {
+            assert_eq!(motion.audio_serial, serial);
+        }
+    }
+    let expected = (6.0 * radians_per_block() / PI).floor() as i32;
+    assert!(
+        (stamps - expected).abs() <= 2,
+        "{stamps} steps over six blocks, want about {expected}"
+    );
+    let serial = motion.audio_serial;
+    motion.sample(
+        position + Vec3::X * 4.0,
+        0.0,
+        MobAction::Chase,
+        0.0,
+        FRAME,
+        never_solid,
+    );
+    for action in [MobAction::Windup, MobAction::Recovery, MobAction::Corpse] {
+        for _ in 0..20 {
+            position.z -= 0.05;
+            motion.sample(
+                position + Vec3::X * 4.0,
+                0.0,
+                action,
+                0.0,
+                FRAME,
+                never_solid,
+            );
+            assert!(motion.audio_step.is_none(), "{action:?} stamped a step");
+        }
+    }
+    for _ in 0..60 {
+        motion.sample(
+            position + Vec3::X * 4.0,
+            0.0,
+            MobAction::Chase,
+            0.0,
+            FRAME,
+            never_solid,
+        );
+        assert!(motion.audio_step.is_none(), "standing still stamped a step");
+    }
+    assert_eq!(motion.audio_serial, serial);
+}
+
 /// A wall filling every voxel at `x >= 1`.
 fn wall_east(voxel: IVec3) -> bool {
     voxel.x >= 1

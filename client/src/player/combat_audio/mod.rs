@@ -2,6 +2,7 @@
 mod guardian;
 mod king;
 mod sounds;
+mod spider;
 
 use super::{AimCamera, ApplySnapshots, SnapshotBuffer, WorldCamera};
 use crate::{
@@ -31,6 +32,7 @@ struct CombatAudio {
     #[cfg(test)]
     started: Vec<(u64, Cue, Vec3)>,
     guardian: guardian::State,
+    spider: spider::State,
     tick: Option<u32>,
     previous: HashMap<u64, (MobKind, MobAction)>,
     palette: Vec<(Cue, Baked)>,
@@ -40,6 +42,9 @@ struct CombatAudio {
 
 struct Active {
     playback: Playback,
+    cue: Cue,
+    /// The cue's own level under the placement's: a skitter's speed, one for everything else.
+    gain: f32,
     id: u64,
     target: BlowTarget,
     origin: Vec3,
@@ -59,6 +64,7 @@ struct Pending {
     follows: bool,
     offset: Option<Vec3>,
     owner: Option<guardian::Owner>,
+    gain: f32,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -77,6 +83,8 @@ pub(super) fn reset_world(world: &mut World) {
 
 /// No synthetic Idle on first sight: an already-chasing creature cannot announce a
 /// transition we never saw. A newly visible Windup does carry a present attack telegraph.
+/// A Recovery straight out of a Windup this client watched is the strike itself, for the
+/// species that voice one — the lunge closing, heard whether or not it connects.
 fn transition(
     before: Option<(MobKind, MobAction)>,
     kind: MobKind,
@@ -86,6 +94,8 @@ fn transition(
         sounds::voice(kind, false)
     } else if action == MobAction::Windup && before != Some((kind, MobAction::Windup)) {
         sounds::voice(kind, true)
+    } else if action == MobAction::Recovery && before == Some((kind, MobAction::Windup)) {
+        sounds::strike(kind)
     } else {
         None
     }
@@ -165,6 +175,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             follows: false,
             offset: None,
             owner: None,
+            gain: 1.0,
         })
         .collect();
     if state.tick != Some(snapshot.server_tick) {
@@ -182,6 +193,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                     follows: true,
                     offset: None,
                     owner: None,
+                    gain: 1.0,
                 });
             }
         }
@@ -202,6 +214,12 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
     state
         .guardian
         .footfalls(&inputs.mobs, snapshot, &mut pending);
+    state.spider.steps(
+        &inputs.mobs,
+        snapshot,
+        inputs.time.elapsed_secs(),
+        &mut pending,
+    );
     // Events/transitions are consumed even without a mixer or camera. Availability later
     // is never permission to replay earlier blows or an old pursuit transition.
     let Some((mixer, eye)) = inputs.mixer.as_deref().zip(inputs.eyes.iter().next()) else {
@@ -216,6 +234,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             .copied()
             .chain(guardian::sounds::CUES.into_iter().map(Cue::Guardian))
             .chain(king::sounds::CUES.into_iter().map(Cue::King))
+            .chain(spider::CUES.into_iter().map(Cue::Spider))
             .filter_map(|cue| {
                 cue.describe()
                     .bake(cue.seconds(), rate, 19)
@@ -267,6 +286,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             active.origin = position + Quat::from_rotation_y(yaw) * offset;
         }
         let mut placed = placement(active.origin);
+        placed.gain *= active.gain;
         if active.owner.is_some() {
             placed.gain *= guardian::SOURCE_GAIN;
         }
@@ -276,9 +296,18 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         active.playback.place(placed);
         active.playback.pump() == Status::Playing
     });
-    pending.sort_by_key(|pending| std::cmp::Reverse(pending.cue.priority()));
+    // Highest priority first and, among equals, nearest first: a capped species is heard
+    // as the few closest to the listener rather than the first few the snapshot listed.
+    pending.sort_by(|a, b| {
+        b.cue.priority().cmp(&a.cue.priority()).then(
+            a.origin
+                .distance_squared(eye.translation)
+                .total_cmp(&b.origin.distance_squared(eye.translation)),
+        )
+    });
     for cue in pending {
         let mut placed = placement(cue.origin);
+        placed.gain *= cue.gain;
         if cue.owner.is_some() {
             placed.gain *= guardian::SOURCE_GAIN;
         }
@@ -318,6 +347,15 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                 state.playing.remove(victim);
             }
         }
+        if let Cue::Spider(voice) = cue.cue {
+            match spider::admit(&state.playing, voice, cue.id) {
+                Ok(Some(victim)) => {
+                    state.playing.remove(victim);
+                }
+                Ok(None) => {}
+                Err(()) => continue,
+            }
+        }
         // One claim per actual cue. No retry after refusal, including a claim which revokes
         // ambience: the existing policy discards that one-shot. Only granted sources enter
         // the vector, so the mixer itself bounds it and protects Voice/Master.
@@ -329,6 +367,8 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             state.started.push((cue.id, cue.cue, cue.origin));
             state.playing.push(Active {
                 playback,
+                cue: cue.cue,
+                gain: cue.gain,
                 id: cue.id,
                 target: cue.target,
                 origin: cue.origin,

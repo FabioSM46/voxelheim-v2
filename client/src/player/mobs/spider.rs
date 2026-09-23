@@ -9,7 +9,8 @@
 //! snapshot says and faces where it says; the gait is driven by the distance the drawn root
 //! actually travelled, the rear-up and the lunge by the action the server sent, and the death
 //! curl by the fall `mobs.rs` starts on `Corpse`. Nothing here decides that a spider moves,
-//! bites or dies, and nothing it computes leaves the renderer.
+//! bites or dies, and nothing it computes leaves the renderer except one cosmetic stamp the
+//! combat audio reads to tick the legs.
 use std::f32::consts::{PI, TAU};
 
 use super::*;
@@ -600,6 +601,9 @@ pub(super) struct Motion {
     /// Whether this spider may still come out of a wall: only on its first frame.
     fresh: bool,
     emerge: Option<Emerge>,
+    pub(super) audio_serial: u64,
+    /// The contact point and speed of a set of four feet that landed this frame.
+    pub(super) audio_step: Option<(Vec3, f32)>,
     pub(super) transforms: [Transform; SEGMENT_COUNT],
 }
 
@@ -618,6 +622,8 @@ impl Motion {
             seed: entity_id,
             fresh,
             emerge: None,
+            audio_serial: 0,
+            audio_step: None,
             transforms: pose(&Pose::rest()),
         }
     }
@@ -640,6 +646,7 @@ impl Motion {
     ) {
         let (w, h) = frame();
         let dt = delta.as_secs_f32().min(0.1);
+        self.audio_step = None;
         self.clock += dt;
 
         if std::mem::take(&mut self.fresh) {
@@ -659,7 +666,9 @@ impl Motion {
         let alive = down == 0.0 && !matches!(action, MobAction::Dying | MobAction::Corpse);
         let gait = alive && matches!(action, MobAction::Idle | MobAction::Chase | MobAction::Flee);
 
+        let before = (self.phase / PI).floor();
         self.phase = (self.phase + travelled * radians_per_block()).rem_euclid(TAU);
+        let after = (self.phase / PI).floor();
 
         let instant = if dt > 0.0 { travelled / dt } else { 0.0 };
         self.speed += (instant - self.speed) * (1.0 - (-SPEED_RESPONSE * dt).exp());
@@ -671,6 +680,13 @@ impl Motion {
         let attack = 1.0 - (-LEAN_RESPONSE * dt).exp();
         self.rear += (target_rear - self.rear) * attack;
         self.strike += (target_strike - self.strike) * attack;
+
+        // Four feet coming down together is one step of the scuttle: the stamp the combat
+        // audio ticks from. Only while the gait is showing, never for a correction.
+        if gait && before != after && self.amplitude > 0.3 && travelled > 0.0 {
+            self.audio_serial = self.audio_serial.wrapping_add(1);
+            self.audio_step = Some((position, self.speed));
+        }
 
         let emerged = match self.emerge.as_mut() {
             Some(emerge) if alive => {
@@ -738,6 +754,18 @@ pub(super) fn posed_meshes(pose_now: &Pose) -> Vec<Mesh> {
         .zip(pose(pose_now))
         .map(|((_, mesh), transform)| mesh.transformed_by(transform))
         .collect()
+}
+
+// The one path from the rig to the ears: a stamp of the step just taken, read by the combat
+// audio exactly as the guardian's footfalls are. It is a fact about this frame's drawing,
+// never about where the server put anything.
+impl Mob {
+    pub(in crate::player) fn spider_audio_step(&self) -> Option<(u64, u64, Vec3, f32)> {
+        let motion = self.spider_motion.as_ref()?;
+        (self.kind == MobKind::CaveSpider).then_some(())?;
+        let (contact, speed) = motion.audio_step?;
+        Some((self.entity_id, motion.audio_serial, contact, speed))
+    }
 }
 
 #[cfg(test)]
