@@ -185,7 +185,8 @@ func TestTheDungeonIsSizedForThreeToFive(t *testing.T) {
 				slots[a.Index]++
 			}
 		}
-		if fmt.Sprint(slots) != fmt.Sprint(map[int]int{0: 5, 1: 5, 2: 5, 3: 5, world.SandBuriedGroup: 5}) {
+		full := dungeonPackMax
+		if fmt.Sprint(slots) != fmt.Sprint(map[int]int{0: full, 1: full, 2: full, 3: full, world.SandBuriedGroup: full}) {
 			t.Fatalf("seed %d: placed groups hold %v slots, want five each", seed, slots)
 		}
 	}

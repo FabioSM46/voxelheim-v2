@@ -151,6 +151,8 @@ func (s *Sim) wakeDungeonGroupsLocked(players []*Player) bool {
 			continue
 		}
 		desc.woken[group] = true
+		// Construction refuses a group short of a full pack (placeDungeonMinorsLocked), so
+		// the min only ever meets a group a restored run had cleared, which holds nothing.
 		keep := min(len(ids), dungeonPackSize(len(players)))
 		for _, id := range ids[keep:] {
 			if m := s.mobs[id]; m != nil {

@@ -23,6 +23,11 @@ func withTestBoss(t *testing.T) {
 	definition := mobRegistry[vnet.MobKindDraugr]
 	boss := definition
 	boss.rank = mobRankBoss
+	// A boss row is per-member health, and every pull is sized for at least three members
+	// (#1332). A third of the draugr's row keeps the pulled boss at the draugr's own 60, so
+	// these loot tests still kill it in three blows of the starter blade inside one
+	// energy reserve.
+	boss.maxHealth = definition.maxHealth / bossScaleMinMembers
 	mobRegistry[vnet.MobKindDraugr] = boss
 	t.Cleanup(func() { mobRegistry[vnet.MobKindDraugr] = definition })
 }

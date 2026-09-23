@@ -183,6 +183,18 @@ func (s *Sim) placeDungeonMinorsLocked(seed int64, d *dungeonEncounters) error {
 			max: [3]float64{float64(max(c[0].X, c[1].X) + 1), float64(max(c[0].Y, c[1].Y) + 1), float64(max(c[0].Z, c[1].Z) + 1)},
 		}})
 	}
+	// Every placed group the run has not cleared holds exactly one pack of the largest size.
+	// The balance sizes a boss for up to [dungeonPackMax] members and a pack to match, so a
+	// layout that declared fewer slots would under-spawn a full party's halls in silence;
+	// it refuses the instance instead, as a slot that cannot be filled does.
+	for group := range dungeonGroupSpecies {
+		if d.progress.route.cleared(group) {
+			continue
+		}
+		if n := len(desc.groups[group]); n != dungeonPackMax {
+			return fmt.Errorf("game: dungeon minor group %d holds %d slots, want a pack of %d", group, n, dungeonPackMax)
+		}
+	}
 	// A restored run whose cave was cleared has had every wave: the schedule is spent
 	// and the cavern's trigger has nothing left to start.
 	if d.progress.route.cleared(world.CaveBurrowGroup) {

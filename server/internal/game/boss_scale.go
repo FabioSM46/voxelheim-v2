@@ -65,7 +65,9 @@ const (
 
 // dungeonMembers is how many members a party of n is sized as: n clamped to
 // [bossScaleMinMembers, bossScaleMaxMembers]. The boss's health and the lesser creatures'
-// pack size both read it, so the two can never disagree about who is in the room.
+// pack size both read it, so the two agree about who is in the room; the layout's side of
+// the pack is held to [dungeonPackMax] slots by the construction check in
+// placeDungeonMinorsLocked.
 func dungeonMembers(n int) int {
 	return min(max(n, bossScaleMinMembers), bossScaleMaxMembers)
 }
@@ -99,8 +101,15 @@ func levelDamagePercent(level uint16) uint16 {
 // bossScaleFor is the scale a boss of this species takes from a party with these levels.
 //
 // Levels outside 1..[MaxLevel] are clamped into it. The member count is [dungeonMembers] of
-// the list's length, so an empty list — a caller's defect, since a boss is only ever pulled
-// by somebody — is the smallest party the scale knows, at the registry's blow.
+// the list's length, so an empty list is the smallest party the scale knows, at the
+// registry's blow. **No production path reaches it**: the one caller,
+// [Sim.startBossEncounterLocked], returns early on a nil puller, and both of its callers
+// pass a player of this simulation — the attacker (combat.go) or the target a boss chose
+// from the players it can see (mob.go) — so [Sim.bossScaleLevelsLocked] always holds at
+// least that player. Three rather than one is also the safe answer if one ever did: since
+// #1332 a party of three is the easiest boss the dungeon has, and a smaller default would
+// bring back the solo-sized boss the owner removed rather than a softer version of the
+// dungeon's own.
 //
 // Integer arithmetic throughout, so the same party is the same boss on every run.
 func bossScaleFor(def mobDefinition, levels []uint16) bossScale {
