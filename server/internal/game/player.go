@@ -2054,6 +2054,9 @@ func (p *Player) step(dt float64, terrain Terrain) {
 		// a blizzard is worse than either, and SnowSpeedScale is where that is argued.
 		speed *= SnowSpeedScale
 	}
+	if overlapsSnare(terrain, p.box()) {
+		speed *= CobwebSpeedScale
+	}
 	targetX := (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
 	targetZ := (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
 

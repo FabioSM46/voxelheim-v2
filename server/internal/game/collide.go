@@ -493,6 +493,23 @@ func overlapsFluid(t Terrain, b box) bool {
 	return anyVoxel(b, func(x, y, z int64) bool { return t.Fluid(x, y, z) })
 }
 
+// overlapsSnare reports whether any resident voxel the box touches slows a body
+// ([world.Snares]). An absent chunk snares nothing: it already stops the body.
+// CacheTerrain answers through the collision memo, so a tick pays no extra Peek.
+func overlapsSnare(t Terrain, b box) bool {
+	if b.beyondTheWorld() {
+		return false
+	}
+	read := t.Block
+	if reader, ok := t.(collisionBlockReader); ok {
+		read = reader.collisionBlock
+	}
+	return anyVoxel(b, func(x, y, z int64) bool {
+		block, resident := read(x, y, z)
+		return resident && world.Snares(block)
+	})
+}
+
 // anyVoxel reports whether any voxel the box touches satisfies want.
 //
 // y outermost, then z, then x, matching world.Index: the innermost loop walks

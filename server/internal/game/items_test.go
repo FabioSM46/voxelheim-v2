@@ -509,6 +509,7 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.DarkTimber:            ItemNone,
 		world.PaleTimber:            ItemNone,
 		world.DarkGlass:             ItemNone,
+		world.Cobweb:                ItemNone,
 	}
 	// **The same length guard TestBlockExperienceNamesEveryRewardAndExplicitZero has,
 	// and it was missing here.** Without it this loop only checks the rows somebody
@@ -589,6 +590,7 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.DarkTimber:            0,
 		world.PaleTimber:            0,
 		world.DarkGlass:             0,
+		world.Cobweb:                0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

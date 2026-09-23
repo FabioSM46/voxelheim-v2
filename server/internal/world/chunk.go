@@ -217,6 +217,23 @@ const (
 	// Narrow vertical iron bars, with openings smaller than a standing body.
 	IronGrilleX Block = 58
 	IronGrilleZ Block = 59
+
+	// The first dungeon's own blocks, appended after every id already on the wire
+	// and in world deltas. All four are world-only: none is [Placeable] and none has
+	// an item. [RuneStone] is reused as the unlit rune, so a lit one is the only new
+	// rune id.
+	//
+	// [Cobweb] is [Cover]: a body passes through it (slowed — see game's
+	// CobwebSpeedScale) and one quick hit takes it away with no drop. Only an
+	// instance ever generates one, and only an instance lets one be broken.
+	//
+	// The two levers and the lit rune are solid cubes with no mining row, so no
+	// hand breaks them and no placement lands in them; their state is changed by
+	// the server's mechanisms and never by an ordinary edit.
+	Cobweb       Block = 60
+	LeverOff     Block = 61
+	LeverOn      Block = 62
+	RuneStoneLit Block = 63
 )
 
 // ShapeKind is the geometry a block occupies inside its voxel.
@@ -422,8 +439,8 @@ func Solid(b Block) bool {
 // Cover reports whether a block is ground cover: a thing that stands in a voxel
 // without filling it.
 //
-// **The three flowers, the winter bramble, the meadow bush and the desert shrub
-// today, and three consequences, each enforced elsewhere:**
+// **The three flowers, the winter bramble, the meadow bush, the desert shrub and
+// the dungeon cobweb today, and three consequences, each enforced elsewhere:**
 //
 //   - A body passes through it — [Solid] is false, so the collision sweep, the
 //     standable-floor test and a creature's step-up probe all refuse it.
@@ -437,8 +454,18 @@ func Solid(b Block) bool {
 // in a meadow. NextWater has a fourth arm for the same reason.
 func Cover(b Block) bool {
 	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue || b == WinterBramble ||
-		b == Bush || b == DesertShrub
+		b == Bush || b == DesertShrub || b == Cobweb
 }
+
+// Mechanism reports whether a block is a lever or a rune stone, lit or not: the
+// cells a dungeon puzzle is operated through.
+func Mechanism(b Block) bool {
+	return b == LeverOff || b == LeverOn || b == RuneStone || b == RuneStoneLit
+}
+
+// Snares reports whether a block slows a body standing in it. Only [Cobweb]
+// does; the fraction of speed left is the simulation's constant, not the palette's.
+func Snares(b Block) bool { return b == Cobweb }
 
 // Fluid reports whether a block is one a body wades and swims in rather than walks
 // through or stands on.
@@ -635,5 +662,8 @@ func floorDiv(a, b int64) int64 {
 // Portal is a walk-through threshold, not water or replaceable cover.
 func Portal(b Block) bool { return b == PortalVeil || b == PortalHeart }
 
-// ImmutablePortal protects both the frame and its empty-looking doorway.
-func ImmutablePortal(b Block) bool { return b == RuneStone || Portal(b) }
+// ImmutablePortal protects both the frame and its empty-looking doorway. The lit
+// rune carries the same protection as the unlit [RuneStone] it toggles with, so no
+// edit or persisted delta can replace a rune cell in either state; a mechanism
+// changes one only by patching a chunk, as [InstanceGate] does.
+func ImmutablePortal(b Block) bool { return b == RuneStone || b == RuneStoneLit || Portal(b) }
