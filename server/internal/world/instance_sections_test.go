@@ -428,3 +428,25 @@ func TestAnOverlayBlockOverAirIsNotEditable(t *testing.T) {
 		}
 	}
 }
+
+// When an overlay writes one cell twice, the last write is both what generates and
+// what the edit rule judges.
+func TestTheLastOverlayWriteToACellWinsForGenerationAndEdits(t *testing.T) {
+	l := descentLayout(t)
+	l.overlay = func(int64) []drawnCell {
+		return []drawnCell{{4, 36, 16, BlackBrickWorn}, {4, 36, 16, Air}, {6, 36, 16, Air}, {6, 36, 16, BlackBrickWorn}}
+	}
+	for seed := int64(0); seed < 4; seed++ {
+		b := l.placement(seed)
+		for _, want := range []drawnCell{{4, 36, 16, Air}, {6, 36, 16, BlackBrickWorn}} {
+			rx, rz := rotateCell(want.x, want.z, l.drawing.W, l.drawing.D, b.Facing)
+			x, y, z := b.OriginX+int64(rx), b.OriginY+int64(want.y), b.OriginZ+int64(rz)
+			if got := l.generate(seed, ChunkOf(x, y, z)).At(Local(x), Local(y), Local(z)); got != want.block {
+				t.Fatalf("seed %d: generated %d at %+v, want the last write %d", seed, got, want, want.block)
+			}
+			if l.editable(seed, x, y, z) != instanceEditableCell(want.block) {
+				t.Fatalf("seed %d: the edit rule judged %+v by an earlier write", seed, want)
+			}
+		}
+	}
+}

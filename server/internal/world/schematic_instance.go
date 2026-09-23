@@ -88,7 +88,8 @@ func buildDungeon() *Schematic {
 	for _, z := range [...]int{12, 32, 52} {
 		s.CarveRoom(Box{16, f, z, 18, f + 3, z + 2}, BlackBrick)
 	}
-	s.FillFloor(9, 0, 25, 13, f-1, Basalt)
+	s.FillFloor(9, 0, 25, 12, f-1, Basalt)
+	s.FillFloor(15, 13, 19, 13, f-1, Basalt) // the first corridor's middle course
 	s.FillFloor(upperHallX0-1, 14, upperHallX1+1, inscriptionZ, f-1, Basalt)
 
 	// The return portal in the court, ahead of the arrival slot: a freestanding rune

@@ -33,7 +33,8 @@ type instanceLayout struct {
 	// originY is the world level of the drawing's bottom course.
 	originY int64
 	// overlay is what a seed changes in the drawing: cells written over it after it is
-	// placed, in the drawing's own frame. nil changes nothing.
+	// placed, in the drawing's own frame and in slice order, so a later cell for the
+	// same coordinate wins. nil changes nothing.
 	overlay func(seed int64) []drawnCell
 	// floorGate lays the progression gate flat — a trapdoor in the floor course the
 	// gate anchor stands in — rather than upright across a passage.
@@ -192,12 +193,17 @@ func (l instanceLayout) editable(seed, x, y, z int64) bool {
 		return false
 	}
 	// The seed's overlay is part of the generated dungeon, so its cells are judged by
-	// what the overlay wrote there rather than by the drawing underneath.
+	// what the overlay wrote there rather than by the drawing underneath — the last
+	// write to a cell, as in generate, so the two never judge different blocks.
 	if l.overlay != nil {
+		written, found := Air, false
 		for _, cell := range l.overlay(seed) {
 			if cell.x == lx && cell.y == ly && cell.z == lz {
-				return instanceEditableCell(cell.block)
+				written, found = cell.block, true
 			}
+		}
+		if found {
+			return instanceEditableCell(written)
 		}
 	}
 	if l.interior != nil {
