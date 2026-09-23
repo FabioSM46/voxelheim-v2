@@ -519,9 +519,17 @@ pub(super) fn visuals(
         perceptual_roughness: 0.42,
         ..default()
     });
+    // Every grain is the same speck of sand: one mesh for all ten.
+    let mut grain: Option<Handle<Mesh>> = None;
     let parts: Vec<_> = meshes()
         .into_iter()
-        .map(|(segment, mesh)| (segment, meshes_out.add(mesh)))
+        .map(|(segment, mesh)| {
+            let handle = match segment {
+                Segment::Grain(_) => grain.get_or_insert_with(|| meshes_out.add(mesh)).clone(),
+                _ => meshes_out.add(mesh),
+            };
+            (segment, handle)
+        })
         .collect();
     SpeciesVisuals {
         body: parts[index(Segment::Carapace)].1.clone(),
@@ -885,6 +893,9 @@ pub(super) struct Motion {
     /// Under the sand, and the height of the surface over it — see [`buried`].
     pub(super) buried: Option<f32>,
     emerge: Option<Emerge>,
+    /// What the combat audio hears: the drawn legs' steps, each sting telegraph and each
+    /// emergence, as serials it can tell apart from ones it has already voiced.
+    pub(super) stamps: Stamps,
     pub(super) transforms: [Transform; SEGMENT_COUNT],
 }
 
@@ -907,6 +918,7 @@ impl Motion {
             controls: Controls::default(),
             buried: None,
             emerge: None,
+            stamps: Stamps::default(),
             transforms: pose(&Pose::rest()),
         }
     }
@@ -931,11 +943,14 @@ impl Motion {
                 self.sting_next = was == Attack::Swipe;
                 Some(was)
             }
-            (_, MobAction::Windup) => Some(if self.sting_next {
-                Attack::Sting
-            } else {
-                Attack::Swipe
-            }),
+            (_, MobAction::Windup) => {
+                if self.sting_next {
+                    self.stamps.rattles = self.stamps.rattles.wrapping_add(1);
+                    Some(Attack::Sting)
+                } else {
+                    Some(Attack::Swipe)
+                }
+            }
             // A windup that ended in anything but a swing was abandoned: the rhythm stands.
             _ => None,
         };
@@ -958,12 +973,20 @@ impl Motion {
         let (w, h) = frame();
         let dt = delta.as_secs_f32().min(0.1);
         self.clock += dt;
+        self.stamps.step = None;
+        self.stamps.at = position;
         if action == self.action {
             self.elapsed += dt;
         }
         self.observe(action);
-        if self.action == MobAction::Windup && self.elapsed >= STING_EVIDENCE {
+        if self.action == MobAction::Windup
+            && self.elapsed >= STING_EVIDENCE
+            && self.attack != Some(Attack::Sting)
+        {
+            // The order said swipe and the telegraph outran one: it is the sting, and the
+            // rattle that goes with it is late rather than missing.
             self.attack = Some(Attack::Sting);
+            self.stamps.rattles = self.stamps.rattles.wrapping_add(1);
         }
 
         let displacement = position - self.last;
@@ -992,6 +1015,8 @@ impl Motion {
                 elapsed: 0.0,
                 surface,
             });
+            self.stamps.emergences = self.stamps.emergences.wrapping_add(1);
+            self.stamps.sand = position.with_y(surface);
         }
         let emerged = match self.emerge.as_mut() {
             Some(emerge) if alive => {
@@ -1009,12 +1034,21 @@ impl Motion {
             Vec3::Y * (emerge.surface - EMERGE_DEPTH * h * (1.0 - rise) - position.y)
         });
 
+        let before = (self.phase / PI).floor();
         self.phase = (self.phase + travelled * radians_per_block()).rem_euclid(TAU);
+        let after = (self.phase / PI).floor();
         let instant = if dt > 0.0 { travelled / dt } else { 0.0 };
         self.speed += (instant - self.speed) * (1.0 - (-SPEED_RESPONSE * dt).exp());
         let moving = gait && self.speed > 0.05;
         self.amplitude +=
             (f32::from(u8::from(moving)) - self.amplitude) * (1.0 - (-GAIT_RESPONSE * dt).exp());
+
+        // Four feet coming down together is one step: the stamp the chitin clicks follow. Only
+        // while the gait is showing, never for a correction.
+        if gait && before != after && self.amplitude > 0.3 && travelled > 0.0 {
+            self.stamps.steps = self.stamps.steps.wrapping_add(1);
+            self.stamps.step = Some(self.speed);
+        }
 
         let target = if alive {
             controls(self.action, self.attack, self.elapsed)
@@ -1131,6 +1165,30 @@ impl Motion {
     }
 }
 
+/// The serials the combat audio reads off a scorpion's rig: facts about this client's drawing,
+/// never about what the server decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(in crate::player) struct Stamps {
+    /// Where the scorpion was drawn this frame.
+    pub(in crate::player) at: Vec3,
+    /// Steps taken, and the drawn speed of the one taken this frame, if one was.
+    pub(in crate::player) steps: u64,
+    pub(in crate::player) step: Option<f32>,
+    /// Sting telegraphs begun.
+    pub(in crate::player) rattles: u64,
+    /// Times it came up out of the sand, and the patch of surface it broke the last time.
+    pub(in crate::player) emergences: u64,
+    pub(in crate::player) sand: Vec3,
+}
+
+// The one path from the rig to the ears, as the spider's is.
+impl Mob {
+    pub(in crate::player) fn scorpion_stamps(&self) -> Option<(u64, Stamps)> {
+        let motion = self.scorpion_motion.as_ref()?;
+        (self.kind == MobKind::Scorpion).then_some((self.entity_id, motion.stamps))
+    }
+}
+
 #[cfg(test)]
 pub(super) fn posed_meshes(pose_now: &Pose) -> Vec<Mesh> {
     meshes()
@@ -1143,3 +1201,6 @@ pub(super) fn posed_meshes(pose_now: &Pose) -> Vec<Mesh> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capture;
