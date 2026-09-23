@@ -298,7 +298,8 @@ func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, m
 		// creature an earlier one killed is still in it — out of Sim.mobs and already a
 		// corpse, but here, with no health. This is the guard that keeps the second arrow
 		// of a volley from being spent on it.
-		if m.health == 0 {
+		// A buried creature is under the surface and nobody's target; see dungeon_minor.go.
+		if m.health == 0 || m.buried {
 			continue
 		}
 		consider(m, m.entityID, m.species().body.boxAt(m.pos))
