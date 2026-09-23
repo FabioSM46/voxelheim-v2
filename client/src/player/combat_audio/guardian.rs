@@ -155,6 +155,7 @@ fn enqueue(
         follows: false,
         offset: Some(offset),
         owner: Some(owner),
+        gain: 1.0,
     });
 }
 
@@ -394,6 +395,7 @@ impl State {
                             })
                             .map_or(Owner::Gait, Owner::Phase),
                     ),
+                    gain: 1.0,
                 });
             }
         }

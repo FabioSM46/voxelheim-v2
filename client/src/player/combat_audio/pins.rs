@@ -1,4 +1,4 @@
-//! Every combat, guardian and king cue as the palette bakes it, pinned (see
+//! Every combat, guardian, king and spider cue as the palette bakes it, pinned (see
 //! `audio::synth::pin`).
 use super::*;
 use crate::audio::synth::pin;
@@ -10,6 +10,7 @@ fn every_combat_sound_bakes_identically_to_its_pin() {
         .copied()
         .chain(guardian::sounds::CUES.into_iter().map(Cue::Guardian))
         .chain(king::sounds::CUES.into_iter().map(Cue::King))
+        .chain(spider::CUES.into_iter().map(Cue::Spider))
         .map(|cue| {
             // The palette's own seed, in `update`.
             let hash = pin::baked(&cue.describe(), cue.seconds(), 19);
@@ -81,4 +82,8 @@ const PINS: &[pin::Row] = &[
     ("King(NoteThird)", 80080, [-11.01473, 25.81457, 28.50097, 4.30652]),
     ("King(RequiemToll)", 75075, [55.02091, 44.15197, 83.37788, 6.47171]),
     ("King(ChantBroken)", 70070, [-23.91366, 15.33771, 7.24020, 3.44096]),
+    ("Spider(Skitter)", 16016, [-1.08354, -5.79100, -0.55114, 3.57579]),
+    ("Spider(SkitterSwarm)", 22022, [-0.10190, -0.70595, -0.29106, -0.43758]),
+    ("Spider(Hiss)", 55055, [1.08323, 21.15465, 34.80238, -34.34270]),
+    ("Spider(Bite)", 24024, [-0.08649, 0.95829, 1.60064, -3.86544]),
 ];

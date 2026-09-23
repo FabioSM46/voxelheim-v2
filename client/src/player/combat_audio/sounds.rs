@@ -16,6 +16,7 @@ pub(super) enum Cue {
     VargrAttack,
     Guardian(super::guardian::sounds::Cue),
     King(super::king::sounds::Cue),
+    Spider(super::spider::Cue),
 }
 
 pub(super) const CUES: [Cue; 8] = [
@@ -43,8 +44,8 @@ pub(super) fn impact(target: BlowTarget) -> Cue {
             MobKind::Vargr | MobKind::VargrGuardian => Cue::BeastImpact,
             MobKind::Villager => Cue::ClothImpact,
             MobKind::Deer | MobKind::Horse => Cue::SoftImpact,
-            // V46's two are chitin, which is dry and hard: the bone impact until their own
-            // voices exist, rather than a flesh sound that would say the wrong material.
+            // V46's two are chitin, which is dry and hard: a blade meets a spider's shell
+            // the way it meets bone, so the bone impact is the right material for both.
             MobKind::CaveSpider | MobKind::Scorpion => Cue::DryImpact,
         },
     }
@@ -61,8 +62,28 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
         // Both bosses are routed by their explicit encounter phases, never Windup.
         (MobKind::VargrGuardian | MobKind::DraugrKing, _) => None,
-        // V46's placeholders have no voice yet; their behaviour issues own one.
-        (MobKind::CaveSpider | MobKind::Scorpion, _) => None,
+        // A spider hisses when it notices you. Its windup is silent — the front legs rising
+        // are the telegraph — and the bite is voiced on the lunge, by [`strike`].
+        (MobKind::CaveSpider, false) => Some(Cue::Spider(super::spider::Cue::Hiss)),
+        (MobKind::CaveSpider, true) => None,
+        // The scorpion's placeholder has no voice yet; its own issue owns one.
+        (MobKind::Scorpion, _) => None,
+    }
+}
+
+/// The sound of a lunge closing, for a species that has one: played on a Recovery straight
+/// out of a watched Windup. Never a claim that anything was hit — that is the impact's.
+pub(super) fn strike(kind: MobKind) -> Option<Cue> {
+    match kind {
+        MobKind::CaveSpider => Some(Cue::Spider(super::spider::Cue::Bite)),
+        MobKind::Draugr
+        | MobKind::Vargr
+        | MobKind::Deer
+        | MobKind::Villager
+        | MobKind::Horse
+        | MobKind::VargrGuardian
+        | MobKind::DraugrKing
+        | MobKind::Scorpion => None,
     }
 }
 
@@ -79,6 +100,7 @@ impl Cue {
             Self::VargrAttack => 0.18,
             Self::Guardian(cue) => cue.seconds(),
             Self::King(cue) => cue.seconds(),
+            Self::Spider(cue) => cue.seconds(),
         }
     }
 
@@ -87,6 +109,7 @@ impl Cue {
         match self {
             Self::Guardian(cue) => cue.priority(),
             Self::King(cue) => cue.priority(),
+            Self::Spider(cue) => cue.priority(),
             _ => 3,
         }
     }
@@ -104,6 +127,7 @@ impl Cue {
         match self {
             Self::Guardian(cue) => return cue.describe(),
             Self::King(cue) => return cue.describe(),
+            Self::Spider(cue) => return cue.describe(),
             _ => {}
         }
         // Sine/noise transients make impacts; rough tones are reserved for creature
@@ -117,7 +141,9 @@ impl Cue {
             Self::DraugrAttack => (103.0, 0.18, 0.42, 1800.0, Wave::Triangle),
             Self::VargrNotice => (157.0, 0.32, 0.22, 650.0, Wave::Triangle),
             Self::VargrAttack => (281.0, 0.30, 0.37, 2200.0, Wave::Triangle),
-            Self::Guardian(_) | Self::King(_) => unreachable!("boss recipes return above"),
+            Self::Guardian(_) | Self::King(_) | Self::Spider(_) => {
+                unreachable!("species catalogues return above")
+            }
         };
         let envelope = Envelope {
             attack: 0.004,
