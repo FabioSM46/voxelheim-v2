@@ -12,10 +12,15 @@ package world
 // pool deep enough that the landing costs nothing. The shore is the first
 // checkpoint, and a tunnel leads on from it.
 //
-// **Beyond the tunnel stands the Draugr king's arena, unchanged**, at the pool's level.
-// The cave and the sand hall are drawn between the two by the next layout issue
-// (#1290); until then the tunnel is the whole of that stretch, so the king is still
-// reached by the one route the dungeon has rather than stranded above the chasm.
+// **Below floor 1 the dungeon is cut into rock, and it goes down twice more.** The
+// tunnel from the shore opens into the cave: rough stone, low and uneven ceilings,
+// webs in every corner and a web curtain across the neck into its gallery, with the
+// spiders' burrows in its walls (schematic_instance_lower.go draws it). A lever in
+// the cavern opens the grille at the far end of the gallery for twelve seconds
+// (puzzle 2); past it is the second checkpoint and a stair down into the sand hall,
+// where the scorpions lie under the dunes. Two levers at the hall's opposite walls
+// open its door together (puzzle 3); past it is the third checkpoint and a stair
+// down to the Draugr king's arena at the bottom of the dungeon, under the cave.
 //
 // Both arenas keep the dimensions the boss moves, escape routes and balance were
 // measured in (#1073, #1099): the guardian's is 27×27 clear with eight clear courses,
@@ -24,21 +29,30 @@ package world
 //
 // Every coordinate is the unrotated drawing's own; the placement turns the whole
 // drawing and its anchors by the seed and puts [dungeonUpperFloor] on world y = 1.
+// The drawing is 35×60×106, which is two chunks by three by four at every turn: the
+// instance's envelope is 120 chunks with its halo, the number the cache is sized to.
 const (
-	dungeonWidth, dungeonHeight, dungeonDepth = 35, 47, 106
+	dungeonWidth, dungeonHeight, dungeonDepth = 35, 60, 106
 
 	// dungeonUpperFloor is floor 1's standing level; its floor course is one below.
-	dungeonUpperFloor = 38
+	dungeonUpperFloor = 51
 
-	// The pool: water from the chamber's floor up to dungeonWaterTop, four courses
-	// deep, and the shore beside it standing level with the surface.
-	dungeonWaterTop = 4
+	// The standing levels below floor 1, deepest first. The king's floor course is the
+	// drawing's bottom course.
+	dungeonKingFloor = 1
+	dungeonSandFloor = 10
+
+	// The pool: water from the chamber's bed up to dungeonWaterTop, four courses deep,
+	// and the shore beside it standing level with the surface. The cave is on the
+	// shore's level.
+	dungeonPoolBed  = 13
+	dungeonWaterTop = dungeonPoolBed + 4
 	dungeonShore    = dungeonWaterTop + 1
 
 	// The chasm's clear column, inclusive. Its top course is the trapdoor the
 	// guardian's defeat opens; its bottom breaks through the pool chamber's ceiling.
 	chasmX0, chasmZ0, chasmX1, chasmZ1 = 15, 95, 19, 99
-	chasmBottom, chasmTop              = 8, dungeonUpperFloor - 1
+	chasmBottom, chasmTop              = dungeonWaterTop + 4, dungeonUpperFloor - 1
 
 	// The guardian arena's clear interior and centre.
 	guardianX0, guardianZ0, guardianX1, guardianZ1 = 4, 74, 30, 100
@@ -127,21 +141,27 @@ func buildDungeon() *Schematic {
 
 	// The pool chamber: still water four deep, and a shore at its north end whose
 	// floor is flush with the surface, so a swimmer steps out rather than climbs.
-	s.CarveRoom(Box{11, 1, 88, 23, 7, 104}, Basalt)
-	s.Fill(Box{11, 1, 93, 23, dungeonWaterTop, 104}, Water)
-	s.Fill(Box{11, 1, 88, 23, dungeonWaterTop, 92}, Basalt)
+	s.CarveRoom(Box{11, dungeonPoolBed + 1, 88, 23, dungeonPoolBed + 7, 104}, Basalt)
+	s.Fill(Box{11, dungeonPoolBed + 1, 93, 23, dungeonWaterTop, 104}, Water)
+	s.Fill(Box{11, dungeonPoolBed + 1, 88, 23, dungeonWaterTop, 92}, Basalt)
 
 	// The chasm: from the arena floor straight down through the pool chamber's
 	// ceiling, shelled in brick wherever nothing else stands. Carved after the arena,
 	// so its top course cuts the trapdoor's opening through the arena floor.
 	s.CarveShaft(chasmX0, chasmZ0, chasmX1, chasmZ1, chasmBottom, chasmTop, BlackBrick)
 
-	// The king's arena, and the tunnel on from the shore that reaches it.
-	s.CarveRoom(Box{kingX0, dungeonShore, kingZ0, kingX1, dungeonShore + 7, kingZ1}, BlackBrick)
-	s.FillFloor(kingX0-1, kingZ0-1, kingX1+1, kingZ1+1, dungeonShore-1, Basalt)
-	s.FillFloor(kingX0-1, kingZ0-1, kingX1+1, kingZ1+1, dungeonShore+8, Basalt)
-	monoliths(s, kingCX, kingCZ, dungeonShore)
-	s.CarveRoom(Box{16, dungeonShore, kingZ1 + 1, 18, dungeonShore + 3, 87}, Basalt)
+	// The king's arena at the bottom, in the brick the guardian's is built of, and the
+	// sand hall above and north of it. Both are drawn before the rock they are set in,
+	// so they keep their own walls; the cave is carved after it and has the rock's.
+	s.CarveRoom(Box{kingX0, dungeonKingFloor, kingZ0, kingX1, dungeonKingFloor + 7, kingZ1}, BlackBrick)
+	s.FillFloor(kingX0-1, kingZ0-1, kingX1+1, kingZ1+1, dungeonKingFloor-1, Basalt)
+	s.FillFloor(kingX0-1, kingZ0-1, kingX1+1, kingZ1+1, dungeonKingFloor+8, Basalt)
+	monoliths(s, kingCX, kingCZ, dungeonKingFloor)
+	drawSandHall(s)
+	s.FillVoid(Box{0, 0, 0, dungeonWidth - 1, caveRockTop, caveRockZ1}, roughRock)
+	carveCave(s)
+	carveDescents(s)
+	carveReturnShortcut(s)
 
 	s.Anchor(AnchorInstanceArrival, 17, f, arrivalZ, 0)
 	s.Anchor(AnchorInstanceExit, 17, f, exitPortalZ, 0)
@@ -161,7 +181,8 @@ func buildDungeon() *Schematic {
 	s.Anchor(AnchorInstanceGuardian, guardianCX, f, guardianCZ, 0)
 	s.Anchor(AnchorInstanceGate, (chasmX0+chasmX1)/2, chasmTop, (chasmZ0+chasmZ1)/2, 0)
 	s.Anchor(AnchorInstanceCheckpoint, 17, dungeonShore, 90, 0)
-	s.Anchor(AnchorInstanceKing, kingCX, dungeonShore, kingCZ, 0)
+	s.Anchor(AnchorInstanceKing, kingCX, dungeonKingFloor, kingCZ, 0)
+	lowerAnchors(s)
 	return s.MustBuild()
 }
 

@@ -218,21 +218,25 @@ func TestTheChasmDropIntoThePoolIsHarmlessAtEveryTickRate(t *testing.T) {
 	}
 }
 
-// A swimmer under the chasm reaches the shore by swimming, steps out onto it and walks
-// on to the shore checkpoint and down the tunnel into the king's arena.
-func TestThePoolIsLeftByTheShoreAndTheTunnel(t *testing.T) {
+// A swimmer under the chasm reaches the shore by swimming and steps out onto it.
+// From there the walking body takes the whole route below at every rotation, with
+// the puzzles' doors open: north through the cave and its web curtain, west along the
+// gallery through the grille, down the stair into the sand hall, across it and
+// through its door, and down the second stair into the king's arena.
+func TestThePoolIsLeftByTheShoreAndTheRouteDownReachesTheKing(t *testing.T) {
 	for seed := int64(0); seed < 4; seed++ {
 		terrain := newDescentTerrain(t, seed)
 		_, king, gate := world.InstanceEncounterAnchors(seed)
-		var checkpoint world.PlacedAnchor
+		checkpoints := map[int]world.PlacedAnchor{}
 		for _, a := range world.InstanceDungeonAnchors(seed) {
 			if a.Kind == world.AnchorInstanceCheckpoint {
-				checkpoint = a
+				checkpoints[a.Index] = a
 			}
 		}
+		shoreSlot := checkpoints[0]
 		p := &Player{sim: &Sim{idleLimit: 1 << 30}, lifeState: vnet.LifeStateAlive, health: 100, hunger: 100,
-			pos: [3]float64{float64(gate.X) + .5, float64(checkpoint.Y) - 2, float64(gate.Z) + .5}}
-		shore := [3]float64{float64(checkpoint.X) + .5, float64(checkpoint.Y), float64(checkpoint.Z) + .5}
+			pos: [3]float64{float64(gate.X) + .5, float64(shoreSlot.Y) - 2, float64(gate.Z) + .5}}
+		shore := [3]float64{float64(shoreSlot.X) + .5, float64(shoreSlot.Y), float64(shoreSlot.Z) + .5}
 		dt := 1 / float64(DefaultTickRate)
 		for tick := 0; ; tick++ {
 			if !overlapsFluid(terrain, p.box()) && p.onGround && math.Abs(p.pos[1]-shore[1]) < 0.02 {
@@ -247,9 +251,23 @@ func TestThePoolIsLeftByTheShoreAndTheTunnel(t *testing.T) {
 			p.idleTicks = 0
 			p.step(dt, terrain)
 		}
-		// The shore's checkpoint and the king's centre share the drawing's axis, so the
-		// tunnel is walked in a straight line.
-		route := [][3]float64{p.pos, shore, {float64(king.X) + .5, float64(king.Y), float64(king.Z) + .5}}
-		walkDescent(t, terrain, vnet.MountKindUnknown, route)
+
+		// Waypoints in the drawing's floor plan, each on the level it is walked at.
+		at := descentFrame(t, seed)
+		on := func(lx, lz int, level int64) [3]float64 {
+			w := at(lx, lz)
+			w[1] = float64(level)
+			return w
+		}
+		cave, sand, bottom := shoreSlot.Y, checkpoints[2].Y, king.Y
+		route := [][3]float64{p.pos,
+			on(17, 90, cave), on(17, 53, cave), on(5, 53, cave), on(5, 47, cave), // cave, curtain, grille
+			on(5, 37, sand), on(5, 36, sand), on(29, 36, sand), on(29, 40, sand), // the stair down, the hall, its door
+			on(29, 50, bottom), on(29, 53, bottom), on(17, 53, bottom), on(17, 67, bottom), // the stair down, the arena
+		}
+		p = walkDescent(t, terrain, vnet.MountKindUnknown, route)
+		if centre := [3]float64{float64(king.X) + .5, float64(king.Y), float64(king.Z) + .5}; math.Abs(p.pos[0]-centre[0]) > .02 || math.Abs(p.pos[2]-centre[2]) > .02 || math.Abs(p.pos[1]-centre[1]) > .02 {
+			t.Fatalf("seed %d: the route ends at %v, not the king's centre %v", seed, p.pos, centre)
+		}
 	}
 }

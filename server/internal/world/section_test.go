@@ -130,6 +130,36 @@ func TestCarveShaftAndFillFloor(t *testing.T) {
 	}
 }
 
+// FillVoid sets rock around what is already drawn without touching it, and a room
+// carved into that rock afterwards takes the rock as its walls instead of a shell.
+func TestFillVoidSetsRockAroundDrawnCellsAndRoomsCarveIntoIt(t *testing.T) {
+	pick := func(x, y, z int) Block {
+		if (x+y+z)%2 == 0 {
+			return Stone
+		}
+		return Gravel
+	}
+	s := mustBuildSection(t, NewSection(9, 5, 9).
+		CarveRoom(Box{1, 1, 1, 2, 2, 2}, Sandstone).
+		FillVoid(Box{0, 0, 0, 8, 4, 8}, pick).
+		CarveRoom(Box{5, 1, 5, 7, 3, 7}, BlackBrick))
+
+	if s.At(1, 1, 1) != Air || s.At(0, 1, 1) != Sandstone || s.At(3, 1, 1) != Sandstone {
+		t.Fatal("the room drawn first lost its air or its shell")
+	}
+	for _, c := range [][3]int{{8, 4, 8}, {4, 1, 6}, {6, 0, 6}, {6, 4, 6}} {
+		if got, want := s.At(c[0], c[1], c[2]), pick(c[0], c[1], c[2]); got != want {
+			t.Errorf("cell %v is %d, want the picked rock %d", c, got, want)
+		}
+	}
+	if s.At(6, 2, 6) != Air {
+		t.Error("the room carved into the rock is not air")
+	}
+	if _, err := NewSection(4, 4, 4).FillVoid(Box{0, 0, 0, 4, 0, 0}, pick).Build(); err == nil {
+		t.Error("a fill void outside the frame built")
+	}
+}
+
 // Each facing climbs one level per step towards itself, with the stair's high half
 // up the flight, a support under every step but the first and three cells of
 // headroom above each.
