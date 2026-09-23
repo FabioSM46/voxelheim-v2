@@ -311,6 +311,12 @@ fn run(count: u64) -> (usize, usize, Vec<Cue>, f32) {
     let (mut app, mixer) = horde_app();
     let (mut peak, mut legs, mut cues, mut heard) = (0, 0, Vec::new(), 0.0f32);
     for frame in 0..200u32 {
+        // Paced in real time. The renderer interpolates the drawn spiders at the wall clock
+        // (`Instant::now()`), so an unpaced loop — two hundred frames in a fraction of a second —
+        // draws them covering however much ground the host's speed allowed, and the step count
+        // this test measures becomes a measurement of the machine. At 10 ms a frame the drawn
+        // run is the 5.0 blocks a second the snapshots describe.
+        let started_at = Instant::now();
         if frame % 5 == 0 {
             let seconds = frame as f32 / 100.0;
             let mobs = (0..count)
@@ -349,6 +355,9 @@ fn run(count: u64) -> (usize, usize, Vec<Cue>, f32) {
         let mut buffer = Buffer(vec![0.0; (RATE / 100 * 2) as usize]);
         mixer.render(&mut buffer);
         heard += buffer.0.iter().map(|x| x * x).sum::<f32>();
+        if let Some(rest) = Duration::from_millis(10).checked_sub(started_at.elapsed()) {
+            std::thread::sleep(rest);
+        }
     }
     (peak, legs, cues, heard)
 }

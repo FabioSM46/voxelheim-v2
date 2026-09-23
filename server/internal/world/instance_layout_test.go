@@ -8,31 +8,44 @@ import (
 )
 
 // dungeonWorld reads the generated dungeon of one seed through its real cache, with
-// the gate open or shut and the rune door optionally read as open — the state a party
-// that solved puzzle 1 walks through. Nothing here consults the drawing.
+// the gate open or shut and the doors optionally opened — the state a party that
+// solved the puzzles and felled the king walks through, less any door named in shut.
+// The doors are opened through the gate's own Update on the first read, so every read
+// is of the chunks the cache really publishes. Nothing here consults the drawing.
 type dungeonWorld struct {
 	t        *testing.T
 	cache    *Cache
 	gate     *InstanceGate
 	doorOpen bool
-	doors    map[[3]int64]bool
+	doors    map[[3]int64]int // a door cell's index
+	shut     map[int]bool
+	opened   map[int]bool // what the first read opened, so a later shut is caught
 }
 
 func newDungeonWorld(t *testing.T, seed int64, gateOpen, doorOpen bool) *dungeonWorld {
 	t.Helper()
 	cache, gate := NewGatedInstanceCache(seed, 1, InstanceChunkEnvelope(seed), gateOpen)
-	w := &dungeonWorld{t: t, cache: cache, gate: gate, doorOpen: doorOpen, doors: map[[3]int64]bool{}}
+	w := &dungeonWorld{t: t, cache: cache, gate: gate, doorOpen: doorOpen, doors: map[[3]int64]int{}, shut: map[int]bool{}}
 	for _, a := range InstanceDungeonAnchors(seed) {
 		if a.Kind == AnchorInstanceDoor {
-			w.doors[[3]int64{a.X, a.Y, a.Z}] = true
+			w.doors[[3]int64{a.X, a.Y, a.Z}] = a.Index
 		}
 	}
 	return w
 }
 
 func (w *dungeonWorld) at(x, y, z int64) Block {
-	if w.doorOpen && w.doors[[3]int64{x, y, z}] {
-		return Air
+	if w.doorOpen && w.opened == nil {
+		w.opened = map[int]bool{}
+		for _, index := range w.doors {
+			w.opened[index] = !w.shut[index]
+		}
+		w.gate.Update(InstanceUpdate{Doors: w.opened})
+	}
+	for index, open := range w.opened {
+		if open == w.shut[index] {
+			w.t.Fatalf("door %d was shut after the doors were opened", index)
+		}
 	}
 	coord := ChunkOf(x, y, z)
 	if !w.cache.Contains(coord) {
@@ -69,8 +82,8 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		byKind := dungeonAnchorsByKind(seed)
 		for kind, want := range map[AnchorKind]int{
 			AnchorInstanceArrival: 1, AnchorInstanceExit: 1, AnchorInstanceGuardian: 1, AnchorInstanceKing: 1,
-			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 1, AnchorInstanceMinorSpawn: 16,
-			AnchorInstanceMechanism: 4, AnchorInstanceDoor: 25, AnchorInstanceTrigger: 0,
+			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 3, AnchorInstanceMinorSpawn: 16 + 6 + 8,
+			AnchorInstanceMechanism: 4 + 1 + 2, AnchorInstanceDoor: 25 + 9 + 9 + 12, AnchorInstanceTrigger: 4,
 		} {
 			if got := len(byKind[kind]); got != want {
 				t.Fatalf("seed %d: %d %s anchors, want %d", seed, got, kind, want)
@@ -85,14 +98,15 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		groups := map[int]int{}
 		for _, a := range byKind[AnchorInstanceMinorSpawn] {
 			groups[a.Index]++
-			if a.Y != 1 || !w.standable(a.X, a.Y, a.Z) {
+			if a.Index < CaveBurrowGroup && a.Y != 1 || !w.standable(a.X, a.Y, a.Z) {
 				t.Fatalf("seed %d: minor spawn %+v has no floor or headroom", seed, a)
 			}
 		}
-		if len(groups) != 4 || groups[0] != 4 || groups[1] != 4 || groups[2] != 4 || groups[3] != 4 {
-			t.Fatalf("seed %d: spawn groups %v, want four groups of four", seed, groups)
+		if len(groups) != 6 || groups[0] != 4 || groups[1] != 4 || groups[2] != 4 || groups[3] != 4 ||
+			groups[CaveBurrowGroup] != 6 || groups[SandBuriedGroup] != 8 {
+			t.Fatalf("seed %d: spawn groups %v, want four groups of four, six burrows and eight scorpions", seed, groups)
 		}
-		for _, a := range byKind[AnchorInstanceMechanism] {
+		for _, a := range byKind[AnchorInstanceMechanism][:4] {
 			if a.Index != runePuzzle || w.at(a.X, a.Y, a.Z) != RuneStone {
 				t.Fatalf("seed %d: mechanism %+v holds %d", seed, a, w.at(a.X, a.Y, a.Z))
 			}
@@ -104,7 +118,7 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		if uint64(seed)&1 != 0 {
 			grille = IronGrilleZ
 		}
-		for _, a := range byKind[AnchorInstanceDoor] {
+		for _, a := range byKind[AnchorInstanceDoor][:25] {
 			if a.Index != runePuzzle || w.at(a.X, a.Y, a.Z) != grille {
 				t.Fatalf("seed %d: door cell %+v holds %d, want grille %d", seed, a, w.at(a.X, a.Y, a.Z), grille)
 			}
@@ -269,8 +283,8 @@ func TestDungeonSceneryRemainsImmutableAtEveryRotation(t *testing.T) {
 }
 
 // Floor 1 stands on basalt everywhere a body can stand: every air cell of its standing
-// course sits on a basalt floor course, except over the portal frame's rune sill and
-// the chasm's open column. A course left to a room's brick shell, or a gap between two
+// course sits on a basalt floor course, except over the portal frame's rune sill, the
+// chasm's open column and the return shortcut's last flight. A course left to a room's brick shell, or a gap between two
 // floor fills, fails here.
 func TestFloorOneStandsOnBasaltThroughout(t *testing.T) {
 	const f = dungeonUpperFloor
@@ -281,8 +295,11 @@ func TestFloorOneStandsOnBasaltThroughout(t *testing.T) {
 			}
 			under := instanceDungeon.At(x, f-1, z)
 			sill := z == exitPortalZ && under == RuneStone
+			// The return shortcut's last flight and landing, behind the court's east wall,
+			// are a stair and not floor 1.
+			stair := x > shortcutCourtDoorX && z < shortcutCorridorZ0
 			chasm := x >= chasmX0 && x <= chasmX1 && z >= chasmZ0 && z <= chasmZ1 && under == Air
-			if under != Basalt && !sill && !chasm {
+			if under != Basalt && !sill && !chasm && !stair {
 				t.Fatalf("floor 1 at %d,%d stands on %d, not basalt", x, z, under)
 			}
 		}

@@ -226,8 +226,10 @@ pub(super) const TAIL_REST: [f32; TAIL + 1] = [0.40, 1.15, 1.85, 2.45, 2.95, 3.4
 const TAIL_COCK: [f32; TAIL + 1] = [0.30, 0.05, -0.20, -0.30, -0.35, -0.35];
 /// Added in full at the bottom of the strike: the tail whipped forward over the head.
 const TAIL_STRIKE: [f32; TAIL + 1] = [0.10, 0.50, 0.85, 1.00, 1.05, 1.15];
-/// Added in full once dead: the tail uncurled and lying back along the sand.
-const TAIL_LIMP: [f32; TAIL + 1] = [-0.40, -1.15, -1.75, -2.20, -2.50, -3.15];
+/// Added in full once dead: the tail sagging onto the sand but still curled in over the body,
+/// so the corpse stays inside the box the server collides — a tail straightened out behind it
+/// would overhang by a fifth of the box (review on #1319).
+const TAIL_LIMP: [f32; TAIL + 1] = [-0.45, -1.10, -1.50, -1.40, -1.00, -0.60];
 
 /// How fast the eased attack poses settle, per second: quick enough that a strike still lands
 /// in its own tenth of a second, slow enough that an interrupted telegraph does not snap.
@@ -1093,8 +1095,8 @@ impl Motion {
         let arms = std::array::from_fn(|arm| {
             let twitched = flex.filter(|(which, _)| *which == arm).map_or(0.0, |f| f.1);
             Arm {
-                spread: c.spread - 0.45 * c.sweep - 0.35 * down - 0.30 * tuck,
-                raise: c.raise + 0.12 * c.sweep - 0.10 * down - 0.15 * tuck + shake,
+                spread: c.spread - 0.45 * c.sweep + 0.15 * down - 0.30 * tuck,
+                raise: c.raise + 0.12 * c.sweep - 0.20 * down - 0.15 * tuck + shake,
                 open: c.open + 0.35 * twitched + shake,
             }
         });

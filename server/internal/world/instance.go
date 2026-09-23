@@ -47,8 +47,9 @@ type drawnCell struct {
 	block   Block
 }
 
-// dungeonLayout is the first dungeon: the upper halls, the chasm and the pool, with
-// the seed's rune inscription laid over the drawing and floor 1 on world y = 1.
+// dungeonLayout is the first dungeon: the upper halls, the chasm and the pool, the
+// cave, the sand hall and the king's arena, with the seed's rune inscription laid over
+// the drawing and floor 1 on world y = 1.
 var dungeonLayout = instanceLayout{
 	drawing:   instanceDungeon,
 	interior:  dungeonEditable,
