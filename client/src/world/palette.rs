@@ -138,9 +138,18 @@ pub const PORTAL_HEART: BlockId = 57;
 pub const IRON_GRILLE_X: BlockId = 58;
 pub const IRON_GRILLE_Z: BlockId = 59;
 /// The first dungeon's blocks, mirroring the server's `world.Cobweb`, `world.LeverOff`,
-/// `world.LeverOn` and `world.RuneStoneLit`. Only the ids, the cover class and a
-/// placeholder colour live here so far; their own meshes, glow and sounds are the
-/// client dungeon-blocks issue's work.
+/// `world.LeverOn` and `world.RuneStoneLit`.
+///
+/// - [`COBWEB`] is cover: the mesher spins it as strands on two crossed planes, so it is
+///   see-through between its threads the way a web is, and the aiming ray still finds it.
+/// - [`LEVER_OFF`] and [`LEVER_ON`] are solid cubes to a body — the server's collision is a
+///   full voxel — but not [`is_opaque`]: the mesher draws a stone plinth and an iron handle
+///   thrown one way or the other, and the faces around it stay drawn.
+/// - [`RUNE_STONE_LIT`] is an opaque cube whose exposed sides carry a glowing rune, drawn
+///   by the mesher's unlit glow half; [`RUNE_STONE`] is the same stone dark.
+///
+/// **None of them changes here.** A lever is thrown and a rune is lit by the server's
+/// `BlockUpdate`, never by this client.
 pub const COBWEB: BlockId = 60;
 pub const LEVER_OFF: BlockId = 61;
 pub const LEVER_ON: BlockId = 62;
@@ -153,6 +162,18 @@ pub const fn is_grille(block: BlockId) -> bool {
 
 pub fn is_portal(block: BlockId) -> bool {
     matches!(block, PORTAL_VEIL | PORTAL_HEART)
+}
+
+/// Whether `block` is one of the dungeon's two lever states. Solid to a body, drawn as a
+/// plinth and a handle by the mesher rather than swept as a cube.
+pub const fn is_lever(block: BlockId) -> bool {
+    matches!(block, LEVER_OFF | LEVER_ON)
+}
+
+/// Whether `block` carries light of its own: the faces the mesher routes into the unlit
+/// glow half, which neither the sun nor a cave's darkness dims.
+pub const fn glows(block: BlockId) -> bool {
+    block == RUNE_STONE_LIT
 }
 
 /// Geometry one block occupies inside its voxel.
@@ -503,7 +524,12 @@ pub fn is_solid(block: BlockId) -> bool {
 /// this predicate and [`is_solid`] are false for it: a bush is no longer a
 /// rendering-only exception to either.
 pub fn is_opaque(block: BlockId) -> bool {
-    !is_grille(block) && block != AIR && !is_water(block) && !is_cover(block) && !is_portal(block)
+    !is_grille(block)
+        && !is_lever(block)
+        && block != AIR
+        && !is_water(block)
+        && !is_cover(block)
+        && !is_portal(block)
 }
 
 /// What a block is made of.
@@ -753,12 +779,25 @@ const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 /// in the leafless winter plant. `#761A3B`.
 const RUNE_STONE_LINEAR: [f32; 3] = [0.038, 0.065, 0.072];
 const PORTAL_LINEAR: [f32; 3] = [0.04, 0.7, 0.52];
-/// Placeholders until the dungeon blocks get their own look: a pale web, a dark and
-/// a brighter lever, and a rune stone that reads lit beside [`RUNE_STONE_LINEAR`].
-const COBWEB_LINEAR: [f32; 3] = [0.62, 0.62, 0.6];
-const LEVER_OFF_LINEAR: [f32; 3] = [0.09, 0.07, 0.05];
-const LEVER_ON_LINEAR: [f32; 3] = [0.2, 0.15, 0.08];
-const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.05, 0.45, 0.6];
+/// Old silk, dusty and grey rather than white: a web is only ever seen by torchlight
+/// down here, and pure white would burn out beside a sconce. `#B0B2AE`.
+const COBWEB_LINEAR: [f32; 3] = [0.434_154, 0.445_201, 0.423_268];
+/// A lever's colour is its **handle**. Thrown off it is black iron; thrown on it is the
+/// same iron polished bright where a hand has worn it, so the state reads twice — once
+/// in which way the handle leans and once in how it catches the light.
+const LEVER_OFF_LINEAR: [f32; 3] = [0.028, 0.027, 0.026];
+const LEVER_ON_LINEAR: [f32; 3] = [0.16, 0.13, 0.085];
+/// The dressed stone a lever is set in, a shade lighter than the cave's rock so the
+/// mechanism stands out of the wall it is built against. `#4A4C50`.
+pub const LEVER_PLINTH_LINEAR: [f32; 3] = [0.068_478, 0.072_272, 0.080_220];
+/// The grip at a lever's tip: bronze, the one warm colour on it.
+pub const LEVER_GRIP_LINEAR: [f32; 3] = [0.30, 0.16, 0.05];
+/// A lit rune's stone: the unlit [`RUNE_STONE_LINEAR`] with the cold of its own light
+/// in it.
+const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.03, 0.085, 0.1];
+/// The rune carved into a lit stone, drawn unlit: this is the colour the eye receives,
+/// whatever the light around it. A cold blue-green, the portal's family.
+pub const RUNE_GLOW_LINEAR: [f32; 3] = [0.25, 0.9, 1.0];
 const WINTER_BRAMBLE_LINEAR: [f32; 3] = [0.181_164, 0.010_330, 0.043_735];
 
 /// The darkest thing in the world, and a castle's trim rather than its wall: a line of
@@ -1166,7 +1205,12 @@ mod tests {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if is_water(block) || is_cover(block) || is_portal(block) || is_grille(block) {
+            if is_water(block)
+                || is_cover(block)
+                || is_portal(block)
+                || is_grille(block)
+                || is_lever(block)
+            {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;
             }
