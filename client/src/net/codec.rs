@@ -8001,10 +8001,8 @@ pub fn encode_draw_request(request: &DrawRequest) -> Vec<u8> {
 }
 
 /// Builds one mechanism use. The cell is always written: [`MechanismUseRequest::pos`] is
-/// not optional, so the absent cell the server refuses is unrepresentable here.
-// V46 establishes this outbound contract before a lever or rune stone exists to aim at;
-// the dungeon mechanisms issue wires the input that sends it.
-#[allow(dead_code)]
+/// not optional, so the absent cell the server refuses is unrepresentable here. Sent by the
+/// interact key at an aimed lever or rune stone (`player/loot.rs`, #1295).
 pub fn encode_mechanism_use_request(request: &MechanismUseRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let mut table = fb::MechanismUseRequestBuilder::new(&mut builder);

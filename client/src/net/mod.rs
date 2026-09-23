@@ -141,8 +141,7 @@ pub use codec::{
     encode_remove_structure_request, encode_repair_request,
 };
 pub use codec::{encode_block_request, encode_draw_request};
-// V46's mechanism use, ahead of the dungeon mechanisms issue that wires the input sending it.
-#[allow(unused_imports)]
+// V46's mechanism use, sent by the interact key at a lever or rune stone (#1295).
 pub use codec::{MechanismUseRequest, encode_mechanism_use_request};
 pub use codec::{encode_dismount_request, encode_mount_request};
 // V30's voice surface, named here for the reason the blocks above are: `audio/` should not

@@ -12,8 +12,9 @@ use super::{
 };
 use crate::net::{
     LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest,
-    NpcInteractRequest, Outbound, Session, encode_loot_open_request, encode_loot_take_all_request,
-    encode_loot_take_request, encode_npc_interact_request,
+    MechanismUseRequest, NpcInteractRequest, Outbound, Session, encode_loot_open_request,
+    encode_loot_take_all_request, encode_loot_take_request, encode_mechanism_use_request,
+    encode_npc_interact_request,
 };
 use crate::settings::{Control, Settings};
 
@@ -85,6 +86,7 @@ impl Plugin for LootPlugin {
                     // After this frame's station pick, so the key is resolved against what
                     // the crosshair is on now rather than a frame ago.
                     .after(AimStructures)
+                    .after(super::target::AimBlocks)
                     .in_set(OriginateInteract),
             );
     }
@@ -166,6 +168,7 @@ struct LootIntent<'w> {
     solids: Option<Res<'w, super::static_props::StaticPropSolids>>,
     appearances: Option<Res<'w, Appearances>>,
     station: Option<Res<'w, StationTarget>>,
+    mechanism: Option<Res<'w, super::mechanism::AimedMechanism>>,
     cadence: Res<'w, InputCadence>,
     outbound: Option<ResMut<'w, Outbound>>,
     trade_prompts: MessageWriter<'w, PlayerTradePromptRequest>,
@@ -186,6 +189,7 @@ fn send_loot_intents(
         solids,
         appearances,
         station,
+        mechanism,
         cadence,
         mut outbound,
         mut trade_prompts,
@@ -271,6 +275,21 @@ fn send_loot_intents(
             structure_id: pick.structure_id,
             kind: pick.kind,
         });
+        return;
+    }
+
+    // A lever or rune stone under the crosshair is aimed at, like a station, and after it
+    // for the same reason a person is after both: the crosshair is on it. **One request
+    // naming the cell and nothing else** — whether it is a mechanism, whether it is in
+    // reach and whether it moves are the server's, answered by `BlockUpdate`s or by a
+    // refusal the status line words (`mechanism.rs`).
+    if let Some(aimed) = mechanism.as_deref().and_then(|aimed| aimed.0) {
+        if let Some(outbound) = outbound.as_deref_mut() {
+            outbound.send(encode_mechanism_use_request(&MechanismUseRequest {
+                pos: aimed.pos,
+                client_tick: cadence.client_tick,
+            }));
+        }
         return;
     }
 
@@ -1224,5 +1243,77 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// **F at an aimed lever asks the server to use that cell, and nothing more** (#1295).
+    /// The request names the cell alone; whether it moves is the server's, and a corpse
+    /// underfoot still takes the key first.
+    #[test]
+    fn interact_at_an_aimed_mechanism_sends_one_use_naming_only_the_cell() {
+        use crate::net::{MechanismUseRequest, encode_mechanism_use_request};
+        use crate::player::mechanism::{Aimed, AimedMechanism};
+        let lever = Aimed {
+            pos: crate::net::BlockCoord { x: 3, y: 1, z: -2 },
+            block: crate::world::palette::LEVER_OFF,
+        };
+        let mut aimed = app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            ..Default::default()
+        });
+        let (outbound, frames) = Outbound::to_a_test(4);
+        aimed
+            .insert_resource(outbound)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(AimedMechanism(Some(lever)));
+        aimed.update();
+
+        aimed
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        aimed.update();
+        assert_eq!(
+            frames.try_recv().unwrap(),
+            encode_mechanism_use_request(&MechanismUseRequest {
+                pos: lever.pos,
+                client_tick: 0,
+            })
+        );
+        assert!(frames.try_recv().is_err(), "one press, one request");
+
+        // With nothing aimed at, the same press sends nothing.
+        aimed.world_mut().resource_mut::<AimedMechanism>().0 = None;
+        aimed
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyF);
+        aimed.update();
+        aimed
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        aimed.update();
+        assert!(frames.try_recv().is_err());
+
+        // A corpse at the player's feet keeps the key, as it does against a station.
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(4);
+        app.insert_resource(outbound)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(AimedMechanism(Some(lever)));
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        assert_eq!(
+            frames.try_recv().unwrap(),
+            encode_loot_open_request(&LootOpenRequest {
+                corpse_id: CORPSE,
+                client_tick: 0,
+            })
+        );
+        assert!(frames.try_recv().is_err());
     }
 }
