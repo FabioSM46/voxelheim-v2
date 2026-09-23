@@ -666,7 +666,7 @@ func (m *mob) attack() mobAttack {
 		a = def.swipe
 	}
 	if m.tiered {
-		a.damage *= dungeonDamageTier
+		a.damage = tierScaled(a.damage, dungeonDamageTier)
 	}
 	return a
 }

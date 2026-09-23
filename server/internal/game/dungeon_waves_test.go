@@ -417,8 +417,9 @@ func TestTheDungeonsCreaturesCarryItsTier(t *testing.T) {
 			continue
 		}
 		def := m.species()
-		if !m.tiered || m.health != def.maxHealth*dungeonHealthTier || m.maxHealth() != m.health ||
-			m.attack().damage != def.damage*dungeonDamageTier {
+		// Widened on this side, so a wrap in the production multiply would show here.
+		if !m.tiered || uint32(m.health) != uint32(def.maxHealth)*uint32(dungeonHealthTier) || m.maxHealth() != m.health ||
+			uint32(m.attack().damage) != uint32(def.damage)*uint32(dungeonDamageTier) {
 			t.Fatalf("a dungeon %s is not at the tier: %+v", m.kind, m)
 		}
 		checked++
@@ -429,5 +430,16 @@ func TestTheDungeonsCreaturesCarryItsTier(t *testing.T) {
 	wild := &mob{kind: vnet.MobKindDraugr}
 	if row, _ := mobByKind(vnet.MobKindDraugr); wild.maxHealth() != row.maxHealth || wild.attack().damage != row.damage {
 		t.Fatal("an open-world draugr carries the dungeon's tier")
+	}
+}
+
+// A tier over a row that would pass the uint16 ceiling clamps to it rather than wrapping.
+func TestATierNeverWrapsItsRow(t *testing.T) {
+	for _, tc := range []struct{ value, tier, want uint16 }{
+		{72, 4, 288}, {16383, 4, 65532}, {16384, 4, 65535}, {60000, 2, 65535}, {0, 4, 0},
+	} {
+		if got := tierScaled(tc.value, tc.tier); got != tc.want {
+			t.Fatalf("tierScaled(%d, %d) = %d, want %d", tc.value, tc.tier, got, tc.want)
+		}
 	}
 }

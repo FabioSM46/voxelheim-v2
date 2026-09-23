@@ -131,7 +131,7 @@ func (m *mob) maxHealth() uint16 {
 		return m.encounter.scale.maxHealth
 	}
 	if m.tiered {
-		return m.species().maxHealth * dungeonHealthTier
+		return tierScaled(m.species().maxHealth, dungeonHealthTier)
 	}
 	return m.species().maxHealth
 }

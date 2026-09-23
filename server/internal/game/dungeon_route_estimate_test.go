@@ -56,7 +56,8 @@ func tieredBlows(kind vnet.MobKind) int {
 	def, _ := mobByKind(kind)
 	m := &mob{kind: kind, tiered: true}
 	per := m.armoured(IronSwordDamage)
-	return int((def.maxHealth*dungeonHealthTier + per - 1) / per)
+	// armoured floors a connecting blow at one, so per is never zero.
+	return int((uint32(tierScaled(def.maxHealth, dungeonHealthTier)) + uint32(per) - 1) / uint32(per))
 }
 
 // blowSeconds is how long a party of members takes to land blows among them.
@@ -205,9 +206,15 @@ func TestTheRouteEstimateFollowsTheBalance(t *testing.T) {
 	if got := blowSeconds(tieredBlows(vnet.MobKindDraugr), 1); got <= 0 {
 		t.Fatal("a draugr takes no time to kill")
 	}
-	d, _ := mobByKind(vnet.MobKindDraugr)
-	if want := int((d.maxHealth*dungeonHealthTier + IronSwordDamage - 1) / IronSwordDamage); tieredBlows(vnet.MobKindDraugr) != want {
-		t.Fatalf("a tiered draugr takes %d blows, want %d", tieredBlows(vnet.MobKindDraugr), want)
+	// Every dungeon species, through the same armour path the blade takes: the only thing
+	// this pins is the tier's multiplier over the row.
+	for _, kind := range []vnet.MobKind{vnet.MobKindDraugr, vnet.MobKindVargr, vnet.MobKindScorpion, vnet.MobKindCaveSpider} {
+		def, _ := mobByKind(kind)
+		per := uint32((&mob{kind: kind}).armoured(IronSwordDamage))
+		want := int((uint32(def.maxHealth)*uint32(dungeonHealthTier) + per - 1) / per)
+		if got := tieredBlows(kind); got != want {
+			t.Fatalf("a tiered %s takes %d blows, want %d", kind, got, want)
+		}
 	}
 	if base <= 0 || siegeSeconds(t, 0, 4) < float64(len(spiderWaveSizes)-1)*spiderWaveBreather.Seconds() {
 		t.Fatal(fmt.Sprint("the siege is shorter than its breathers: ", siegeSeconds(t, 0, 4)))

@@ -1,6 +1,8 @@
 package game
 
 import (
+	"math"
+
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -96,18 +98,17 @@ const (
 )
 
 // placeTieredMinorLocked places one of the dungeon's own lesser creatures: as
-// [Sim.placeMinorMobLocked], and at the dungeon's tier, whole.
+// [Sim.placeMinorMobLocked], and at the dungeon's tier, whole from the moment it exists.
 //
 // The caller holds Sim.mu.
 func (s *Sim) placeTieredMinorLocked(kind vnet.MobKind, pos [3]float64, zone box, buried bool) (uint64, bool) {
-	id, made := s.placeMinorMobLocked(kind, pos, zone, buried)
-	if !made {
-		return 0, false
-	}
-	m := s.mobs[id]
-	m.tiered = true
-	m.health = m.maxHealth()
-	return id, true
+	return s.placeMinorLocked(kind, pos, zone, buried, true)
+}
+
+// tierScaled is a row value under a tier, widened before the multiply and clamped to the
+// uint16 every health and blow is carried in, so no row can wrap however large it grows.
+func tierScaled(value, tier uint16) uint16 {
+	return uint16(min(uint32(value)*uint32(tier), math.MaxUint16))
 }
 
 // minorShare is how many of a group's or wave's slots a party of members meets: a
