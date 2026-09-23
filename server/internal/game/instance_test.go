@@ -169,7 +169,8 @@ func TestInstancePrivateCopiesShareOneEntityCounter(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	if len(seen) != 12 || ids.Load() != 12 {
+	// Two sessions, their two bosses and every placed minor slot each, and six drops.
+	if want := uint64(12 + 2*dungeonPlacedMinors); uint64(len(seen)) != want || ids.Load() != want {
 		t.Fatal("counter not singular")
 	}
 	one, two := instanceTestCharacter(1), instanceTestCharacter(2)
@@ -256,7 +257,7 @@ func TestInstanceLimitRefusesBeforeMintingOrAllocating(t *testing.T) {
 			t.Fatal("reentry bypassed cap", err)
 		}
 	}
-	if ids.Load() != 3 || m.Count() != 1 || len(m.visits) != 1 {
+	if ids.Load() != 3+dungeonPlacedMinors || m.Count() != 1 || len(m.visits) != 1 {
 		t.Fatal("refusal changed resources")
 	}
 	m.Leave(s.ID, instanceTestCharacter(1))
