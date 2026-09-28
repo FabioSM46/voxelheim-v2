@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Until #1314 implements forge repair, the declared intent gets an explicit refusal
+// Until #1314 implements forge repair, the declared intent gets an ordinary refusal
 // without closing an admitted session. Two answers prove the first request survived.
 func TestStationRepairContractStubAnswersWithoutDisconnecting(t *testing.T) {
 	t.Parallel()
@@ -19,7 +19,7 @@ func TestStationRepairContractStubAnswersWithoutDisconnecting(t *testing.T) {
 	}
 	waitUntil(t, "both station repair refusals", func() bool { return len(frames.actionRefusals()) == before+2 })
 	for _, got := range frames.actionRefusals()[before:] {
-		want := protocol.ActionRefused{Action: vnet.RefusedActionStationRepair, Reason: vnet.RefusalReasonMalformedKind}
+		want := protocol.ActionRefused{Action: vnet.RefusedActionStationRepair, Reason: vnet.RefusalReasonNotAtStation}
 		if got != want {
 			t.Errorf("refusal = %+v, want %+v", got, want)
 		}
