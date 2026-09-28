@@ -31,10 +31,13 @@ import (
 // the minor-spawn groups cleared (#1294). Version 1 is migrated rather than refused: a v1
 // entry is a v2 entry with no progress, which is exactly what a run saved before this
 // field existed had (its party still had to walk the whole route), so reading one as
-// empty lists loses nothing and invents nothing. The next autosave writes it back as v2.
-const SessionsVersion uint32 = 2
+// empty lists loses nothing and invents nothing. The next autosave writes the current format.
+// 3 adds opened chest indices; v1 and v2 migrate with no opened chests.
+const SessionsVersion uint32 = 3
 
-// legacySessionsVersion is the one older layout this build still reads: the v1 entry,
+const routeSessionsVersion uint32 = 2
+
+// legacySessionsVersion is the oldest layout this build still reads: the v1 entry,
 // which ends at its bound list and carries no route progress.
 const legacySessionsVersion uint32 = 1
 
@@ -45,6 +48,9 @@ const legacySessionsVersion uint32 = 1
 // dungeon can hold — a handful of puzzles and spawn groups — so a corrupt count is refused
 // long before it could describe an allocation worth worrying about.
 const MaxRouteProgress = 64
+
+// MaxOpenedChests bounds the length field before any allocation.
+const MaxOpenedChests = 64
 
 // MaxSavedSessions is the most saved sessions a file may declare.
 //
@@ -76,14 +82,16 @@ const MaxBoundCharacters = 1 << 8
 //	sessions.bin
 //	    magic[4] version:u32 count:u32
 //	    count × ( id:u64 seed:i64 cell_x:i64 cell_z:i64 expires_unix:i64
-//	              defeated:u8 bound:u16 checkpoints:u8 solved:u8 cleared:u8
+//	              defeated:u8 bound:u16 checkpoints:u8 solved:u8 cleared:u8 opened:u8
 //	              defeated × kind:u8
 //	              bound × (player:32 character:u64)
 //	              solved × puzzle:u8
-//	              cleared × group:u8 )
+//	              cleared × group:u8
+//	              opened × chest:u8 )
 //	    crc32:u32
 //
-// A v1 entry is the same without the three progress counts and their two lists.
+// A v2 entry omits the opened count and chest list. A v1 entry additionally
+// omits the three route progress counts and their two lists.
 //
 // **The progress is still the binding and not the world.** A solved puzzle is an index,
 // a cleared group is an index and the checkpoints are a count: game rebuilds the open
@@ -131,10 +139,11 @@ const (
 	// sessionEntryHeadSize is everything before the variable-length lists, and
 	// legacySessionEntryHeadSize the same in a v1 entry, which has no progress counts.
 	legacySessionEntryHeadSize = 8 + 8 + 8 + 8 + 8 + 1 + 2
-	sessionEntryHeadSize       = legacySessionEntryHeadSize + 1 + 1 + 1
+	routeSessionEntryHeadSize  = legacySessionEntryHeadSize + 1 + 1 + 1
+	sessionEntryHeadSize       = routeSessionEntryHeadSize + 1
 	sessionBoundSize           = identity.IDSize + 8
 
-	maxSessionEntrySize = sessionEntryHeadSize + MaxDefeatedBosses + MaxBoundCharacters*sessionBoundSize + 2*MaxRouteProgress
+	maxSessionEntrySize = sessionEntryHeadSize + MaxDefeatedBosses + MaxBoundCharacters*sessionBoundSize + 2*MaxRouteProgress + MaxOpenedChests
 	maxSessionsFileSize = sessionsHeaderSize + MaxSavedSessions*maxSessionEntrySize + world.ChecksumSize
 )
 
@@ -193,6 +202,8 @@ type SessionRecord struct {
 	SolvedPuzzles []uint8
 	// ClearedGroups is every minor-spawn group this run has cleared, by index.
 	ClearedGroups []uint8
+	// OpenedChests is every chest opened this run, by stable layout index.
+	OpenedChests []uint8
 }
 
 // SessionStore is one world's saved-sessions file.
@@ -336,8 +347,11 @@ func encodeSessions(records []SessionRecord) ([]byte, error) {
 			return nil, fmt.Errorf("%w: session %d records %d solved puzzles and %d cleared groups, more than the %d one entry can hold of each",
 				ErrTooManySessions, rec.ID, len(rec.SolvedPuzzles), len(rec.ClearedGroups), MaxRouteProgress)
 		}
+		if len(rec.OpenedChests) > MaxOpenedChests {
+			return nil, fmt.Errorf("%w: too many opened chests", ErrTooManySessions)
+		}
 		body += sessionEntryHeadSize + len(rec.DefeatedBosses) + len(rec.Bound)*sessionBoundSize +
-			len(rec.SolvedPuzzles) + len(rec.ClearedGroups)
+			len(rec.SolvedPuzzles) + len(rec.ClearedGroups) + len(rec.OpenedChests)
 	}
 
 	buf := world.NewRecord(sessionsHeaderSize, body, sessionsMagic, SessionsVersion)
@@ -357,6 +371,7 @@ func encodeSessions(records []SessionRecord) ([]byte, error) {
 		buf[at+43] = rec.Checkpoints
 		buf[at+44] = byte(len(rec.SolvedPuzzles))
 		buf[at+45] = byte(len(rec.ClearedGroups))
+		buf[at+46] = byte(len(rec.OpenedChests))
 		at += sessionEntryHeadSize
 
 		for _, kind := range rec.DefeatedBosses {
@@ -370,6 +385,7 @@ func encodeSessions(records []SessionRecord) ([]byte, error) {
 		}
 		at += copy(buf[at:], rec.SolvedPuzzles)
 		at += copy(buf[at:], rec.ClearedGroups)
+		at += copy(buf[at:], rec.OpenedChests)
 	}
 
 	world.PutChecksum(buf)
@@ -392,12 +408,15 @@ func decodeSessions(data []byte) ([]SessionRecord, error) {
 		return nil, fmt.Errorf("%w: %d bytes is shorter than an empty sessions file",
 			world.ErrCorruptStore, len(data))
 	}
-	// A v1 file is read in its own layout and comes back with no route progress; every
+	// V1 and v2 are read in their own layouts, with missing fields empty; every
 	// other version is held to this build's, so a newer file is still refused.
 	version := SessionsVersion
 	head := sessionEntryHeadSize
-	if binary.LittleEndian.Uint32(data[4:world.HeaderSize]) == legacySessionsVersion {
+	switch binary.LittleEndian.Uint32(data[4:world.HeaderSize]) {
+	case legacySessionsVersion:
 		version, head = legacySessionsVersion, legacySessionEntryHeadSize
+	case routeSessionsVersion:
+		version, head = routeSessionsVersion, routeSessionEntryHeadSize
 	}
 	if err := world.CheckHeader(data, sessionsMagic, version); err != nil {
 		return nil, err
@@ -428,20 +447,23 @@ func decodeSessions(data []byte) ([]SessionRecord, error) {
 		}
 		defeated := int(data[at+40])
 		bound := int(binary.LittleEndian.Uint16(data[at+41 : at+43]))
-		solved, cleared := 0, 0
-		if version == SessionsVersion {
+		solved, cleared, opened := 0, 0, 0
+		if version >= routeSessionsVersion {
 			rec.Checkpoints = data[at+43]
 			solved, cleared = int(data[at+44]), int(data[at+45])
 		}
+		if version == SessionsVersion {
+			opened = int(data[at+46])
+		}
 		at += head
 
-		if defeated > MaxDefeatedBosses || bound > MaxBoundCharacters || solved > MaxRouteProgress || cleared > MaxRouteProgress {
-			return nil, fmt.Errorf("%w: entry %d claims %d defeated encounters, %d bound characters, %d solved puzzles and %d cleared groups, past what one entry can hold",
-				world.ErrCorruptStore, i, defeated, bound, solved, cleared)
+		if defeated > MaxDefeatedBosses || bound > MaxBoundCharacters || solved > MaxRouteProgress || cleared > MaxRouteProgress || opened > MaxOpenedChests {
+			return nil, fmt.Errorf("%w: entry %d claims %d defeated encounters, %d bound characters, %d solved puzzles, %d cleared groups and %d opened chests, past what one entry can hold",
+				world.ErrCorruptStore, i, defeated, bound, solved, cleared, opened)
 		}
-		if at+defeated+bound*sessionBoundSize+solved+cleared > end {
-			return nil, fmt.Errorf("%w: entry %d claims %d defeated encounters, %d bound characters, %d solved puzzles and %d cleared groups, which do not fit in the remaining %d bytes",
-				world.ErrCorruptStore, i, defeated, bound, solved, cleared, end-at)
+		if at+defeated+bound*sessionBoundSize+solved+cleared+opened > end {
+			return nil, fmt.Errorf("%w: entry %d claims %d defeated encounters, %d bound characters, %d solved puzzles, %d cleared groups and %d opened chests, which do not fit in the remaining %d bytes",
+				world.ErrCorruptStore, i, defeated, bound, solved, cleared, opened, end-at)
 		}
 
 		if defeated > 0 {
@@ -467,6 +489,10 @@ func decodeSessions(data []byte) ([]SessionRecord, error) {
 		if cleared > 0 {
 			rec.ClearedGroups = append([]uint8(nil), data[at:at+cleared]...)
 			at += cleared
+		}
+		if opened > 0 {
+			rec.OpenedChests = append([]uint8(nil), data[at:at+opened]...)
+			at += opened
 		}
 		records = append(records, rec)
 	}

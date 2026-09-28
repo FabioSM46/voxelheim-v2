@@ -33,6 +33,8 @@ type InstanceGate struct {
 	opened map[int]bool
 	// mechanisms is every mechanism anchor, in declaration order.
 	mechanisms []PlacedAnchor
+	// chests are indexed separately; they are never puzzle mechanisms.
+	chests []PlacedAnchor
 	// drawn is what the drawing and the seed's overlay put in each door and mechanism
 	// cell: a shut door, an unpulled lever, a dark rune.
 	drawn map[[3]int64]Block
@@ -52,7 +54,7 @@ type InstanceCell struct {
 
 // InstanceUpdate is one atomic change to a dungeon's doors and mechanisms. Doors maps
 // a door index to whether it is open; Mechanisms names mechanism cells and the block
-// each should show — a lever up or down, a rune dark or lit.
+// each should show — a lever up or down, a rune dark or lit, a chest shut or open.
 type InstanceUpdate struct {
 	Doors      map[int]bool
 	Mechanisms []InstanceCell
@@ -106,7 +108,7 @@ func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Ca
 		}
 	}
 	for _, a := range b.Anchors {
-		if a.Kind != AnchorInstanceDoor && a.Kind != AnchorInstanceMechanism {
+		if a.Kind != AnchorInstanceDoor && a.Kind != AnchorInstanceMechanism && a.Kind != AnchorInstanceChest {
 			continue
 		}
 		key := [3]int64{a.X, a.Y, a.Z}
@@ -117,7 +119,11 @@ func (l instanceLayout) gated(seed int64, workers, capacity int, open bool) (*Ca
 			g.doors[a.Index] = append(g.doors[a.Index], a)
 			g.doorOf[key] = a.Index
 		} else {
-			g.mechanisms = append(g.mechanisms, a)
+			if a.Kind == AnchorInstanceChest {
+				g.chests = append(g.chests, a)
+			} else {
+				g.mechanisms = append(g.mechanisms, a)
+			}
 			g.shown[key] = g.drawn[key]
 		}
 	}
@@ -234,7 +240,13 @@ func (g *InstanceGate) Update(u InstanceUpdate) []InstanceCell {
 	}
 	slices.Sort(indices)
 	for _, cell := range u.Mechanisms {
-		if _, known := g.shown[[3]int64{cell.X, cell.Y, cell.Z}]; !known || !Mechanism(cell.Block) {
+		key := [3]int64{cell.X, cell.Y, cell.Z}
+		_, known := g.shown[key]
+		valid := Mechanism(cell.Block) && cell.Block != Chest
+		if g.drawn[key] == Chest {
+			valid = cell.Block == Chest || cell.Block == ChestOpen
+		}
+		if !known || !valid {
 			panic(fmt.Sprintf("instance cell %d,%d,%d is not a mechanism that can show block %d", cell.X, cell.Y, cell.Z, cell.Block))
 		}
 	}
@@ -312,7 +324,10 @@ func (g *InstanceGate) Mechanisms() []PlacedAnchor {
 	return slices.Clone(g.mechanisms)
 }
 
-// MechanismBlock is the block a mechanism cell shows now, and false for a cell that
+// Chests returns the immutable chest anchors, separate from puzzle mechanisms.
+func (g *InstanceGate) Chests() []PlacedAnchor { return slices.Clone(g.chests) }
+
+// MechanismBlock is the block a mechanism or chest cell shows now, and false for a cell that
 // is not a mechanism.
 func (g *InstanceGate) MechanismBlock(x, y, z int64) (Block, bool) {
 	g.cache.composeMu.Lock()

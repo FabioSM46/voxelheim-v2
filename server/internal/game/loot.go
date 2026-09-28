@@ -70,10 +70,12 @@ type corpse struct {
 	// report the registry's per-member health on the frame it falls. Zero for a corpse built
 	// without a creature, which reads the registry.
 	maxHealth uint16
+	// chest uses a voxel box for access and is never projected as a dead creature.
+	chest bool
 
 	owner     corpseOwner
 	container corpseContainer
-	// personal is non-nil only for boss corpses. Each stable character owns an
+	// personal is non-nil for boss corpses and dungeon chests. Each stable character owns an
 	// independent entry slice and revision; normal mobs keep one container above.
 	personal    map[corpseOwner]*corpseContainer
 	expiresTick uint64
@@ -114,6 +116,14 @@ func (c *corpse) entryCount() int {
 		count += len(container.entries)
 	}
 	return count
+}
+
+// box is the physical access boundary shared by take/open and regeneration.
+func (c *corpse) box() box {
+	if c.chest {
+		return box{min: c.pos, max: [3]float64{c.pos[0] + 1, c.pos[1] + 1, c.pos[2] + 1}}
+	}
+	return mobRegistry[c.kind].body.boxAt(c.pos)
 }
 
 func (c *corpse) state() protocol.MobState {
@@ -160,6 +170,9 @@ func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
 		shown = append(shown, mobSnapshot{state: states[index], chunk: m.chunk})
 	}
 	for _, c := range s.corpses {
+		if c.chest {
+			continue // its visual state is the authoritative block, never a MobState
+		}
 		shown = append(shown, mobSnapshot{state: c.state(), chunk: c.chunk, corpse: c})
 	}
 	for _, r := range s.residents {
@@ -513,7 +526,7 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the character's corpse container is empty")
 	}
 	reach := p.reachLocked()
-	if distance := boxDistance(p.box(), mobRegistry[c.kind].body.boxAt(c.pos)); math.IsNaN(distance) || distance > reach {
+	if distance := boxDistance(p.box(), c.box()); math.IsNaN(distance) || distance > reach {
 		return nil, nil, vnet.RefusalReasonOutOfReach, fmt.Errorf("the corpse is %.2f blocks away, past the reach of %.1f", distance, reach)
 	}
 	return c, container, vnet.RefusalReasonUnknown, nil
@@ -527,7 +540,7 @@ func (p *Player) canOpenCorpseLocked(c *corpse) bool {
 		!withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return false
 	}
-	return boxDistance(p.box(), mobRegistry[c.kind].body.boxAt(c.pos)) <= p.reachLocked()
+	return boxDistance(p.box(), c.box()) <= p.reachLocked()
 }
 
 func (c *corpse) lootState(container *corpseContainer) protocol.LootState {

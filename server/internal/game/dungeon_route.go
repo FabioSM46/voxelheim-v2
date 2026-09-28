@@ -62,6 +62,8 @@ type DungeonRoute struct {
 	// ClearedGroups is every minor-spawn group whose creatures are all dead; for the
 	// cave's burrows, once every spider wave has come out and died.
 	ClearedGroups []uint8
+	// OpenedChests persists only the once-per-run opening, never ordinary loot contents.
+	OpenedChests []uint8
 }
 
 // permanentPuzzles are the puzzles whose door stays open once solved, which are the only
@@ -72,6 +74,7 @@ var permanentPuzzles = [...]int{world.RunePuzzle, world.TwinLeverPuzzle}
 func (r DungeonRoute) clone() DungeonRoute {
 	r.SolvedPuzzles = slices.Clone(r.SolvedPuzzles)
 	r.ClearedGroups = slices.Clone(r.ClearedGroups)
+	r.OpenedChests = slices.Clone(r.OpenedChests)
 	return r
 }
 
@@ -203,7 +206,7 @@ func (s *Sim) DungeonRoute() DungeonRoute {
 	if d == nil {
 		return DungeonRoute{}
 	}
-	route := DungeonRoute{Checkpoints: uint8(d.checkpoints.reached)}
+	route := DungeonRoute{Checkpoints: uint8(d.checkpoints.reached), OpenedChests: slices.Clone(d.progress.route.OpenedChests)}
 	for _, puzzle := range permanentPuzzles {
 		if d.gate.DoorOpen(puzzle) {
 			route.SolvedPuzzles = append(route.SolvedPuzzles, uint8(puzzle))
