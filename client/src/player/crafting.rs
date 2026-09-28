@@ -24,7 +24,8 @@ use bevy::prelude::*;
 
 use super::inventory::{ApplyInventory, Inventory};
 use super::items::{
-    ITEM_BONE, ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE, ITEM_VARGR_PELT,
+    ITEM_BONE, ITEM_KING_RUNE, ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE,
+    ITEM_VARGR_PELT,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
 use super::{
@@ -39,6 +40,10 @@ use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 /// this item craftable and it cannot make another one a weapon. The server reads its own
 /// registry.
 pub(super) const ITEM_IRON_SWORD: u16 = 10;
+
+/// The king's rune bound into an iron blade; the server appends this product at 48.
+/// Display and click routing only; damage and durability remain server decisions.
+pub(super) const ITEM_RUNIC_SWORD: u16 = 48;
 
 /// Item id 11, what keeps a blade alive. Presentation only, for the reason above.
 pub(super) const ITEM_SHARPENING_STONE: u16 = 11;
@@ -155,7 +160,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 24] = [
+pub const RECIPES: [Recipe; 25] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -576,6 +581,25 @@ pub const RECIPES: [Recipe; 24] = [
         },
         station: None,
     },
+    Recipe {
+        id: RecipeId::RunicSword,
+        category: RecipeCategory::Tools,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_IRON_SWORD,
+                count: 1,
+            },
+            Ingredient {
+                item_id: ITEM_KING_RUNE,
+                count: 1,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_RUNIC_SWORD,
+            count: 1,
+        },
+        station: Some(StructureKind::EnchantingTable),
+    },
 ];
 
 /// What each of the three implements costs, spelled once.
@@ -895,7 +919,17 @@ mod tests {
             vec![(ITEM_STONE, 8), (ITEM_RAW_COAL, 2), (ITEM_LOG, 2)]
         );
 
+        assert_eq!(
+            cost(RecipeId::RunicSword),
+            vec![(ITEM_IRON_SWORD, 1), (ITEM_KING_RUNE, 1)]
+        );
+
         for (id, product, station) in [
+            (
+                RecipeId::RunicSword,
+                ITEM_RUNIC_SWORD,
+                Some(StructureKind::EnchantingTable),
+            ),
             (RecipeId::LeatherBench, ITEM_LEATHER_BENCH, None),
             (RecipeId::ArmourBench, ITEM_ARMOUR_BENCH, None),
             (RecipeId::EnchantingTable, ITEM_ENCHANTING_TABLE, None),
@@ -1007,11 +1041,6 @@ mod tests {
             if *member == fb::RecipeID::Unknown {
                 continue;
             }
-            // V47 declares the recipe; #1313 implements its server row, #1316 the mirror.
-            if *member == fb::RecipeID::RunicSword {
-                assert!(RECIPES.iter().all(|row| row.id.wire() != *member));
-                continue;
-            }
             let rows = RECIPES
                 .iter()
                 .filter(|row| row.id.wire() == *member)
@@ -1030,7 +1059,7 @@ mod tests {
         // than against a number typed here, for the reason the loop is.
         assert_eq!(
             RECIPES.len(),
-            fb::RecipeID::ENUM_VALUES.len() - 2, // Unknown and pending RunicSword (#1316).
+            fb::RecipeID::ENUM_VALUES.len() - 1, // Unknown is not a recipe.
             "the mirror holds a row the contract does not name, or two rows for one member"
         );
     }

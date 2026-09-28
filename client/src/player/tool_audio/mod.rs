@@ -5,7 +5,7 @@ pub(super) mod sounds;
 use super::{
     Body, EYE_HEIGHT, InputMode, LocalMount, SnapshotBuffer, WorldCamera,
     combat::{ITEM_RUSTY_SWORD, SwingAbandoned, SwingSent},
-    crafting::ITEM_IRON_SWORD,
+    crafting::{ITEM_IRON_SWORD, ITEM_RUNIC_SWORD},
     target::MiningFeedback,
 };
 use crate::{
@@ -425,7 +425,7 @@ fn update(
     // The transport's actual swing signal includes ranged actions. Only a melee blade
     // sweeps through air here; bow release, casting and landed impacts are not this cue.
     for item in swing_items {
-        if [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD].contains(&item)
+        if [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD, ITEM_RUNIC_SWORD].contains(&item)
             && !mount.mounted()
             && frame.visible(frame.local)
         {

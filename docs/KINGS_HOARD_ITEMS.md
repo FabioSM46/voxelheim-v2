@@ -1,7 +1,8 @@
 # King's hoard item handoff
 
-The server owns these rows and their progression. Client presentation and the recipe mirror
-arrive in #1316; until then the existing unknown-item fallback is intentional.
+The server owns these rows and their progression. The client mirrors their presentation and
+recipe in `player/items.rs` and `player/crafting.rs`; attack intent routing includes the runic
+sword in `player/combat.rs`. These client rows grant no gameplay capability.
 
 | ID | Server item | Display name | Existing shape for #1316 | Presentation |
 | --- | --- | --- | --- | --- |
