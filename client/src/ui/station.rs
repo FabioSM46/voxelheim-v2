@@ -67,7 +67,12 @@ impl Plugin for StationUiPlugin {
             .add_systems(Startup, spawn_station_ui)
             .add_systems(
                 Update,
-                (rebuild_recipe_rows, show_panel, show_prompt, scroll_station),
+                (
+                    rebuild_recipe_rows,
+                    show_panel,
+                    show_prompt.after(crate::player::ChestPromptUpdate),
+                    scroll_station,
+                ),
             )
             .add_systems(
                 Update,
@@ -376,17 +381,22 @@ fn show_panel(
 /// em dash, and a hint that draws a gap where its only punctuation should be hides the one
 /// thing it is for.
 fn show_prompt(
+    chest: Option<Res<crate::player::ChestHint>>,
     hint: Res<StationHint>,
     session: Option<Res<Session>>,
     mut prompts: Query<(&mut Text, &mut Visibility), With<StationPrompt>>,
 ) {
-    let shown = hint.0.filter(|_| session.is_some());
+    let shown = session.as_ref().and_then(|_| {
+        chest
+            .as_deref()
+            .and_then(|chest| chest.0.clone())
+            .or_else(|| hint.0.map(|kind| prompt_line(station_title(kind))))
+    });
     for (mut text, mut visibility) in &mut prompts {
-        if let Some(kind) = shown {
-            let line = prompt_line(station_title(kind));
-            if text.0 != line {
-                text.0 = line;
-            }
+        if let Some(line) = &shown
+            && text.0 != *line
+        {
+            text.0.clone_from(line);
         }
         let next = if shown.is_some() {
             Visibility::Visible
@@ -744,5 +754,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             forge
         );
+    }
+    #[test]
+    fn chest_reuses_the_station_prompt_and_wins_when_both_are_present() {
+        let mut app = app();
+        app.insert_resource(StationHint(Some(StructureKind::LeatherBench)));
+        app.insert_resource(crate::player::ChestHint(Some("F: Chest".to_owned())));
+        app.update();
+        let world = app.world_mut();
+        let mut prompts = world.query_filtered::<(&Text, &Visibility), With<StationPrompt>>();
+        let (text, visibility) = prompts.single(world).unwrap();
+        assert_eq!(text.0, "F: Chest");
+        assert_eq!(*visibility, Visibility::Visible);
     }
 }

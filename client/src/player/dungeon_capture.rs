@@ -23,6 +23,7 @@ const KING: f32 = 1.0;
 
 /// One fixed review camera: its id, the fixture state it is meant for, eye and target in
 /// the drawing's frame.
+#[derive(Clone, Copy)]
 struct View {
     id: &'static str,
     opened: bool,
@@ -41,7 +42,7 @@ const fn view(id: &'static str, opened: bool, eye: [f32; 3], target: [f32; 3]) -
 
 /// Every zone of the route, in route order. Interior views stand at a player's eye height
 /// on the zone's floor; the chasm view looks down the opened trapdoor from the arena floor.
-const VIEWS: [View; 14] = [
+const VIEWS: [View; 16] = [
     view(
         "arrival_court",
         false,
@@ -125,6 +126,18 @@ const VIEWS: [View; 14] = [
         true,
         [31.9, KING + EYE_HEIGHT, 80.5],
         [31.9, KING + 8.0, 100.0],
+    ),
+    view(
+        "chest_closed",
+        true,
+        [17.5, SAND + EYE_HEIGHT, 30.5],
+        [17.5, SAND + 0.5, 35.5],
+    ),
+    view(
+        "chest_open",
+        true,
+        [17.5, SAND + EYE_HEIGHT, 30.5],
+        [17.5, SAND + 0.5, 35.5],
     ),
 ];
 
@@ -258,7 +271,7 @@ fn capture_dungeon_production_zone() {
     )
     .expect("validated server-authored fixture");
     let id = std::env::var("DUNGEON_CAPTURE_VIEW").expect("a fixed camera id");
-    let view = VIEWS
+    let mut view = *VIEWS
         .iter()
         .find(|v| v.id == id)
         .expect("unknown fixed camera id");
@@ -268,6 +281,24 @@ fn capture_dungeon_production_zone() {
         "this view is reviewed with the doors {}",
         if view.opened { "opened" } else { "as drawn" }
     );
+    if id.starts_with("chest_") {
+        // Exactly five blocks from the chest centre, at the production standing eye.
+        view.eye[2] = view.target[2] - (25.0 - (EYE_HEIGHT - 0.5).powi(2)).sqrt();
+        let cell: [usize; 3] = std::array::from_fn(|axis| {
+            (fixture.building_origin[axis] + [17, 10, 35][axis] - fixture.origin[axis]) as usize
+        });
+        let block =
+            fixture.blocks[(cell[1] * fixture.size[2] + cell[2]) * fixture.size[0] + cell[0]];
+        assert_eq!(
+            block,
+            if id == "chest_open" {
+                palette::CHEST_OPEN
+            } else {
+                palette::CHEST
+            },
+            "capture must show the requested server-authored chest state"
+        );
+    }
     let output: std::path::PathBuf = std::env::var("DUNGEON_CAPTURE_OUTPUT")
         .expect("output path")
         .into();
@@ -343,7 +374,14 @@ fn capture_dungeon_production_zone() {
         adapter.driver_info.replace(['\n', '\r'], " "),
         adapter.backend,
     );
-    std::fs::write(output.with_extension("txt"), manifest).unwrap();
+    let source = std::env::var("DUNGEON_CAPTURE_SOURCE_COMMIT").expect("source commit");
+    assert!(source.len() == 40 && source.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let distance = Vec3::from_array(view.eye).distance(Vec3::from_array(view.target));
+    std::fs::write(
+        output.with_extension("txt"),
+        format!("source_commit={source}\neye_target_distance={distance}\n{manifest}"),
+    )
+    .unwrap();
 }
 
 #[test]

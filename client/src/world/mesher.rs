@@ -1099,7 +1099,9 @@ fn build_architecture(
             for x in 0..size {
                 let cell = [x, y, z];
                 let block = chunk.block(cell);
-                if palette::is_lever(block) {
+                if palette::is_chest(block) {
+                    dungeon::push_chest(mesh, cell, block);
+                } else if palette::is_lever(block) {
                     dungeon::push_lever(mesh, cell, block);
                 } else if palette::glows(block) {
                     dungeon::push_rune(glow, chunk, neighbours, cell);
@@ -6862,6 +6864,34 @@ mod tests {
             [second[1], second[2]],
             "the second web is the first one moved a block"
         );
+    }
+
+    #[test]
+    fn chest_lid_rises_within_its_cell_and_exposes_a_dark_recess() {
+        let mut tops = Vec::new();
+        for block in [palette::CHEST, palette::CHEST_OPEN] {
+            let mut chunk = air(SIZE);
+            chunk.set(5, 6, 7, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            assert!(mesh.cover.is_empty() && mesh.water.is_empty() && mesh.glow.is_empty());
+            assert!(palette::is_solid(block) && !palette::is_greedy_opaque(block));
+            let mut top = 0.0f32;
+            for vertex in &mesh.opaque.positions {
+                for (axis, coordinate) in vertex.iter().enumerate() {
+                    assert!(
+                        (([5.0, 6.0, 7.0][axis])..=([6.0, 7.0, 8.0][axis])).contains(coordinate)
+                    );
+                }
+                top = top.max(vertex[1]);
+            }
+            assert!(
+                mesh.opaque
+                    .colors
+                    .contains(&opaque(palette::CHEST_OPEN_LINEAR))
+            );
+            tops.push(top);
+        }
+        assert!(tops[1] > tops[0] + 0.25, "open lid changes the silhouette");
     }
 
     #[test]

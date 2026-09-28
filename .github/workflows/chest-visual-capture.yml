@@ -1,0 +1,90 @@
+name: Chest visual capture
+
+# Opt-in evidence for #1315. This expensive software renderer never runs in CI.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full merged develop commit to capture
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chest-visual-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      DUNGEON_CAPTURE_SOURCE_COMMIT: ${{ inputs.source_sha }}
+      DUNGEON_CAPTURE_STATE: opened
+      DUNGEON_CAPTURE_SEED: '0'
+      DUNGEON_CAPTURE_TICK: '6000'
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify captured commit is on develop
+        run: |
+          [[ "$DUNGEON_CAPTURE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$DUNGEON_CAPTURE_SOURCE_COMMIT"
+          git merge-base --is-ancestor "$DUNGEON_CAPTURE_SOURCE_COMMIT" origin/develop
+          mkdir -p evidence "$RUNNER_TEMP/chest-capture" "$RUNNER_TEMP/chest-xdg"
+          chmod 700 "$RUNNER_TEMP/chest-xdg"
+          printf 'source_commit=%s\n' "$DUNGEON_CAPTURE_SOURCE_COMMIT" > evidence/source.txt
+      - name: Install capture dependencies and software Vulkan
+        timeout-minutes: 5
+        run: |
+          bash scripts/apt-install-with-fallback.sh libasound2-dev libudev-dev libopus-dev pkg-config mesa-vulkan-drivers
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json')
+          test "${#drivers[@]}" -eq 1
+          printf 'VK_ICD_FILENAMES=%s\nXDG_RUNTIME_DIR=%s\n' "${drivers[0]}" "$RUNNER_TEMP/chest-xdg" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Export authoritative closed and open sand-hall fixtures
+        working-directory: server
+        run: |
+          for state in closed open; do
+            export DUNGEON_CAPTURE_CHEST="$state"
+            export DUNGEON_CAPTURE_FIXTURE="$RUNNER_TEMP/chest-capture/$state.bin"
+            go test ./internal/world -run '^TestExportDungeonCaptureFixture$' -count=1
+            go test ./internal/game -run '^TestExportDungeonCaptureSnapshot$' -count=1
+            cp "$DUNGEON_CAPTURE_FIXTURE.json" "../evidence/$state.fixture.json"
+            cp "$DUNGEON_CAPTURE_FIXTURE.snapshot.json" "../evidence/$state.snapshot.json"
+          done
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: client
+          shared-key: client-gates
+      - name: Capture both chest states at five blocks in production cave lighting
+        working-directory: client
+        run: |
+          for state in closed open; do
+            export DUNGEON_CAPTURE_FIXTURE="$RUNNER_TEMP/chest-capture/$state.bin"
+            export DUNGEON_CAPTURE_SNAPSHOT="$DUNGEON_CAPTURE_FIXTURE.snapshot"
+            export DUNGEON_CAPTURE_VIEW="chest_$state"
+            export DUNGEON_CAPTURE_OUTPUT="$GITHUB_WORKSPACE/evidence/chest_$state.png"
+            cargo test --workspace --locked capture_dungeon_production_zone -- --ignored --nocapture --test-threads=1
+            test -s "$DUNGEON_CAPTURE_OUTPUT"
+          done
+      - name: Record image checksums
+        working-directory: evidence
+        run: sha256sum chest_closed.png chest_open.png > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chest-visual-${{ inputs.source_sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7

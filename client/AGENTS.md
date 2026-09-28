@@ -3365,3 +3365,15 @@ Recorded here so the next reader does not mistake them for oversights:
   that fades an entity out, and none that says "this session is stale": a quiet server is a
   legitimate state, and the read timeout in `session.rs` is a poll interval rather than a session
   timeout. Deadlines belong to the same issue on both sides.
+
+### Chest loot presentation
+
+Chest and ChestOpen are server-owned solid blocks, drawn with an enclosed or raised lid
+inside their cell. They share the existing aimed-mechanism sender and the station prompt;
+Interact priority is corpse, chest, station, ordinary mechanism, player, resident. Never
+synthesize a MobState for a chest. Loot presentation keeps one outstanding chest request,
+created only after a queued outbound frame; cancellation retains a reply tombstone until
+its response/refusal drains, so a late reply cannot attach to a new chest. Equal-revision
+reopening requires an explicit request. Corpse snapshot/revision/dismissal guards remain
+separate, and world/session reset clears all presentation associations. The manual-only
+remote capture workflow and evidence procedure are in `docs/CHEST_CLIENT_CAPTURE.md`.

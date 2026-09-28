@@ -215,6 +215,71 @@ pub(super) fn push_lever(mesh: &mut SurfaceMesh, cell: [usize; 3], block: BlockI
     );
 }
 
+/// A wooden chest with bronze bands. The open lid stands vertically at the back,
+/// exposing a dark cavity; both silhouettes remain inside the authoritative solid cell.
+pub(super) fn push_chest(mesh: &mut SurfaceMesh, cell: [usize; 3], block: BlockId) {
+    let origin = cell.map(|v| v as f32);
+    let mut part = |centre: [f32; 3], half: [f32; 3], color: [f32; 3]| {
+        push_box(
+            mesh,
+            std::array::from_fn(|i| origin[i] + centre[i]),
+            [
+                [half[0], 0.0, 0.0],
+                [0.0, half[1], 0.0],
+                [0.0, 0.0, half[2]],
+            ],
+            opaque(color),
+        );
+    };
+    let wood = palette::CHEST_LINEAR;
+    let bronze = palette::LEVER_GRIP_LINEAR;
+    // Bottom and four walls leave a real recess, visible when the lid rises.
+    part(
+        [0.5, 0.10, 0.5],
+        [0.46, 0.10, 0.40],
+        palette::CHEST_OPEN_LINEAR,
+    );
+    for z in [0.14, 0.86] {
+        part([0.5, 0.32, z], [0.46, 0.23, 0.04], wood);
+    }
+    for x in [0.08, 0.92] {
+        part([x, 0.32, 0.5], [0.04, 0.23, 0.32], wood);
+    }
+    let open = block == palette::CHEST_OPEN;
+    part(
+        if open {
+            [0.5, 0.75, 0.87]
+        } else {
+            [0.5, 0.62, 0.5]
+        },
+        if open {
+            [0.46, 0.24, 0.045]
+        } else {
+            [0.46, 0.07, 0.40]
+        },
+        wood,
+    );
+    for x in [0.25, 0.75] {
+        part([x, 0.32, 0.095], [0.035, 0.23, 0.008], bronze);
+        part(
+            if open {
+                [x, 0.75, 0.818]
+            } else {
+                [x, 0.696, 0.5]
+            },
+            if open {
+                [0.035, 0.24, 0.008]
+            } else {
+                [0.035, 0.008, 0.40]
+            },
+            bronze,
+        );
+    }
+    if !open {
+        part([0.5, 0.53, 0.086], [0.055, 0.075, 0.012], bronze);
+    }
+}
+
 /// A closed box about `centre` whose three half-extent vectors `axes` are right-handed.
 ///
 /// Each face is wound so the normal [`face_normal`] derives from its corners points out

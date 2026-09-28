@@ -1,4 +1,4 @@
-//! Client-side presentation and intent for server-owned corpse containers.
+//! Client-side presentation and intent for server-owned corpse and chest containers.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,26 +11,43 @@ use super::{
     PlayerTradePromptRequest, SelfVitals, SnapshotBuffer,
 };
 use crate::net::{
-    LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest,
-    MechanismUseRequest, NpcInteractRequest, Outbound, Session, encode_loot_open_request,
-    encode_loot_take_all_request, encode_loot_take_request, encode_mechanism_use_request,
-    encode_npc_interact_request,
+    ActionRefused, BlockCoord, LootEvent, LootInbox, LootOpenRequest, LootState,
+    LootTakeAllRequest, LootTakeRequest, MechanismUseRequest, NpcInteractRequest, Outbound, Sent,
+    Session, encode_loot_open_request, encode_loot_take_all_request, encode_loot_take_request,
+    encode_mechanism_use_request, encode_npc_interact_request,
 };
 use crate::settings::{Control, Settings};
 
 use super::constants::MAX_REACH;
 
-/// The newest complete corpse-container answer currently shown.
+/// The newest complete loot-container answer currently shown.
 #[derive(Resource, Debug, Default)]
 pub struct LootWindow {
     current: Option<LootState>,
     newest_revision: HashMap<u64, u32>,
     dismissed: HashSet<u64>,
+    // Presentation correlation only. Positions never imply opened state or entitlement.
+    chest_containers: HashMap<BlockCoord, u64>,
+    pending_chest: Option<(BlockCoord, f64)>,
+    known_mobs: HashSet<u64>,
+    // Cancellation keeps one tombstone until its ordered reply arrives. Reusing the
+    // pending slot sooner could mistake a delayed reply for a different chest.
+    abandoned_chest: Option<BlockCoord>,
+    chest_refusals: Vec<ActionRefused>,
 }
 
 impl LootWindow {
     pub fn state(&self) -> Option<&LootState> {
         self.current.as_ref()
+    }
+
+    pub(crate) fn take_chest_refusal(&mut self, refused: &ActionRefused) -> bool {
+        if let Some(index) = self.chest_refusals.iter().position(|held| held == refused) {
+            self.chest_refusals.remove(index);
+            true
+        } else {
+            false
+        }
     }
 
     fn dismiss_current(&mut self) {
@@ -44,7 +61,7 @@ impl LootWindow {
         Self {
             newest_revision: HashMap::from([(state.corpse_id, state.revision)]),
             current: Some(state),
-            dismissed: HashSet::new(),
+            ..Default::default()
         }
     }
 }
@@ -59,6 +76,9 @@ pub struct LootTakeClick(pub u64);
 /// same frame as the edge-triggered key without moving targeting into the UI controller.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct OriginateInteract;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ReconcileLoot;
 
 pub(super) struct LootPlugin;
 
@@ -75,7 +95,8 @@ impl Plugin for LootPlugin {
                 reconcile_loot
                     .after(crate::net::DrainNetwork)
                     .after(ApplySnapshots)
-                    .before(ApplyInputMode),
+                    .before(ApplyInputMode)
+                    .in_set(ReconcileLoot),
             )
             .add_systems(
                 Update,
@@ -94,6 +115,7 @@ impl Plugin for LootPlugin {
 
 /// Applies server answers in order and closes any view the newest snapshot invalidated.
 fn reconcile_loot(
+    time: Res<Time>,
     mut inbox: ResMut<LootInbox>,
     buffer: Res<SnapshotBuffer>,
     session: Option<Res<Session>>,
@@ -101,24 +123,103 @@ fn reconcile_loot(
     mut window: ResMut<LootWindow>,
     mut mode: ResMut<InputMode>,
 ) {
+    if session.is_none() {
+        inbox.take();
+        *window = LootWindow::default();
+        if *mode == InputMode::Loot {
+            *mode = InputMode::Playing;
+        }
+        return;
+    }
+    if let Some(snapshot) = buffer.latest_snapshot() {
+        window
+            .known_mobs
+            .extend(snapshot.mobs.iter().map(|mob| mob.entity_id));
+    }
+    let cancelled = vitals.dead()
+        || *mode != InputMode::Playing
+        || window
+            .pending_chest
+            .is_some_and(|(_, deadline)| time.elapsed_secs_f64() >= deadline);
+    if cancelled && let Some((pos, _)) = window.pending_chest.take() {
+        window.abandoned_chest = Some(pos);
+    }
+    window.chest_refusals.clear();
     for event in inbox.take() {
         match event {
             LootEvent::State(state) => {
+                if let Some(pos) = window.abandoned_chest
+                    && !window.known_mobs.contains(&state.corpse_id)
+                    && !window
+                        .chest_containers
+                        .iter()
+                        .any(|(other, id)| other != &pos && *id == state.corpse_id)
+                {
+                    window.chest_containers.insert(pos, state.corpse_id);
+                    window.dismissed.insert(state.corpse_id);
+                    window.abandoned_chest = None;
+                    continue;
+                }
+                let pending = window.pending_chest.filter(|(pos, _)| {
+                    !window.known_mobs.contains(&state.corpse_id)
+                        && window
+                            .newest_revision
+                            .get(&state.corpse_id)
+                            .is_none_or(|newest| state.revision >= *newest)
+                        && window
+                            .chest_containers
+                            .get(pos)
+                            .is_none_or(|id| *id == state.corpse_id)
+                        && !window
+                            .chest_containers
+                            .iter()
+                            .any(|(other, id)| other != pos && *id == state.corpse_id)
+                });
+                let active_chest = window
+                    .current
+                    .as_ref()
+                    .is_some_and(|current| current.corpse_id == state.corpse_id)
+                    && window
+                        .chest_containers
+                        .values()
+                        .any(|id| *id == state.corpse_id);
                 let stale = window
                     .newest_revision
                     .get(&state.corpse_id)
                     .is_some_and(|newest| state.revision <= *newest);
-                if stale
-                    || window.dismissed.contains(&state.corpse_id)
-                    || !buffer.corpse_is_accessible(state.corpse_id)
+                // Only a requested chest reply can reopen a dismissed container at the
+                // same revision. Corpse replies retain their snapshot and revision guards.
+                if pending.is_none()
+                    && (stale
+                        || window.dismissed.contains(&state.corpse_id)
+                        || (!active_chest && !buffer.corpse_is_accessible(state.corpse_id)))
                 {
                     continue;
+                }
+                if vitals.dead() {
+                    continue;
+                }
+                if let Some((pos, _)) = pending {
+                    window.chest_containers.insert(pos, state.corpse_id);
+                    window.dismissed.remove(&state.corpse_id);
+                    window.pending_chest = None;
                 }
                 window
                     .newest_revision
                     .insert(state.corpse_id, state.revision);
                 window.current = Some(state);
                 *mode = InputMode::Loot;
+            }
+            LootEvent::MechanismRefused(refused) => {
+                let pos = window
+                    .pending_chest
+                    .map(|(pos, _)| pos)
+                    .or(window.abandoned_chest);
+                if pos.is_some() && refused.anchor == pos {
+                    window.chest_refusals.push(refused);
+                    window.pending_chest = None;
+                    window.abandoned_chest = None;
+                }
             }
             LootEvent::Closed(closed) => {
                 window.dismissed.insert(closed.corpse_id);
@@ -136,19 +237,14 @@ fn reconcile_loot(
         }
     }
 
-    if session.is_none() {
-        *window = LootWindow::default();
-        if *mode == InputMode::Loot {
-            *mode = InputMode::Playing;
-        }
-        return;
-    }
-
     let invalid = vitals.dead()
-        || window
-            .current
-            .as_ref()
-            .is_some_and(|state| !buffer.corpse_is_accessible(state.corpse_id));
+        || window.current.as_ref().is_some_and(|state| {
+            !buffer.corpse_is_accessible(state.corpse_id)
+                && !window
+                    .chest_containers
+                    .values()
+                    .any(|id| *id == state.corpse_id)
+        });
     if invalid {
         window.dismiss_current();
         if *mode == InputMode::Loot {
@@ -160,6 +256,7 @@ fn reconcile_loot(
 /// Originates open/take requests; neither path edits the shown container or inventory.
 #[derive(bevy::ecs::system::SystemParam)]
 struct LootIntent<'w> {
+    time: Res<'w, Time>,
     keys: Option<Res<'w, ButtonInput<KeyCode>>>,
     settings: Option<Res<'w, Settings>>,
     gate: InputGate<'w>,
@@ -181,6 +278,7 @@ fn send_loot_intents(
     mut window: ResMut<LootWindow>,
 ) {
     let LootIntent {
+        time,
         keys,
         settings,
         gate,
@@ -239,7 +337,11 @@ fn send_loot_intents(
         return;
     }
 
-    if !gate.may_act() || !interact {
+    if !gate.may_act()
+        || !interact
+        || window.pending_chest.is_some()
+        || window.abandoned_chest.is_some()
+    {
         return;
     }
     let Some(session) = session else {
@@ -258,6 +360,24 @@ fn send_loot_intents(
             corpse_id,
             client_tick: cadence.client_tick,
         }));
+        return;
+    }
+
+    // A chest takes the key after corpses and before stations. Only a queued request
+    // creates pending context; a dropped/disconnected outbound frame cannot open a UI.
+    if let Some(aimed) = mechanism
+        .as_deref()
+        .and_then(|aimed| aimed.0)
+        .filter(|aimed| crate::world::palette::is_chest(aimed.block))
+    {
+        if let Some(outbound) = outbound.as_deref_mut()
+            && outbound.send(encode_mechanism_use_request(&MechanismUseRequest {
+                pos: aimed.pos,
+                client_tick: cadence.client_tick,
+            })) == Sent::Queued
+        {
+            window.pending_chest = Some((aimed.pos, time.elapsed_secs_f64() + 5.0));
+        }
         return;
     }
 
@@ -1315,5 +1435,280 @@ mod tests {
             })
         );
         assert!(frames.try_recv().is_err());
+    }
+    fn chest_app(block: crate::world::BlockId) -> (App, Receiver<Vec<u8>>, BlockCoord) {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            ..Default::default()
+        });
+        let pos = BlockCoord { x: 2, y: 64, z: 0 };
+        app.insert_resource(crate::player::mechanism::AimedMechanism(Some(
+            crate::player::mechanism::Aimed { pos, block },
+        )));
+        (app, frames, pos)
+    }
+
+    fn press_chest(app: &mut App, frames: &Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        keyboard_frame(
+            app,
+            frames,
+            [key_event(KeyCode::KeyF, ButtonState::Released, false)],
+        );
+        keyboard_frame(
+            app,
+            frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        )
+    }
+
+    fn chest_state() -> LootState {
+        LootState {
+            corpse_id: 900,
+            ..state(3, 21)
+        }
+    }
+
+    #[test]
+    fn both_chest_blocks_send_one_use_and_open_only_from_the_server() {
+        for block in [
+            crate::world::palette::CHEST,
+            crate::world::palette::CHEST_OPEN,
+        ] {
+            let (mut app, frames, pos) = chest_app(block);
+            assert_eq!(
+                press_chest(&mut app, &frames),
+                vec![encode_mechanism_use_request(&MechanismUseRequest {
+                    pos,
+                    client_tick: 0
+                })]
+            );
+            assert!(app.world().resource::<LootWindow>().state().is_none());
+            assert!(
+                press_chest(&mut app, &frames).is_empty(),
+                "one request remains outstanding"
+            );
+            app.world_mut()
+                .resource_mut::<LootInbox>()
+                .push(LootEvent::State(chest_state()));
+            app.update();
+            assert_eq!(
+                app.world().resource::<LootWindow>().state(),
+                Some(&chest_state())
+            );
+            assert_eq!(*app.world().resource::<InputMode>(), InputMode::Loot);
+            // Dismissal rejects unsolicited equal-revision replies; an explicit reopen
+            // may show that same server-owned remainder without inventing a revision.
+            *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+            app.update();
+            app.world_mut()
+                .resource_mut::<LootInbox>()
+                .push(LootEvent::State(chest_state()));
+            app.update();
+            assert!(app.world().resource::<LootWindow>().state().is_none());
+            assert_eq!(press_chest(&mut app, &frames).len(), 1);
+            app.world_mut()
+                .resource_mut::<LootInbox>()
+                .push(LootEvent::State(chest_state()));
+            app.update();
+            assert_eq!(
+                app.world().resource::<LootWindow>().state(),
+                Some(&chest_state())
+            );
+        }
+    }
+
+    #[test]
+    fn chest_outbound_failure_never_creates_presentation_authority() {
+        for closed in [false, true] {
+            let (mut app, frames, _) = chest_app(crate::world::palette::CHEST);
+            let (outbound, receiver) = Outbound::to_a_test(1);
+            app.insert_resource(outbound);
+            if closed {
+                drop(receiver);
+            } else {
+                assert_eq!(
+                    app.world_mut().resource_mut::<Outbound>().send(vec![0]),
+                    Sent::Queued
+                );
+                // Keep the receiver alive and queue full through the key frame.
+                press_chest(&mut app, &frames);
+                assert!(app.world().resource::<LootWindow>().pending_chest.is_none());
+                drop(receiver);
+            }
+            press_chest(&mut app, &frames);
+            assert!(app.world().resource::<LootWindow>().pending_chest.is_none());
+            app.world_mut()
+                .resource_mut::<LootInbox>()
+                .push(LootEvent::State(chest_state()));
+            app.update();
+            assert!(app.world().resource::<LootWindow>().state().is_none());
+        }
+    }
+
+    #[test]
+    fn cancelled_chest_reply_cannot_be_attached_to_a_new_request() {
+        let (mut app, frames, pos) = chest_app(crate::world::palette::CHEST);
+        press_chest(&mut app, &frames);
+        // Expiry cancels presentation but retains an outstanding-reply tombstone.
+        app.world_mut().resource_mut::<LootWindow>().pending_chest = Some((pos, 0.0));
+        app.update();
+        assert_eq!(
+            app.world().resource::<LootWindow>().abandoned_chest,
+            Some(pos)
+        );
+        assert!(press_chest(&mut app, &frames).is_empty());
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(chest_state()));
+        app.update();
+        assert!(app.world().resource::<LootWindow>().state().is_none());
+        let other = BlockCoord { x: 3, ..pos };
+        app.world_mut()
+            .resource_mut::<crate::player::mechanism::AimedMechanism>()
+            .0
+            .as_mut()
+            .unwrap()
+            .pos = other;
+        assert_eq!(press_chest(&mut app, &frames).len(), 1);
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(chest_state()));
+        app.update();
+        assert!(
+            app.world().resource::<LootWindow>().state().is_none(),
+            "old container belongs to the previous position"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<LootWindow>()
+                .pending_chest
+                .unwrap()
+                .0,
+            other
+        );
+    }
+
+    #[test]
+    fn matching_refusal_cancels_pending_and_retains_one_contextual_hud_answer() {
+        let (mut app, frames, pos) = chest_app(crate::world::palette::CHEST);
+        press_chest(&mut app, &frames);
+        let refused = ActionRefused {
+            action: crate::net::RefusedAction::UseMechanism,
+            reason: crate::net::RefusalReason::MechanismLocked,
+            anchor: Some(pos),
+        };
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::MechanismRefused(ActionRefused {
+                anchor: Some(BlockCoord { x: 99, ..pos }),
+                ..refused
+            }));
+        app.update();
+        assert!(app.world().resource::<LootWindow>().pending_chest.is_some());
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::MechanismRefused(refused));
+        app.update();
+        {
+            let mut window = app.world_mut().resource_mut::<LootWindow>();
+            assert!(window.pending_chest.is_none());
+            assert!(window.take_chest_refusal(&refused));
+            assert!(!window.take_chest_refusal(&refused));
+        }
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(chest_state()));
+        app.update();
+        assert!(app.world().resource::<LootWindow>().state().is_none());
+    }
+
+    #[test]
+    fn an_old_corpse_reply_during_chest_pending_keeps_snapshot_guards() {
+        let (mut app, frames, _) = chest_app(crate::world::palette::CHEST);
+        // Observe this corpse before its authoritative accessibility disappears.
+        let mut seen = snapshot();
+        seen.server_tick = 2;
+        app.world_mut()
+            .resource_mut::<SnapshotBuffer>()
+            .accept(seen, Instant::now());
+        app.update();
+        let seen = Snapshot {
+            server_tick: 3,
+            entities: vec![me()],
+            ..Default::default()
+        };
+        app.world_mut()
+            .resource_mut::<SnapshotBuffer>()
+            .accept(seen, Instant::now());
+        app.update();
+        press_chest(&mut app, &frames);
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(state(50, 99)));
+        app.update();
+        assert!(app.world().resource::<LootWindow>().state().is_none());
+        assert!(app.world().resource::<LootWindow>().pending_chest.is_some());
+        crate::player::reset_world(app.world_mut());
+        assert!(app.world().resource::<LootWindow>().known_mobs.is_empty());
+        assert!(app.world().resource::<LootWindow>().pending_chest.is_none());
+    }
+    #[test]
+    fn corpse_keeps_priority_and_chest_precedes_the_aimed_station() {
+        for corpse_present in [false, true] {
+            let (mut app, frames, pos) = chest_app(crate::world::palette::CHEST);
+            app.insert_resource(forge_in_sight());
+            if corpse_present {
+                let mut seen = snapshot();
+                seen.server_tick = 2;
+                app.world_mut()
+                    .resource_mut::<SnapshotBuffer>()
+                    .accept(seen, Instant::now());
+            }
+            let sent = press_chest(&mut app, &frames);
+            let expected = if corpse_present {
+                encode_loot_open_request(&LootOpenRequest {
+                    corpse_id: CORPSE,
+                    client_tick: 0,
+                })
+            } else {
+                encode_mechanism_use_request(&MechanismUseRequest {
+                    pos,
+                    client_tick: 0,
+                })
+            };
+            assert_eq!(sent, vec![expected]);
+            assert_eq!(
+                app.world().resource::<LootWindow>().pending_chest.is_some(),
+                !corpse_present
+            );
+        }
+    }
+
+    #[test]
+    fn death_and_modal_cancel_drain_the_reply_without_opening_loot() {
+        for dead in [false, true] {
+            let (mut app, frames, _) = chest_app(crate::world::palette::CHEST);
+            press_chest(&mut app, &frames);
+            if dead {
+                app.insert_resource(SelfVitals::from_server(PlayerVitals {
+                    health: 0,
+                    life_state: LifeState::Dead,
+                    ..PlayerVitals::unharmed()
+                }));
+            } else {
+                *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+            }
+            app.world_mut()
+                .resource_mut::<LootInbox>()
+                .push(LootEvent::State(chest_state()));
+            app.update();
+            let window = app.world().resource::<LootWindow>();
+            assert!(
+                window.state().is_none()
+                    && window.pending_chest.is_none()
+                    && window.abandoned_chest.is_none()
+            );
+        }
     }
 }

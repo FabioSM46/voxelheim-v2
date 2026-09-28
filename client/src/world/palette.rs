@@ -168,8 +168,12 @@ pub fn is_portal(block: BlockId) -> bool {
     matches!(block, PORTAL_VEIL | PORTAL_HEART)
 }
 
-/// Whether `block` is one of the dungeon's two lever states. Solid to a body, drawn as a
-/// plinth and a handle by the mesher rather than swept as a cube.
+/// The two server-owned chest block states share one cosmetic mesh family.
+pub const fn is_chest(block: BlockId) -> bool {
+    matches!(block, CHEST | CHEST_OPEN)
+}
+
+/// Whether a solid lever is drawn as a plinth and handle rather than swept as a cube.
 pub const fn is_lever(block: BlockId) -> bool {
     matches!(block, LEVER_OFF | LEVER_ON)
 }
@@ -530,6 +534,7 @@ pub fn is_solid(block: BlockId) -> bool {
 pub fn is_opaque(block: BlockId) -> bool {
     !is_grille(block)
         && !is_lever(block)
+        && !is_chest(block)
         && block != AIR
         && !is_water(block)
         && !is_cover(block)
@@ -798,8 +803,8 @@ const LEVER_ON_LINEAR: [f32; 3] = [0.16, 0.13, 0.085];
 pub const LEVER_PLINTH_LINEAR: [f32; 3] = [0.068_478, 0.072_272, 0.080_220];
 /// The grip at a lever's tip: bronze, the one warm colour on it.
 pub const LEVER_GRIP_LINEAR: [f32; 3] = [0.30, 0.16, 0.05];
-const CHEST_LINEAR: [f32; 3] = [0.19, 0.075, 0.025];
-const CHEST_OPEN_LINEAR: [f32; 3] = [0.12, 0.045, 0.015];
+pub const CHEST_LINEAR: [f32; 3] = [0.34, 0.14, 0.045];
+pub const CHEST_OPEN_LINEAR: [f32; 3] = [0.055, 0.022, 0.009];
 /// A lit rune's stone: the unlit [`RUNE_STONE_LINEAR`] with the cold of its own light
 /// in it.
 const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.03, 0.085, 0.1];
@@ -1220,6 +1225,7 @@ mod tests {
                 || is_portal(block)
                 || is_grille(block)
                 || is_lever(block)
+                || is_chest(block)
             {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;

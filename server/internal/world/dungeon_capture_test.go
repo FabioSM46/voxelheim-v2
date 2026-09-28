@@ -46,6 +46,12 @@ type dungeonCaptureHeader struct {
 // solved everything: the guardian's trapdoor open and every door open through the gate's
 // own Update; otherwise the drawing as a party first finds it.
 func dungeonCaptureBytes(seed int64, opened bool) ([]byte, error) {
+	return dungeonChestCaptureBytes(seed, opened, false)
+}
+
+// The optional chest view uses the production gate update, just as an authoritative
+// opening does. Existing dungeon exports continue to leave all chests closed.
+func dungeonChestCaptureBytes(seed int64, opened, chestOpen bool) ([]byte, error) {
 	cache, gate := NewGatedInstanceCache(seed, 1, InstanceChunkEnvelope(seed), opened)
 	if opened {
 		doors := map[int]bool{}
@@ -55,6 +61,13 @@ func dungeonCaptureBytes(seed int64, opened bool) ([]byte, error) {
 			}
 		}
 		gate.Update(InstanceUpdate{Doors: doors})
+	}
+	if chestOpen {
+		for _, a := range gate.Chests() {
+			if a.Index == SandHallChest {
+				gate.Update(InstanceUpdate{Mechanisms: []InstanceCell{{X: a.X, Y: a.Y, Z: a.Z, Block: ChestOpen}}})
+			}
+		}
 	}
 	lo, hi := dungeonLayout.chunkBounds(seed)
 	lo = Coord{X: lo.X - 1, Y: lo.Y - 1, Z: lo.Z - 1}
@@ -214,7 +227,11 @@ func TestExportDungeonCaptureFixture(t *testing.T) {
 	if decoded, err := hex.DecodeString(commit); err != nil || len(decoded) != 20 {
 		t.Fatal("set DUNGEON_CAPTURE_SOURCE_COMMIT to the full source commit")
 	}
-	data, err := dungeonCaptureBytes(seed, state != "drawn")
+	chest := os.Getenv("DUNGEON_CAPTURE_CHEST")
+	if chest != "" && chest != "closed" && chest != "open" {
+		t.Fatal("DUNGEON_CAPTURE_CHEST is closed or open")
+	}
+	data, err := dungeonChestCaptureBytes(seed, state != "drawn", chest == "open")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,5 +245,32 @@ func TestExportDungeonCaptureFixture(t *testing.T) {
 	}
 	if err := os.WriteFile(path+".json", append(manifest, '\n'), 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChestCaptureChangesOnlyTheAuthoritativeSandChestCell(t *testing.T) {
+	closed, err := dungeonChestCaptureBytes(0, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := dungeonChestCaptureBytes(0, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closed) != len(open) || !bytes.Equal(closed[:96], open[:96]) {
+		t.Fatal("fixture frame changed")
+	}
+	changed := 0
+	for i := 96; i < len(closed); i += 2 {
+		before, after := binary.LittleEndian.Uint16(closed[i:]), binary.LittleEndian.Uint16(open[i:])
+		if before != after {
+			changed++
+			if Block(before) != Chest || Block(after) != ChestOpen {
+				t.Fatal("capture changed a non-chest cell")
+			}
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("changed %d cells, want one sand chest", changed)
 	}
 }
