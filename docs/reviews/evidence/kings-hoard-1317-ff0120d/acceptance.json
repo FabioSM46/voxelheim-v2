@@ -1,0 +1,338 @@
+{
+  "source_commit": "ff0120d3b3d77acfcdb95efbc4256e7c10825079",
+  "run_url": "https://github.com/FabioSM46/voxelheim-v2/actions/runs/36481438601/attempts/1",
+  "invocation": "voxelheim-descentbot -server <built-server> -party 3 -hoard -timeout 75m -seed 1",
+  "fixtures": "Original iron sword and rusty armor bootstrap per member; one leader EnchantingTable after normal exit. No earned reagent or silver grants.",
+  "travel_assists": "Existing portal and stuck placements; two post-exit overworld placements for table and capital forge. No dungeon skips or injected durability.",
+  "exit_code": 0,
+  "report_status": "reported",
+  "success": true,
+  "observations": {
+    "Version": 1,
+    "Success": true,
+    "FailureCategory": "",
+    "Members": [
+      {
+        "Member": 1,
+        "Evidence": {
+          "Chests": [
+            {
+              "CorpseID": 51,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 29,
+                  "Count": 10,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 11
+            },
+            {
+              "CorpseID": 88,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 11,
+                  "Count": 1,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 14
+            },
+            {
+              "CorpseID": 89,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 24,
+                  "Count": 1,
+                  "Durability": 200,
+                  "MaxDurability": 200
+                }
+              ],
+              "Silver": 29
+            }
+          ],
+          "ChestDone": [
+            true,
+            true,
+            true
+          ],
+          "King": {
+            "CorpseID": 19,
+            "Revision": 1,
+            "Entries": [
+              {
+                "EntryID": 1,
+                "ItemID": 10,
+                "Count": 1,
+                "Durability": 200,
+                "MaxDurability": 200
+              },
+              {
+                "EntryID": 2,
+                "ItemID": 13,
+                "Count": 3,
+                "Durability": 0,
+                "MaxDurability": 0
+              },
+              {
+                "EntryID": 3,
+                "ItemID": 47,
+                "Count": 1,
+                "Durability": 0,
+                "MaxDurability": 0
+              }
+            ],
+            "Silver": 0
+          },
+          "KingDone": true,
+          "WorldID": 17,
+          "Seed": 5306321562182508718,
+          "Restored": [
+            true,
+            true,
+            true
+          ],
+          "Notes": [
+            "pre-existing gear bootstrap: one IronSword, RustyHelm, RustyCuirass and RustyGreaves; starting silver, runes, runic swords and tables zero",
+            "earned rune carried out through return portal",
+            "travel placement: unwarded enchanting site at [251 63 -148]",
+            "setup fixture: exactly one EnchantingTable granted to leader; no reagent, sword or silver grants",
+            "table placed at [249 62 -148] and consumed fixture; crafted RunicSword from earned IronSword slot 4 + KingRune; bootstrap main hand unchanged",
+            "travel placement: capital forge at [115 65 -103]",
+            "capital forge repair slot 0 item 7: durability 64 -> 100; silver 54 -> 18; exact debit 36"
+          ],
+          "Bootstrap": true,
+          "RuneOut": true,
+          "Crafted": true,
+          "Repaired": true,
+          "Stage": "saved chest 3",
+          "Awaiting": "loot response"
+        },
+        "Deaths": 2,
+        "PortalPlacements": 4,
+        "StuckAssists": 0,
+        "DevelopmentCommands": 11,
+        "ImmortalityCommands": 0
+      },
+      {
+        "Member": 2,
+        "Evidence": {
+          "Chests": [
+            {
+              "CorpseID": 51,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 29,
+                  "Count": 12,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 11
+            },
+            {
+              "CorpseID": 88,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 11,
+                  "Count": 1,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 19
+            },
+            {
+              "CorpseID": 89,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 24,
+                  "Count": 1,
+                  "Durability": 200,
+                  "MaxDurability": 200
+                }
+              ],
+              "Silver": 22
+            }
+          ],
+          "ChestDone": [
+            true,
+            true,
+            true
+          ],
+          "King": {
+            "CorpseID": 19,
+            "Revision": 1,
+            "Entries": [
+              {
+                "EntryID": 1,
+                "ItemID": 10,
+                "Count": 1,
+                "Durability": 200,
+                "MaxDurability": 200
+              },
+              {
+                "EntryID": 2,
+                "ItemID": 13,
+                "Count": 4,
+                "Durability": 0,
+                "MaxDurability": 0
+              },
+              {
+                "EntryID": 3,
+                "ItemID": 47,
+                "Count": 1,
+                "Durability": 0,
+                "MaxDurability": 0
+              }
+            ],
+            "Silver": 0
+          },
+          "KingDone": true,
+          "WorldID": 17,
+          "Seed": 5306321562182508718,
+          "Restored": [
+            true,
+            true,
+            true
+          ],
+          "Notes": [
+            "pre-existing gear bootstrap: one IronSword, RustyHelm, RustyCuirass and RustyGreaves; starting silver, runes, runic swords and tables zero",
+            "earned rune carried out through return portal"
+          ],
+          "Bootstrap": true,
+          "RuneOut": true,
+          "Crafted": false,
+          "Repaired": false,
+          "Stage": "saved chest 3",
+          "Awaiting": "loot response"
+        },
+        "Deaths": 2,
+        "PortalPlacements": 4,
+        "StuckAssists": 1,
+        "DevelopmentCommands": 9,
+        "ImmortalityCommands": 0
+      },
+      {
+        "Member": 3,
+        "Evidence": {
+          "Chests": [
+            {
+              "CorpseID": 51,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 29,
+                  "Count": 8,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 10
+            },
+            {
+              "CorpseID": 88,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 11,
+                  "Count": 1,
+                  "Durability": 0,
+                  "MaxDurability": 0
+                }
+              ],
+              "Silver": 13
+            },
+            {
+              "CorpseID": 89,
+              "Revision": 1,
+              "Entries": [
+                {
+                  "EntryID": 1,
+                  "ItemID": 24,
+                  "Count": 1,
+                  "Durability": 200,
+                  "MaxDurability": 200
+                }
+              ],
+              "Silver": 26
+            }
+          ],
+          "ChestDone": [
+            true,
+            true,
+            true
+          ],
+          "King": {
+            "CorpseID": 19,
+            "Revision": 1,
+            "Entries": [
+              {
+                "EntryID": 1,
+                "ItemID": 10,
+                "Count": 1,
+                "Durability": 200,
+                "MaxDurability": 200
+              },
+              {
+                "EntryID": 2,
+                "ItemID": 13,
+                "Count": 5,
+                "Durability": 0,
+                "MaxDurability": 0
+              },
+              {
+                "EntryID": 3,
+                "ItemID": 47,
+                "Count": 1,
+                "Durability": 0,
+                "MaxDurability": 0
+              }
+            ],
+            "Silver": 0
+          },
+          "KingDone": true,
+          "WorldID": 17,
+          "Seed": 5306321562182508718,
+          "Restored": [
+            true,
+            true,
+            true
+          ],
+          "Notes": [
+            "pre-existing gear bootstrap: one IronSword, RustyHelm, RustyCuirass and RustyGreaves; starting silver, runes, runic swords and tables zero",
+            "earned rune carried out through return portal"
+          ],
+          "Bootstrap": true,
+          "RuneOut": true,
+          "Crafted": false,
+          "Repaired": false,
+          "Stage": "saved chest 3",
+          "Awaiting": "loot response"
+        },
+        "Deaths": 3,
+        "PortalPlacements": 4,
+        "StuckAssists": 1,
+        "DevelopmentCommands": 9,
+        "ImmortalityCommands": 0
+      }
+    ]
+  },
+  "raw_output": "Withheld: may contain private process paths, credentials or server logs."
+}

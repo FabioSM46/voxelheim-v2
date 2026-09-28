@@ -2,14 +2,16 @@
 
 ## Status
 
-The first live acceptance **failed at the post-restart chest check**. The pre-restart
-chest, rune, crafting and paid repair assertions passed. Issue #1317 remains open, blocked
-by the separately reported production defect [#1353](https://github.com/FabioSM46/voxelheim-v2/issues/1353).
-No gameplay fix or relaxed assertion is included in this evidence record.
+Live acceptance is **complete** on `ff0120d3b3d77acfcdb95efbc4256e7c10825079`:
+the second manual run passed every chest, rune, crafting, paid repair and restart assertion.
+All three members verified all three chests after restart, including exhausted refusal.
+The first failed run remains below with its original artifact and observation limits.
 
-Infrastructure landed in #1351 and the scenario/workflow in #1352. The real-server run
-below exercises that merged source. Ordinary CI validates the harness implementation;
-it does not substitute for this live result.
+Infrastructure landed in #1351 and the scenario/workflow in #1352. The first run discovered
+production defect [#1353](https://github.com/FabioSM46/voxelheim-v2/issues/1353), fixed separately
+by [#1355](https://github.com/FabioSM46/voxelheim-v2/pull/1355). Its exact merge SHA passed
+[Integration 36480310254](https://github.com/FabioSM46/voxelheim-v2/actions/runs/36480310254)
+before the successful live rerun. No acceptance assertion was relaxed.
 
 ## Remote procedure
 
@@ -134,7 +136,57 @@ The sessions-v3 codec and server mapping do carry the field, so the omission is 
 overlay boundary. This is recorded separately in #1353 with regression criteria.
 Potential repeat loot is an inference from the first-open branch, not an observed exploit.
 
-Reproduction is the manual dispatch described above at the recorded SHA. After #1353 is
-separately addressed and merged, rerun at the exact new merge SHA and inspect all nine
-post-restart flags. The current run is useful partial evidence, **not completed acceptance**.
+Reproduction of this failure is the manual dispatch above at the recorded first SHA.
+This first run remains partial evidence, **not completed acceptance**. The subsequent fix
+and successful run are recorded separately below.
 No local tests, builds, lint or live scenario were executed while preparing this report.
+
+## Live attempt 2 — passed, 2026-09-28
+
+- Tested source: `ff0120d3b3d77acfcdb95efbc4256e7c10825079`, the merge of #1355.
+- [Workflow run 36481438601, attempt 1](https://github.com/FabioSM46/voxelheim-v2/actions/runs/36481438601/attempts/1),
+  created 20:45:24 UTC, completed 21:12:15 UTC with success. As above, this is the workflow
+  interval including setup/builds, not a measured dungeon-clear duration.
+- Artifact: `kings-hoard-ff0120d3b3d77acfcdb95efbc4256e7c10825079-1`, ID `10998172265`.
+- Artifact archive digest reported by GitHub:
+  `sha256:ad55dec0af1572ef4e4464c033ca6cc46a8696bd6734bc7f0a968c86e8a3d56d`.
+- Exact sanitized [acceptance.json](evidence/kings-hoard-1317-ff0120d/acceptance.json),
+  preserved unchanged with [SHA256SUMS](evidence/kings-hoard-1317-ff0120d/SHA256SUMS):
+  `f3fd038e23bdee69cf2149ba480a3844fc20a0b24f71c9914e10eaa30dd91916`.
+
+The same invocation, three-bot party, seed and declared setup limits were used. Both
+the process and exported observations report success: `exit_code: 0`, `report_status:
+reported`, top-level `success: true`, nested `Success: true`, and an empty failure category.
+
+| Member | Chest 1 | Chest 2 | Chest 3 | King personal loot | Restart checks | Deaths |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 10 arrows, 11 silver | SharpeningStone, 14 silver | RustyHelm, 29 silver | IronSword, 3 bones, KingRune | 3 of 3 | 2 |
+| 2 | 12 arrows, 11 silver | SharpeningStone, 19 silver | RustyHelm, 22 silver | IronSword, 4 bones, KingRune | 3 of 3 | 2 |
+| 3 | 8 arrows, 10 silver | SharpeningStone, 13 silver | RustyHelm, 26 silver | IronSword, 5 bones, KingRune | 3 of 3 | 3 |
+
+All nine `ChestDone` flags are true, proving the pre-restart personal reopen, exact gains,
+exhausted refusal and open-block assertions completed. All members received the earned
+king inputs and carried their rune out (`KingDone` and `RuneOut` true for each).
+The leader's table placement consumed the fixture at `[249 62 -148]`; crafting consumed
+the earned pack IronSword in slot 4 and KingRune while preserving its bootstrap main hand.
+Paid repair again targeted actual wear in slot 0, item 7: durability **64 to 100**, purse
+**54 to 18**, exactly **36 earned silver**. No kit or injected wear was needed.
+
+All nine `Restored` flags are true. These flags are set only after observing the open
+block and receiving `ChestAlreadyOpened` in the same saved run after restart. The harness
+also requires unchanged full inventories when selecting the existing characters, normal
+party portal re-entry with the same run ID/seed, and clean persistence shutdown of both
+server processes before publishing success. Thus the previously failing restart criterion
+is now met for all three chests and all three members.
+
+Each member's final `Stage` is `saved chest 3`. `Awaiting: loot response` is the last
+operation label retained by the harness even on a successful response; it is not a pending
+operation or failure when the completed flags and final success verdict are true.
+Portal placements were four per member; stuck assists were 0, 1 and 1. All three sent zero
+immortality commands. The declared combat/table fixtures and overworld travel assists
+remain limits on what this evidence claims.
+
+The production correction in #1355 preserves detached `OpenedChests` lists in both
+reward-overlay branches, with codec/startup/restored-block/refusal regressions. This
+evidence-only completion changes no gameplay or harness behavior. Issue #1317's acceptance
+criteria are satisfied by the inspected successful run; #1353 is separately resolved.
