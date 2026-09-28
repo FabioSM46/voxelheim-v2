@@ -41,6 +41,10 @@ impl LootWindow {
         self.current.as_ref()
     }
 
+    pub(crate) fn chest_request_outstanding(&self) -> bool {
+        self.pending_chest.is_some() || self.abandoned_chest.is_some()
+    }
+
     pub(crate) fn take_chest_refusal(&mut self, refused: &ActionRefused) -> bool {
         if let Some(index) = self.chest_refusals.iter().position(|held| held == refused) {
             self.chest_refusals.remove(index);
@@ -337,11 +341,7 @@ fn send_loot_intents(
         return;
     }
 
-    if !gate.may_act()
-        || !interact
-        || window.pending_chest.is_some()
-        || window.abandoned_chest.is_some()
-    {
+    if !gate.may_act() || !interact {
         return;
     }
     let Some(session) = session else {
@@ -370,6 +370,11 @@ fn send_loot_intents(
         .and_then(|aimed| aimed.0)
         .filter(|aimed| crate::world::palette::is_chest(aimed.block))
     {
+        // Correlation holds only another chest use. An unanswered chest must not
+        // prevent corpse loot, a station, an ordinary mechanism or addressing people.
+        if window.chest_request_outstanding() {
+            return;
+        }
         if let Some(outbound) = outbound.as_deref_mut()
             && outbound.send(encode_mechanism_use_request(&MechanismUseRequest {
                 pos: aimed.pos,
@@ -1709,6 +1714,92 @@ mod tests {
                     && window.pending_chest.is_none()
                     && window.abandoned_chest.is_none()
             );
+        }
+    }
+    #[test]
+    fn outstanding_chest_does_not_block_unrelated_interactions() {
+        for abandoned in [false, true] {
+            for target in ["corpse", "station", "lever", "player", "resident"] {
+                let (mut app, frames, pos) = chest_app(crate::world::palette::CHEST);
+                assert_eq!(press_chest(&mut app, &frames).len(), 1);
+                if abandoned {
+                    app.world_mut().resource_mut::<LootWindow>().pending_chest = Some((pos, 0.0));
+                    app.update();
+                }
+                assert!(
+                    app.world()
+                        .resource::<LootWindow>()
+                        .chest_request_outstanding()
+                );
+                app.world_mut()
+                    .resource_mut::<crate::player::mechanism::AimedMechanism>()
+                    .0 = None;
+                let mut seen = Snapshot {
+                    server_tick: 2,
+                    entities: vec![me()],
+                    ..Default::default()
+                };
+                match target {
+                    "corpse" => {
+                        seen.mobs = vec![corpse(2.0)];
+                        seen.accessible_loot_corpses = vec![CORPSE];
+                    }
+                    "station" => {
+                        app.insert_resource(forge_in_sight());
+                    }
+                    "lever" => {
+                        app.insert_resource(crate::player::mechanism::AimedMechanism(Some(
+                            crate::player::mechanism::Aimed {
+                                pos: BlockCoord { x: 3, ..pos },
+                                block: crate::world::palette::LEVER_OFF,
+                            },
+                        )));
+                    }
+                    "player" => seen.entities.push(EntityState {
+                        entity_id: OTHER_PLAYER,
+                        pos: [1.0, 64.0, 0.0],
+                        ..me()
+                    }),
+                    "resident" => seen.mobs = vec![villager(RESIDENT, 1.0)],
+                    _ => unreachable!(),
+                }
+                app.world_mut()
+                    .resource_mut::<SnapshotBuffer>()
+                    .accept(seen, Instant::now());
+                let sent = press_chest(&mut app, &frames);
+                match target {
+                    "corpse" => assert_eq!(
+                        sent,
+                        vec![encode_loot_open_request(&LootOpenRequest {
+                            corpse_id: CORPSE,
+                            client_tick: 0
+                        })]
+                    ),
+                    "lever" => assert_eq!(
+                        sent,
+                        vec![encode_mechanism_use_request(&MechanismUseRequest {
+                            pos: BlockCoord { x: 3, ..pos },
+                            client_tick: 0
+                        })]
+                    ),
+                    "resident" => assert_eq!(
+                        sent,
+                        vec![encode_npc_interact_request(&NpcInteractRequest {
+                            entity_id: RESIDENT,
+                            client_tick: 0
+                        })]
+                    ),
+                    "station" => {
+                        assert!(sent.is_empty());
+                        assert_eq!(station_opens(&mut app).len(), 1);
+                    }
+                    "player" => {
+                        assert!(sent.is_empty());
+                        assert_eq!(*app.world().resource::<InputMode>(), InputMode::TradePrompt);
+                    }
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 }

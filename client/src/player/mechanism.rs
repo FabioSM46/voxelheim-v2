@@ -99,7 +99,10 @@ pub(super) fn prompt(block: BlockId, key: KeyCode) -> Option<String> {
     Some(format!("[{key}] {verb}"))
 }
 
-fn chest_prompt(key: KeyCode) -> String {
+fn chest_prompt(key: KeyCode, waiting: bool) -> String {
+    if waiting {
+        return "Waiting for chest response".to_owned();
+    }
     let key = key_name(key).map_or_else(|| "?".to_owned(), str::to_uppercase);
     format!("{key}: Chest")
 }
@@ -128,6 +131,7 @@ impl Plugin for MechanismPlugin {
                     .after(AimStructures)
                     .after(ApplySnapshots)
                     .after(ApplyInputMode)
+                    .after(super::loot::OriginateInteract)
                     .in_set(ChestPromptUpdate),
             );
     }
@@ -184,6 +188,7 @@ impl KeyOwners<'_> {
 }
 
 fn show_hint(
+    loot: Option<Res<super::LootWindow>>,
     mut chest: ResMut<ChestHint>,
     gate: InputGate<'_>,
     aimed: Res<AimedMechanism>,
@@ -207,7 +212,13 @@ fn show_hint(
                         .is_some()
                 })
         })
-        .map(|_| chest_prompt(key));
+        .map(|_| {
+            chest_prompt(
+                key,
+                loot.as_deref()
+                    .is_some_and(super::LootWindow::chest_request_outstanding),
+            )
+        });
     let line = aimed
         .0
         .filter(|_| gate.may_aim() && !owners.outranked())
@@ -336,7 +347,18 @@ mod tests {
                 "no second mechanism hint"
             );
         }
-        assert_eq!(chest_prompt(KeyCode::KeyF), "F: Chest");
-        assert_eq!(chest_prompt(KeyCode::KeyE), "E: Chest");
+        assert_eq!(chest_prompt(KeyCode::KeyF, false), "F: Chest");
+        assert_eq!(chest_prompt(KeyCode::KeyE, false), "E: Chest");
+    }
+    #[test]
+    fn an_outstanding_chest_answer_has_feedback_without_an_actionable_key() {
+        assert_eq!(
+            chest_prompt(KeyCode::KeyF, true),
+            "Waiting for chest response"
+        );
+        assert_eq!(
+            chest_prompt(KeyCode::KeyE, true),
+            "Waiting for chest response"
+        );
     }
 }

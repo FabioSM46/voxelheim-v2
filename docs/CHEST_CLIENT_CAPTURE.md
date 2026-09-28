@@ -26,9 +26,13 @@ That association is presentation context, never proof of an opened block or loot
 
 A requested reopen may display an equal revision; unsolicited replies and older revisions
 cannot reopen a dismissed chest. Death, changing input mode or a five-second timeout cancel
-the pending presentation but retain one outstanding-reply tombstone. A new interaction
+the pending presentation but retain one outstanding-reply tombstone. Only a new chest interaction
 waits for that response or its matching anchored refusal to drain; the slot is not reused
 for another chest while a late reply can still arrive. Server close events close the window.
+While a chest response is outstanding, its prompt reads `Waiting for chest response`
+instead of advertising an actionable key. Corpse, station, ordinary mechanism, player and
+resident interactions remain available.
+
 All container associations, observed mob IDs and pending/tombstone context reset with the
 world or session, like the existing loot revision and dismissal maps.
 

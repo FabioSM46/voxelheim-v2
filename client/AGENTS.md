@@ -3373,7 +3373,8 @@ inside their cell. They share the existing aimed-mechanism sender and the statio
 Interact priority is corpse, chest, station, ordinary mechanism, player, resident. Never
 synthesize a MobState for a chest. Loot presentation keeps one outstanding chest request,
 created only after a queued outbound frame; cancellation retains a reply tombstone until
-its response/refusal drains, so a late reply cannot attach to a new chest. Equal-revision
+its response/refusal drains, so a late reply cannot attach to a new chest. An outstanding chest request blocks only another chest use; unrelated interactions remain
+available, and the chest prompt explains that its response is pending. Equal-revision
 reopening requires an explicit request. Corpse snapshot/revision/dismissal guards remain
 separate, and world/session reset clears all presentation associations. The manual-only
 remote capture workflow and evidence procedure are in `docs/CHEST_CLIENT_CAPTURE.md`.
