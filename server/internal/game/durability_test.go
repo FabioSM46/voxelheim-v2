@@ -52,6 +52,7 @@ func TestOnlyTheAgreedEquipmentWearsOut(t *testing.T) {
 	want := map[ItemID]uint16{
 		ItemRustySword:      RustySwordMaxDurability,
 		ItemIronSword:       IronSwordMaxDurability,
+		ItemRunicSword:      RunicSwordMaxDurability,
 		ItemShovel:          ToolMaxDurability,
 		ItemPickaxe:         ToolMaxDurability,
 		ItemAxe:             ToolMaxDurability,
