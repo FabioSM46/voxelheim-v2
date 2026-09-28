@@ -552,10 +552,8 @@ fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
         RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
-            // V47 names these before #1315/#1316 provide their presentation.
+            // Chest presentation follows in #1315.
             | RefusalReason::ChestAlreadyOpened
-            | RefusalReason::NothingToRepair
-            | RefusalReason::NotAtStation
     )
 }
 
@@ -593,6 +591,23 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
             RefusalReason::EntryOfferUnknown => {
                 Some("Cannot cross: that entry prompt is no longer open".to_owned())
             }
+            _ => None,
+        };
+    }
+
+    if refused.action == RefusedAction::StationRepair {
+        return match refused.reason {
+            RefusalReason::NothingToRepair => {
+                Some("Cannot repair: that item has no missing durability".to_owned())
+            }
+            RefusalReason::NotEnoughSilver => Some("Cannot repair: not enough silver".to_owned()),
+            RefusalReason::NotAtStation => {
+                Some("Cannot repair: stand closer to a forge".to_owned())
+            }
+            RefusalReason::InventoryBusy => {
+                Some("Cannot repair: your pack is busy; try again".to_owned())
+            }
+            RefusalReason::PlayerIsDead => Some("Cannot repair while dead or leaving".to_owned()),
             _ => None,
         };
     }
@@ -1518,6 +1533,9 @@ mod tests {
             // `_` arm below sent both in as `PlaceStructure`, which has no sentence for
             // either, so the sweep would have kept passing over the pair while reading as
             // though it had checked them.
+            RefusalReason::NothingToRepair | RefusalReason::NotAtStation => {
+                RefusedAction::StationRepair
+            }
             RefusalReason::NotEnoughSilver | RefusalReason::VendorDoesNotWant => {
                 RefusedAction::Trade
             }
@@ -1558,6 +1576,41 @@ mod tests {
                 !EVERY_REASON[..seen].contains(reason),
                 "{reason:?} appears twice in EVERY_REASON, so some other reason is absent"
             );
+        }
+    }
+
+    #[test]
+    fn paid_repair_refusals_have_specific_single_line_notices() {
+        for (reason, expected) in [
+            (
+                RefusalReason::NothingToRepair,
+                "Cannot repair: that item has no missing durability",
+            ),
+            (
+                RefusalReason::NotEnoughSilver,
+                "Cannot repair: not enough silver",
+            ),
+            (
+                RefusalReason::NotAtStation,
+                "Cannot repair: stand closer to a forge",
+            ),
+            (
+                RefusalReason::InventoryBusy,
+                "Cannot repair: your pack is busy; try again",
+            ),
+            (
+                RefusalReason::PlayerIsDead,
+                "Cannot repair while dead or leaving",
+            ),
+        ] {
+            let reply = ActionRefused {
+                action: RefusedAction::StationRepair,
+                reason,
+                anchor: None,
+            };
+            let line = describe_refusal(&reply).expect("paid repairs explain refusals");
+            assert_eq!(line, expected);
+            assert!(line.is_ascii() && !line.contains('\n'));
         }
     }
 

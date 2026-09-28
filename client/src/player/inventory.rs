@@ -57,7 +57,6 @@ pub struct Inventory {
 
 impl Inventory {
     /// Every authoritative slot, exactly as the latest message carried it.
-    #[cfg(test)]
     pub fn stacks(&self) -> &[InventoryStack] {
         &self.stacks
     }
