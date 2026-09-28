@@ -2336,12 +2336,22 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		if player == nil || msg.StationRepair == nil {
 			return nil
 		}
-		// Contract-only stub: no forge serves station repair until #1314 lands.
-		// A valid intent is an ordinary refusal, never a defect in the client.
-		if err := send(protocol.EncodeActionRefused(protocol.ActionRefused{
-			Action: vnet.RefusedActionStationRepair, Reason: vnet.RefusalReasonNotAtStation,
-		})); err != nil {
-			return fmt.Errorf("session: send station repair refusal: %w", err)
+		state, reason, repairErr := player.StationRepair(*msg.StationRepair)
+		if repairErr != nil {
+			log.Debug("refusing station repair", "target_slot", msg.StationRepair.TargetSlot, "reason", repairErr.Error())
+			// Unlike silent crafting and kit repair, a paid action must explain why
+			// it was refused so the player can distinguish reach, wear and price.
+			if err := send(protocol.EncodeActionRefused(protocol.ActionRefused{
+				Action: vnet.RefusedActionStationRepair, Reason: reason,
+			})); err != nil {
+				return fmt.Errorf("session: send station repair refusal: %w", err)
+			}
+			return nil
+		}
+		// This full state includes both restored wear and the debited purse. Use
+		// the blocking send, as Craft does, so a full queue cannot lose the result.
+		if err := send(protocol.EncodeInventoryState(state)); err != nil {
+			return fmt.Errorf("session: send inventory after station repair: %w", err)
 		}
 		return nil
 

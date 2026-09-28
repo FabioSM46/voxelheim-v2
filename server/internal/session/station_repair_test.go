@@ -1,14 +1,15 @@
 package session_test
 
 import (
+	"testing"
+
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
-	"testing"
 )
 
-// Until #1314 implements forge repair, the declared intent gets an ordinary refusal
-// without closing an admitted session. Two answers prove the first request survived.
-func TestStationRepairContractStubAnswersWithoutDisconnecting(t *testing.T) {
+// A player away from any forge receives a typed refusal without disconnection.
+// Two answers prove the first request survived.
+func TestStationRepairAwayFromAForgeAnswersWithoutDisconnecting(t *testing.T) {
 	t.Parallel()
 	cfg := editConfig()
 	chunks, sim, peers := editDeps(t, cfg)
