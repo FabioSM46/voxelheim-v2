@@ -552,6 +552,10 @@ fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
         RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
+            // V47 names these before #1315/#1316 provide their presentation.
+            | RefusalReason::ChestAlreadyOpened
+            | RefusalReason::NothingToRepair
+            | RefusalReason::NotAtStation
     )
 }
 
@@ -1390,7 +1394,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 61] = [
+    const EVERY_REASON: [RefusalReason; 64] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1456,6 +1460,9 @@ mod tests {
         // V46's two mechanism reasons.
         RefusalReason::NotAMechanism,
         RefusalReason::MechanismLocked,
+        RefusalReason::ChestAlreadyOpened,
+        RefusalReason::NothingToRepair,
+        RefusalReason::NotAtStation,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,

@@ -973,6 +973,8 @@ pub enum RecipeId {
     LeatherBench,
     ArmourBench,
     EnchantingTable,
+    #[allow(dead_code)] // V47 contract; #1316 adds the display recipe.
+    RunicSword,
 }
 
 impl RecipeId {
@@ -1010,6 +1012,7 @@ impl RecipeId {
             Self::LeatherBench => fb::RecipeID::LeatherBench,
             Self::ArmourBench => fb::RecipeID::ArmourBench,
             Self::EnchantingTable => fb::RecipeID::EnchantingTable,
+            Self::RunicSword => fb::RecipeID::RunicSword,
         }
     }
 }
@@ -16659,6 +16662,7 @@ mod tests {
             (RecipeId::LeatherBench, fb::RecipeID::LeatherBench),
             (RecipeId::ArmourBench, fb::RecipeID::ArmourBench),
             (RecipeId::EnchantingTable, fb::RecipeID::EnchantingTable),
+            (RecipeId::RunicSword, fb::RecipeID::RunicSword),
         ];
 
         for (recipe, wire) in named {
