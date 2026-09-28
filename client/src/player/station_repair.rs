@@ -134,11 +134,14 @@ mod tests {
 
     #[test]
     fn preview_rate_is_pinned_to_the_server_constant() {
+        // This monorepo source pin deliberately requires the authoritative declaration.
+        // If it moves or changes syntax, update this include/pattern together with the
+        // preview rate above; do not substitute a client-owned fallback or skip the pin.
         let source = include_str!("../../../server/internal/game/station_repair.go");
         let declaration = format!("const RepairSilverPerPoint uint32 = {REPAIR_SILVER_PER_POINT}");
         assert!(
             source.lines().any(|line| line.trim() == declaration),
-            "update the display rate when the server rate changes"
+            "update the display rate when the server rate changes; if the declaration moved or changed syntax, update this source pin too"
         );
     }
 
