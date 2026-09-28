@@ -680,6 +680,10 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         // V46's two are answered above, under the action that produces them.
         | RefusalReason::NotAMechanism
         | RefusalReason::MechanismLocked
+        // V47 presentation lands with the feature UI (#1315/#1316).
+        | RefusalReason::ChestAlreadyOpened
+        | RefusalReason::NothingToRepair
+        | RefusalReason::NotAtStation
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing

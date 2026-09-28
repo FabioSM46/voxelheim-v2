@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 46;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 47;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -377,10 +377,16 @@ impl ProtocolVersion {
     /// `ActionRefused`, whose decoders are total. Mechanism *state* adds nothing to the
     /// contract — levers, lit runes and doors are blocks, and a block changing is the
     /// existing `BlockUpdate`.
-    pub const Current: Self = Self(46);
+    /// The king's hoard: StationRepairRequest is client -> server; a V46 server
+    /// cannot name its tag and would close the session after a clean handshake.
+    /// RunicSword, StationRepair, ChestAlreadyOpened, NothingToRepair and NotAtStation
+    /// are appended;
+    /// station repair reuses NotEnoughSilver = 28. Chests add no message: they reuse
+    /// MechanismUseRequest inbound and LootState/LootTakeAllRequest for looting.
+    pub const Current: Self = Self(47);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 46;
+    pub const ENUM_MAX: u16 = 47;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

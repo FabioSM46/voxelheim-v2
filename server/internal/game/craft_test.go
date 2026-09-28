@@ -328,6 +328,10 @@ func TestTheRecipeTableIsTheAgreedRecipes(t *testing.T) {
 		},
 	}
 
+	// V47 declares RunicSword; #1313 adds its authoritative row.
+	if _, implemented := recipeTable[vnet.RecipeIDRunicSword]; implemented {
+		t.Fatal("RunicSword must remain unimplemented until #1313 supplies its recipe")
+	}
 	if len(recipeTable) != len(want) {
 		t.Fatalf("the table holds %d recipes, want %d — a new one needs a decision, not a test edit",
 			len(recipeTable), len(want))

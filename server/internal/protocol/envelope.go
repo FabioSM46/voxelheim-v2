@@ -216,6 +216,7 @@ type Message struct {
 	PlaceStructure     *PlaceStructureRequest
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
+	StationRepair      *StationRepairRequest
 	Repair             *RepairRequest
 	Consume            *ConsumeRequest
 	DropItem           *DropItemRequest
@@ -783,6 +784,11 @@ type CraftRequest struct {
 	// ClientTick is ordering and staleness only, exactly as in PlayerInput, and never
 	// read as a clock.
 	ClientTick uint32
+}
+
+// StationRepairRequest names only the slot to repair; the server decides the outcome.
+type StationRepairRequest struct {
+	TargetSlot uint16
 }
 
 // RepairRequest is one decoded attempt to mend a carried item. **Intent, never outcome.**
@@ -1796,6 +1802,15 @@ func Decode(frame []byte) (msg Message, err error) {
 			Recipe:     request.Recipe(),
 			ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadStationRepairRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.StationRepairRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.StationRepair = &StationRepairRequest{TargetSlot: request.TargetSlot()}
 
 	case vnet.PayloadRepairRequest:
 		table, tErr := unionPayload(env, msg.Kind)
@@ -4104,4 +4119,13 @@ func finishEnvelope(b *flatbuffers.Builder, kind vnet.Payload, payload flatbuffe
 
 	vnet.FinishEnvelopeBuffer(b, envelope)
 	return b.FinishedBytes()
+}
+
+// EncodeStationRepairRequest builds client intent for protocol and session tests.
+func EncodeStationRepairRequest(r StationRepairRequest) []byte {
+	b := flatbuffers.NewBuilder(64)
+	vnet.StationRepairRequestStart(b)
+	vnet.StationRepairRequestAddTargetSlot(b, r.TargetSlot)
+	request := vnet.StationRepairRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadStationRepairRequest, request)
 }

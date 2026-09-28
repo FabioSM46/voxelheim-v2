@@ -309,7 +309,10 @@ enum RecipeID : ubyte {
   // ordinary silence. `StructureKind`'s three new members are what move the version.
   LeatherBench = 22,
   ArmourBench = 23,
-  EnchantingTable = 24
+  EnchantingTable = 24,
+
+  // V47. Implemented by the authoritative recipe table in #1313.
+  RunicSword = 25
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.
@@ -333,6 +336,15 @@ table CraftRequest {
 
   /// The client's own tick counter, for ordering and staleness only.
   client_tick: uint;
+}
+
+/// Full repair at a nearby forge for silver. Client -> server, intent only.
+/// The server decides station reach, target eligibility, cost and restored durability.
+/// Copy target_slot verbatim, including out-of-range values; gameplay refuses them.
+/// Success arrives as InventoryState; failure is ActionRefused with StationRepair.
+/// V47 reuses NotEnoughSilver = 28 rather than introducing another silver refusal.
+table StationRepairRequest {
+  target_slot: uint16;
 }
 
 /// A player trying to mend one carried item with one repair kit. Client -> server, and
@@ -1051,7 +1063,10 @@ enum RefusedAction : ubyte {
 
   /// A `MechanismUseRequest` that moved nothing. No lever flipped and no rune lit; the
   /// blocks the player can see are still the complete answer.
-  UseMechanism = 24
+  UseMechanism = 24,
+
+  // -- V47. Full repair at a forge was refused.
+  StationRepair = 25
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1299,6 +1314,14 @@ enum RefusalReason : ubyte {
   /// than plain `Locked`, because this enum is shared by every action and a bare word
   /// would read as an answer about doors, chests or accounts.
   MechanismLocked = 56,
+
+  // -- V47. Ordinary gameplay refusals, below the malformed-request group.
+  /// The instance chest was already opened. Paired with UseMechanism.
+  ChestAlreadyOpened = 57,
+  /// The target has no missing durability. Paired with StationRepair.
+  NothingToRepair = 58,
+  /// No required crafting station is within authoritative reach.
+  NotAtStation = 59,
 
   // -- The request said something no correct client sends. A defect in the peer.
 

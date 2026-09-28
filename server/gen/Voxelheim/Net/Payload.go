@@ -100,6 +100,7 @@ const (
 	PayloadEncounterTimeline      Payload = 71
 	PayloadDrawRequest            Payload = 72
 	PayloadMechanismUseRequest    Payload = 73
+	PayloadStationRepairRequest   Payload = 74
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -177,6 +178,7 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadEncounterTimeline:      "EncounterTimeline",
 	PayloadDrawRequest:            "DrawRequest",
 	PayloadMechanismUseRequest:    "MechanismUseRequest",
+	PayloadStationRepairRequest:   "StationRepairRequest",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -254,6 +256,7 @@ var EnumValuesPayload = map[string]Payload{
 	"EncounterTimeline":      PayloadEncounterTimeline,
 	"DrawRequest":            PayloadDrawRequest,
 	"MechanismUseRequest":    PayloadMechanismUseRequest,
+	"StationRepairRequest":   PayloadStationRepairRequest,
 }
 
 func (v Payload) String() string {

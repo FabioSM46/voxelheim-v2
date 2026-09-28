@@ -1733,6 +1733,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadRemoveStructureRequest,
 		vnet.PayloadCraftRequest,
 		vnet.PayloadRepairRequest,
+		vnet.PayloadStationRepairRequest,
 		vnet.PayloadConsumeRequest,
 		vnet.PayloadDropItemRequest,
 		vnet.PayloadChatRequest,
@@ -2329,6 +2330,18 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			return fmt.Errorf("session: send inventory after craft: %w", sErr)
 		}
 		log.Debug("craft applied", "recipe", request.Recipe.String())
+		return nil
+
+	case vnet.PayloadStationRepairRequest:
+		if player == nil || msg.StationRepair == nil {
+			return nil
+		}
+		// Contract-only stub; #1314 supplies authoritative forge repair.
+		if err := send(protocol.EncodeActionRefused(protocol.ActionRefused{
+			Action: vnet.RefusedActionStationRepair, Reason: vnet.RefusalReasonMalformedKind,
+		})); err != nil {
+			return fmt.Errorf("session: send station repair refusal: %w", err)
+		}
 		return nil
 
 	case vnet.PayloadRepairRequest:

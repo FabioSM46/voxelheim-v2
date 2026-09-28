@@ -1007,6 +1007,11 @@ mod tests {
             if *member == fb::RecipeID::Unknown {
                 continue;
             }
+            // V47 declares the recipe; #1313 implements its server row, #1316 the mirror.
+            if *member == fb::RecipeID::RunicSword {
+                assert!(RECIPES.iter().all(|row| row.id.wire() != *member));
+                continue;
+            }
             let rows = RECIPES
                 .iter()
                 .filter(|row| row.id.wire() == *member)
@@ -1025,7 +1030,7 @@ mod tests {
         // than against a number typed here, for the reason the loop is.
         assert_eq!(
             RECIPES.len(),
-            fb::RecipeID::ENUM_VALUES.len() - 1,
+            fb::RecipeID::ENUM_VALUES.len() - 2, // Unknown and pending RunicSword (#1316).
             "the mirror holds a row the contract does not name, or two rows for one member"
         );
     }
