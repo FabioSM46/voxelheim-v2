@@ -134,6 +134,17 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		experience:   10,
 	},
 
+	// Bind the king's guaranteed reagent into an existing blade. Ten experience matches
+	// the other station crafts: the boss already paid encounter experience, and the
+	// reagent gates this upgrade rather than a second large experience reward.
+	vnet.RecipeIDRunicSword: {
+		ingredients:  []ingredient{{ItemIronSword, 1}, {ItemKingRune, 1}},
+		product:      ItemRunicSword,
+		productCount: 1,
+		station:      vnet.StructureKindEnchantingTable,
+		experience:   10,
+	},
+
 	// What keeps the blade alive. The repair itself is a field action and needs no forge;
 	// this is only where the stones are made.
 	vnet.RecipeIDSharpeningStone: {

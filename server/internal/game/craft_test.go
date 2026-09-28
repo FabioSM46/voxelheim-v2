@@ -323,15 +323,15 @@ func TestTheRecipeTableIsTheAgreedRecipes(t *testing.T) {
 		vnet.RecipeIDArmourBench: {
 			ingredients: []ingredient{{ItemLog, 4}, {ItemStone, 4}, {ItemRawIron, 2}}, product: ItemArmourBench, productCount: 1,
 		},
+		vnet.RecipeIDRunicSword: {
+			ingredients: []ingredient{{ItemIronSword, 1}, {ItemKingRune, 1}}, product: ItemRunicSword, productCount: 1,
+			station: vnet.StructureKindEnchantingTable, experience: 10,
+		},
 		vnet.RecipeIDEnchantingTable: {
 			ingredients: []ingredient{{ItemStone, 8}, {ItemRawCoal, 2}, {ItemLog, 2}}, product: ItemEnchantingTable, productCount: 1,
 		},
 	}
 
-	// V47 declares RunicSword; #1313 adds its authoritative row.
-	if _, implemented := recipeTable[vnet.RecipeIDRunicSword]; implemented {
-		t.Fatal("RunicSword must remain unimplemented until #1313 supplies its recipe")
-	}
 	if len(recipeTable) != len(want) {
 		t.Fatalf("the table holds %d recipes, want %d — a new one needs a decision, not a test edit",
 			len(recipeTable), len(want))
@@ -642,6 +642,7 @@ func TestEachReassignedRecipeIsMadeOnlyAtItsOwnStation(t *testing.T) {
 		{vnet.RecipeIDRustyCuirass, vnet.StructureKindArmourBench, vnet.StructureKindForge},
 		{vnet.RecipeIDRustyGreaves, vnet.StructureKindArmourBench, vnet.StructureKindForge},
 		{vnet.RecipeIDWoodenSceptre, vnet.StructureKindEnchantingTable, vnet.StructureKindForge},
+		{vnet.RecipeIDRunicSword, vnet.StructureKindEnchantingTable, vnet.StructureKindForge},
 		{vnet.RecipeIDBow, vnet.StructureKindForge, vnet.StructureKindLeatherBench},
 		{vnet.RecipeIDArrows, vnet.StructureKindForge, vnet.StructureKindEnchantingTable},
 	} {
@@ -944,6 +945,7 @@ func TestEachBladeDoesItsOwnDamage(t *testing.T) {
 	}{
 		{"the starter blade", ItemRustySword, RustySwordDamage},
 		{"the iron blade", ItemIronSword, IronSwordDamage},
+		{"the runic blade", ItemRunicSword, RunicSwordDamage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
