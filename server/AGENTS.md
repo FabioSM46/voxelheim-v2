@@ -1009,7 +1009,7 @@ parts of it were already decided by the registry and by the slot invariants abov
 - **A repair has no station, and that absence is the feature.** GDD §4 makes mending a
   field action — a stone comes out of the pack wherever the player is standing, which is
   what turns a death or a long fight into a supply cost rather than an expiry date on the
-  weapon. The forge is only where the stones are *made*, and that half is `recipeTable`'s.
+  weapon. For this kit path, the forge is where stones are *made*, and that half is `recipeTable`'s.
   Adding a proximity test here would be a second answer to "where can this be done".
 - **What counts as a repair kit is a registry field, not a list of item ids.** The lesson
   is the one `meleeDamage` recorded: a swing that named a stack of stone used to be
@@ -1062,6 +1062,20 @@ parts of it were already decided by the registry and by the slot invariants abov
 - **One critical section**, for the reason `Craft` has one: liveness and the slot
   arithmetic are one decision, and splitting them leaves a window in which a player killed
   between the two still spends a stone.
+
+## Full repairs at a forge
+
+`internal/game/station_repair.go` is the paid fallback to field kits. `StationRepairRequest`
+names a slot, and the server requires a forge within that station's crafting radius, whether
+world-owned or player-built. Every inventory slot is eligible, including equipment and backpack
+slots. Missing durability costs `RepairSilverPerPoint` silver per point (minimum one); success
+restores the full maximum and debits the purse in one critical section. The reward-claim barrier
+blocks this mutation just as it blocks kit repair and vendor trade.
+
+`session` answers success with a full `InventoryState`, including silver. A paid refusal is
+`ActionRefused{StationRepair, reason}`: the player needs to distinguish a missing forge, an
+ineligible target and insufficient silver. The original field-kit path stays station-free and
+retains its existing silent refusal behavior.
 
 ## What a death costs, and the one question that decides it
 
