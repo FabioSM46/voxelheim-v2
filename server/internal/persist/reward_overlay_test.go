@@ -76,6 +76,7 @@ func TestRewardOverlayKeepsTheRouteProgressOfAJournaledRun(t *testing.T) {
 	}
 	saved := rec
 	saved.Checkpoints, saved.SolvedPuzzles, saved.ClearedGroups = 2, []uint8{1, 3}, []uint8{0, 4}
+	saved.OpenedChests = []uint8{0, 1, 2}
 	live, err := rewards.OverlaySessions([]SessionRecord{saved}, 100, world.WorldgenVersion)
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +90,28 @@ func TestRewardOverlayKeepsTheRouteProgressOfAJournaledRun(t *testing.T) {
 	if got == nil {
 		t.Fatalf("the journaled run was not restored: %#v", live)
 	}
-	if got.Checkpoints != 2 || !reflect.DeepEqual(got.SolvedPuzzles, []uint8{1, 3}) || !reflect.DeepEqual(got.ClearedGroups, []uint8{0, 4}) {
+	if got.Checkpoints != 2 || !reflect.DeepEqual(got.SolvedPuzzles, []uint8{1, 3}) || !reflect.DeepEqual(got.ClearedGroups, []uint8{0, 4}) || !reflect.DeepEqual(got.OpenedChests, []uint8{0, 1, 2}) {
 		t.Fatalf("the overlay lost the route progress: %#v", *got)
 	}
 	got.SolvedPuzzles[0] = 9
-	if saved.SolvedPuzzles[0] != 1 {
+	got.OpenedChests[0] = 9
+	if saved.SolvedPuzzles[0] != 1 || saved.OpenedChests[0] != 0 {
 		t.Fatal("the overlay aliases the saved record's progress")
+	}
+}
+
+func TestRewardOverlayReturnsDetachedOpenedChestsWithoutAJournalGeneration(t *testing.T) {
+	_, rewards, _, _, _ := transitionFixture(t)
+	saved := SessionRecord{ID: 9, Seed: 99, ExpiresUnix: 200, OpenedChests: []uint8{0, 1, 2}}
+	live, err := rewards.OverlaySessions([]SessionRecord{saved}, 100, world.WorldgenVersion)
+	if err != nil || len(live) != 1 || live[0].Generation != 0 {
+		t.Fatalf("session-only overlay = %#v, %v", live, err)
+	}
+	if !reflect.DeepEqual(live[0].Session.OpenedChests, saved.OpenedChests) {
+		t.Fatal("session-only overlay lost opened chests")
+	}
+	live[0].Session.OpenedChests[0] = 9
+	if saved.OpenedChests[0] != 0 {
+		t.Fatal("session-only overlay aliases the caller's opened chests")
 	}
 }
