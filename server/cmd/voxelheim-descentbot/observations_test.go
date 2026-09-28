@@ -145,11 +145,11 @@ func TestConcurrentShutdownCallersRetainTheSameExitFailure(t *testing.T) {
 		go func() { results <- server.shutdown() }()
 	}
 	for range cap(results) {
-		if err := <-results; err != failure {
+		if err := <-results; !errors.Is(err, failure) {
 			t.Fatalf("shutdown lost exit failure: %v", err)
 		}
 	}
-	if err := server.shutdown(); err != failure {
+	if err := server.shutdown(); !errors.Is(err, failure) {
 		t.Fatalf("repeat shutdown: %v", err)
 	}
 }
