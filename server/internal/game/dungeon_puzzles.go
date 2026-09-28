@@ -138,24 +138,25 @@ func (p *Player) UseMechanism(pos [3]int32) (vnet.RefusalReason, error) {
 		return vnet.RefusalReasonPlayerIsDead, err
 	}
 	cell := [3]int64{int64(pos[0]), int64(pos[1]), int64(pos[2])}
-	if s.dungeon != nil {
-		if chest, known := s.dungeon.chests[cell]; known {
-			if distanceToVoxel(p.box(), cell) > p.reachLocked() {
-				return vnet.RefusalReasonOutOfReach, errors.New("the chest is out of reach")
-			}
-			return p.useDungeonChestLocked(chest)
-		}
-	}
 	var ref mechanismRef
+	var chest *dungeonChest
 	known := false
-	if s.dungeon != nil && s.dungeon.puzzles != nil {
-		ref, known = s.dungeon.puzzles.mechanisms[cell]
+	if s.dungeon != nil {
+		chest = s.dungeon.chests[cell]
+		if chest != nil {
+			known = true
+		} else if s.dungeon.puzzles != nil {
+			ref, known = s.dungeon.puzzles.mechanisms[cell]
+		}
 	}
 	if !known {
 		return vnet.RefusalReasonNotAMechanism, fmt.Errorf("no mechanism stands at %v", pos)
 	}
 	if reach, distance := p.reachLocked(), distanceToVoxel(p.box(), cell); distance > reach {
 		return vnet.RefusalReasonOutOfReach, fmt.Errorf("the mechanism is %.2f blocks from the player, past the reach of %.1f", distance, reach)
+	}
+	if chest != nil {
+		return p.useDungeonChestLocked(chest)
 	}
 	changed, err := s.dungeon.puzzles.use(ref)
 	if err != nil {

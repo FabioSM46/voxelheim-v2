@@ -206,6 +206,14 @@ func TestOpenedChestsRestoreAsOpenWithoutRerollingOrdinaryLoot(t *testing.T) {
 	at := time.Date(2026, 3, 14, 21, 0, 0, 0, time.UTC)
 	manager, _, _, _, session := savedRunAt(t, at)
 	loadDungeon(t, session)
+	// savedRunAt defeats the guardian directly. A real party solved the rune door
+	// first; model that prerequisite so restore's existing boss-implied progress
+	// does not legitimately add a solved puzzle to this fixture's saved route.
+	for _, stone := range world.InstanceRuneOrder(session.Seed) {
+		if _, err := session.Sim.dungeon.puzzles.use(mechanismRef{world.RunePuzzle, stone}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	a := chestAt(t, session.Sim, world.AntechamberChest)
 	p, _ := joinChestPlayer(t, session.Sim, 1, "Asta", a)
 	requireChestUse(t, p, a)
@@ -234,8 +242,8 @@ func TestOpenedChestsRestoreAsOpenWithoutRerollingOrdinaryLoot(t *testing.T) {
 	}
 	back, _ := joinChestPlayer(t, live.Sim, 1, "Asta", a)
 	requireChestRefusal(t, back, a, vnet.RefusalReasonChestAlreadyOpened)
-	if !reflect.DeepEqual(restarted.SavedSessions()[0].Route, saved[0].Route) {
-		t.Fatal("restore changed route progress")
+	if got := restarted.SavedSessions()[0].Route; !reflect.DeepEqual(got, saved[0].Route) {
+		t.Fatalf("restored route = %#v, want %#v", got, saved[0].Route)
 	}
 }
 
