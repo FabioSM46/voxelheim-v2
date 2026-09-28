@@ -91,6 +91,7 @@ type client struct {
 	actionRefusals    []protocol.ActionRefused
 	structures        []protocol.StructureState
 	accessibleLoot    []uint64
+	kingTarget        mobView
 	chunksIn          int
 	// roster is how many characters the latest snapshot's party roster names.
 	roster int
@@ -284,6 +285,7 @@ func (c *client) absorb(envelope *vnet.Envelope) {
 		// Another world: nothing the bot knew about the last one is true here.
 		c.view = newBlockView()
 		c.mobs = make(map[uint64]mobView)
+		c.kingTarget = mobView{}
 		c.worldID, c.worldSeed, c.havePos = wc.id, wc.seed, false
 		c.mu.Unlock()
 		select {
@@ -400,6 +402,9 @@ func (c *client) absorbSnapshot(table flatbuffers.Table) {
 			c.stats.sawMob(view)
 		}
 		c.mobs[view.id] = view
+		if view.kind == vnet.MobKindDraugrKing {
+			c.kingTarget = view
+		}
 	}
 	// A creature the snapshot no longer carries is either dead and gone or out of view;
 	// the stats decide which from whether this bot's blows were the last thing to reach it.

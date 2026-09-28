@@ -138,6 +138,7 @@ type runner struct {
 	rss    map[string]uint64
 	// websCut is how many cobwebs of the curtain the bot cut.
 	websCut int
+	hoard   hoardEvidence
 	// caveBase is the party's spider kills when this member's siege began, or -1 before
 	// it has, and caveWipes the party's wipes then: a wipe starts the waves again.
 	caveBase, caveWipes int
@@ -147,6 +148,9 @@ type runner struct {
 // member back at the furthest checkpoint the party has reached and the phase walks on
 // from there, until maxWipes wipes say the party cannot finish it.
 func (r *runner) phase(ctx context.Context, name string, body func(context.Context) error) error {
+	if r.opts.hoard {
+		r.hoard.Stage = name
+	}
 	r.say("phase: %s", name)
 	r.stats.begin(name)
 	for {
@@ -195,7 +199,7 @@ func (r *runner) route() []struct {
 	name string
 	body func(context.Context) error
 } {
-	return []struct {
+	steps := []struct {
 		name string
 		body func(context.Context) error
 	}{
@@ -211,6 +215,42 @@ func (r *runner) route() []struct {
 		{"king", r.kingFight},
 		{"return shortcut", r.returnShortcut},
 	}
+	if !r.opts.hoard {
+		return steps
+	}
+	var expanded []struct {
+		name string
+		body func(context.Context) error
+	}
+	for _, step := range steps {
+		expanded = append(expanded, step)
+		index := -1
+		switch step.name {
+		case "guardian":
+			index = world.AntechamberChest
+		case "timed grille":
+			index = world.SandHallChest
+		case "king":
+			index = world.KingChest
+		}
+		if index >= 0 {
+			expanded = append(expanded, struct {
+				name string
+				body func(context.Context) error
+			}{fmt.Sprintf("chest %d", index+1), func(ctx context.Context) error {
+				if err := r.checkChest(ctx, index); err != nil {
+					return fmt.Errorf("hoard assertion: %v", err)
+				}
+				if index == world.KingChest {
+					if err := r.collectKing(ctx); err != nil {
+						return fmt.Errorf("king reward assertion: %v", err)
+					}
+				}
+				return nil
+			}})
+		}
+	}
+	return expanded
 }
 
 // play is one member's whole run: through the portal with the others, then each part of

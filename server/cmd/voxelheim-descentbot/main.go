@@ -34,6 +34,7 @@ type options struct {
 	maxWipes     int
 	members      int
 	quiet        bool
+	hoard        bool
 	// Owned temporary storage, retained across the acceptance scenario's restart.
 	worldDir string
 }
@@ -54,6 +55,7 @@ func parseFlags(name string, args []string) (options, error) {
 	flags.IntVar(&o.members, "party", 3,
 		fmt.Sprintf("how many bots play, each its own character in one party: 1 to %d", len(memberNames)))
 	flags.BoolVar(&o.quiet, "quiet", false, "print only the report, not the run's progress")
+	flags.BoolVar(&o.hoard, "hoard", false, "verify personal chests, earned rune craft, paid repair and saved chests after restart (party 3)")
 	if err := flags.Parse(args); err != nil {
 		return o, err
 	}
@@ -68,6 +70,8 @@ func parseFlags(name string, args []string) (options, error) {
 		return o, fmt.Errorf("-timeout must be positive, got %v", o.timeout)
 	case o.members < 1 || o.members > len(memberNames):
 		return o, fmt.Errorf("-party must be in 1..%d, got %d", len(memberNames), o.members)
+	case o.hoard && o.members != 3:
+		return o, errors.New("-hoard requires -party 3")
 	case o.maxWipes < 1:
 		return o, fmt.Errorf("-max-wipes must be at least 1, got %d", o.maxWipes)
 	case !regexp.MustCompile(`^[a-z0-9-]{1,32}$`).MatchString(o.worldName):
@@ -158,6 +162,9 @@ func run(ctx context.Context, o options, out, progress io.Writer) (runErr error)
 		return err
 	}
 	playErr := pt.play(session)
+	if playErr == nil && o.hoard {
+		playErr = pt.finishHoard(session)
+	}
 	end()
 	for _, m := range members {
 		m.stats.finish()
@@ -167,6 +174,12 @@ func run(ctx context.Context, o options, out, progress io.Writer) (runErr error)
 	for range members {
 		playErr = errors.Join(playErr, <-readErrs)
 	}
+	if playErr == nil && o.hoard {
+		playErr = pt.restartHoard(ctx, o, server, pair, worldID)
+	}
+	if playErr == nil && o.hoard && !pt.hoardComplete() {
+		playErr = errors.New("hoard evidence is incomplete")
+	}
 	shutdownChecked = true
 	return finishRun(out, pt, playErr, server.shutdown)
 }
@@ -175,5 +188,8 @@ func run(ctx context.Context, o options, out, progress io.Writer) (runErr error)
 func finishRun(out io.Writer, pt *party, playErr error, shutdown func() error) error {
 	err := errors.Join(playErr, shutdown())
 	writeReport(out, pt, err)
+	if pt.leaderRunner().opts.hoard {
+		writeHoardReport(out, pt, err)
+	}
 	return err
 }

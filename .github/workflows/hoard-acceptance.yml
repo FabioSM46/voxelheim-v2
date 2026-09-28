@@ -1,0 +1,98 @@
+name: Kings hoard acceptance
+
+# Explicitly dispatched real-server evidence for #1317, never a CI/Integration job.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full merged develop commit to exercise
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kings-hoard-acceptance
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HOARD_SOURCE_COMMIT: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source belongs to develop
+        id: source
+        run: |
+          [[ "$HOARD_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HOARD_SOURCE_COMMIT"
+          git merge-base --is-ancestor "$HOARD_SOURCE_COMMIT" origin/develop
+          mkdir -p evidence "$RUNNER_TEMP/hoard-acceptance"
+          printf 'source_commit=%s\n' "$HOARD_SOURCE_COMMIT" > evidence/source.txt
+          printf 'not-started\n' > evidence/stage.txt
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Verify evidence exporter boundary
+        run: python3 scripts/test/hoard-evidence.test.py
+      - name: Build real server and acceptance client
+        working-directory: server
+        run: |
+          printf 'build\n' > ../evidence/stage.txt
+          go build -trimpath -o "$RUNNER_TEMP/hoard-acceptance/voxelheimd" ./cmd/voxelheimd
+          go build -trimpath -o "$RUNNER_TEMP/hoard-acceptance/descentbot" ./cmd/voxelheim-descentbot
+      - name: Play three-member hoard scenario
+        id: scenario
+        timeout-minutes: 80
+        shell: bash
+        run: |
+          printf 'scenario\n' > evidence/stage.txt
+          set +e
+          "$RUNNER_TEMP/hoard-acceptance/descentbot" \
+            -server "$RUNNER_TEMP/hoard-acceptance/voxelheimd" \
+            -party 3 -hoard -timeout 75m -seed 1 \
+            > "$RUNNER_TEMP/hoard-acceptance/raw.txt" 2>&1
+          result=$?
+          printf '%s\n' "$result" > "$RUNNER_TEMP/hoard-acceptance/exit-code"
+          exit 0
+      - name: Export sanitized success or failure observations
+        id: evidence
+        if: always() && steps.source.outcome == 'success'
+        shell: bash
+        run: |
+          raw="$RUNNER_TEMP/hoard-acceptance/raw.txt"
+          test -f "$raw" || : > "$raw"
+          code=125
+          if test -f "$RUNNER_TEMP/hoard-acceptance/exit-code"; then
+            code=$(cat "$RUNNER_TEMP/hoard-acceptance/exit-code")
+          fi
+          set +e
+          python3 scripts/export-hoard-evidence.py "$raw" evidence/acceptance.json "$code"
+          result=$?
+          set -e
+          printf '%s\n' "$result" > evidence/verdict.txt
+          # Fail closed: nothing is uploaded until every candidate passes privacy.
+          for report in evidence/*; do
+            bash scripts/check-body-privacy.sh < "$report"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.evidence.outcome == 'success'
+        with:
+          name: kings-hoard-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require complete wire acceptance
+        if: always()
+        run: |
+          test -s evidence/acceptance.json
+          test "$(cat evidence/verdict.txt)" = 0

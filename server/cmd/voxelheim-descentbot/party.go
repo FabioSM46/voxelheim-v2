@@ -251,6 +251,11 @@ func (pt *party) play(ctx context.Context) error {
 		if err := m.equip(ctx); err != nil {
 			return fmt.Errorf("equip %s: %w", m.c.name, err)
 		}
+		if m.opts.hoard {
+			if err := m.checkHoardBootstrap(); err != nil {
+				return err
+			}
+		}
 	}
 	if len(pt.members) > 1 {
 		if err := pt.form(ctx); err != nil {
