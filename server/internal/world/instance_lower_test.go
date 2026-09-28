@@ -239,6 +239,12 @@ func TestTheSandHallIsSandUnderSandstone(t *testing.T) {
 					pillars++
 					continue
 				}
+				if w.at(x, floor, z) == Chest {
+					if w.at(x, floor-1, z) != Sand {
+						t.Fatal("sand chest has no sand floor")
+					}
+					continue // indexed placement and approach space are pinned by the chest test
+				}
 				y := floor
 				for w.at(x, y, z) == Sand {
 					y++

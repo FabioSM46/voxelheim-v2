@@ -83,6 +83,7 @@ func TestTheDungeonAnchorsArePresentAndStandWhereTheirKindSays(t *testing.T) {
 		for kind, want := range map[AnchorKind]int{
 			AnchorInstanceArrival: 1, AnchorInstanceExit: 1, AnchorInstanceGuardian: 1, AnchorInstanceKing: 1,
 			AnchorInstanceGate: 1, AnchorInstanceCheckpoint: 3, AnchorInstanceMinorSpawn: 20 + 6 + 5,
+			AnchorInstanceChest:     3,
 			AnchorInstanceMechanism: 4 + 1 + 2, AnchorInstanceDoor: 25 + 9 + 9 + 12, AnchorInstanceTrigger: 4,
 		} {
 			if got := len(byKind[kind]); got != want {

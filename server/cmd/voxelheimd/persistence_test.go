@@ -1094,6 +1094,7 @@ func TestASavedDungeonRunSurvivesARestart(t *testing.T) {
 		Checkpoints:   2,
 		SolvedPuzzles: []uint8{1, 3},
 		ClearedGroups: []uint8{0, 5},
+		OpenedChests:  []uint8{0},
 	}}
 	if err := openSessionStore(t, dir).Save(stored); err != nil {
 		t.Fatalf("Save: %v", err)

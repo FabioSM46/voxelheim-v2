@@ -138,6 +138,14 @@ func (p *Player) UseMechanism(pos [3]int32) (vnet.RefusalReason, error) {
 		return vnet.RefusalReasonPlayerIsDead, err
 	}
 	cell := [3]int64{int64(pos[0]), int64(pos[1]), int64(pos[2])}
+	if s.dungeon != nil {
+		if chest, known := s.dungeon.chests[cell]; known {
+			if distanceToVoxel(p.box(), cell) > p.reachLocked() {
+				return vnet.RefusalReasonOutOfReach, errors.New("the chest is out of reach")
+			}
+			return p.useDungeonChestLocked(chest)
+		}
+	}
 	var ref mechanismRef
 	known := false
 	if s.dungeon != nil && s.dungeon.puzzles != nil {

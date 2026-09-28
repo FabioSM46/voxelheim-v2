@@ -921,7 +921,7 @@ func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSess
 		DefeatedBosses: rec.DefeatedBosses,
 		Bound:          bound,
 		Route: game.DungeonRoute{
-			Checkpoints: rec.Checkpoints, SolvedPuzzles: rec.SolvedPuzzles, ClearedGroups: rec.ClearedGroups,
+			Checkpoints: rec.Checkpoints, SolvedPuzzles: rec.SolvedPuzzles, ClearedGroups: rec.ClearedGroups, OpenedChests: rec.OpenedChests,
 		},
 		Generation: generation,
 	}
@@ -1464,6 +1464,7 @@ func (s *server) flushSessions() {
 			Checkpoints:    run.Route.Checkpoints,
 			SolvedPuzzles:  run.Route.SolvedPuzzles,
 			ClearedGroups:  run.Route.ClearedGroups,
+			OpenedChests:   run.Route.OpenedChests,
 		}
 	}
 	if err := s.runs.Save(records); err != nil {

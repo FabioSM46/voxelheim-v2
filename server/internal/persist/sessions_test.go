@@ -40,6 +40,7 @@ func runsFixture() []SessionRecord {
 			Checkpoints:   3,
 			SolvedPuzzles: []uint8{1, 3},
 			ClearedGroups: []uint8{0, 1, 2, 3, 5, 4},
+			OpenedChests:  []uint8{0, 2},
 		},
 		{
 			ID:             8_000_000_009,
@@ -406,6 +407,7 @@ func TestSessionStoreMigratesAVersionOneFile(t *testing.T) {
 	legacy := runsFixture()
 	for i := range legacy {
 		legacy[i].Checkpoints, legacy[i].SolvedPuzzles, legacy[i].ClearedGroups = 0, nil, nil
+		legacy[i].OpenedChests = nil
 	}
 	store := openRuns(t, t.TempDir())
 	if err := os.WriteFile(store.Path(), legacySessionsFile(legacy), 0o644); err != nil {

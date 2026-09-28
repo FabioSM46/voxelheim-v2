@@ -185,6 +185,7 @@ func buildDungeon() *Schematic {
 	s.Anchor(AnchorInstanceCheckpoint, 17, dungeonShore, 90, 0)
 	s.Anchor(AnchorInstanceKing, kingCX, dungeonKingFloor, kingCZ, 0)
 	lowerAnchors(s)
+	placeDungeonChests(s)
 	return s.MustBuild()
 }
 

@@ -33,6 +33,7 @@ type dungeonEncounters struct {
 	guardianID, kingID uint64
 	progress           dungeonProgress
 	puzzles            *dungeonPuzzles
+	chests             map[[3]int64]*dungeonChest
 	changes            [][]byte
 	pending            map[*Player]int
 	// descent is the minor encounters: placed groups, triggers and the spider waves

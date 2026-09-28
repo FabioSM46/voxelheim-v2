@@ -109,7 +109,7 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) error {
 		}
 	}
 	for id, corpse := range s.corpses {
-		if boxOverlapsChunk(mobRegistry[corpse.kind].body.boxAt(corpse.pos), coord) {
+		if boxOverlapsChunk(corpse.box(), coord) {
 			s.removeCorpseLocked(id)
 		}
 	}
