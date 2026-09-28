@@ -85,7 +85,9 @@ impl Plugin for StatusUiPlugin {
                     refresh_status_text,
                     refresh_world_text,
                     refresh_player_text,
-                    publish_gameplay_messages.in_set(PublishPlayerMessages),
+                    publish_gameplay_messages
+                        .in_set(PublishPlayerMessages)
+                        .after(crate::player::ReconcileLoot),
                     (sample_readout, refresh_readout).chain(),
                 ),
             );
@@ -428,6 +430,7 @@ fn refresh_player_text(
 /// without `NetPlugin`, and a UI plugin that panicked without a socket would be untestable
 /// exactly where it matters.
 fn publish_gameplay_messages(
+    mut loot: Option<ResMut<crate::player::LootWindow>>,
     inbox: Option<ResMut<RefusalInbox>>,
     endings: Option<ResMut<SessionEndingInbox>>,
     mut trade_ended: MessageReader<PlayerTradeEnded>,
@@ -454,7 +457,11 @@ fn publish_gameplay_messages(
                 energy_refusals.write(EnergyRefused);
                 continue;
             }
-            match describe_refusal(&refused) {
+            let chest = loot
+                .as_deref_mut()
+                .is_some_and(|loot| loot.take_chest_refusal(&refused));
+            let description = describe_contextual_refusal(&refused, chest);
+            match description {
                 Some(line) => {
                     messages.write(PlayerMessage::new(PlayerMessageKind::Warn, line));
                 }
@@ -552,8 +559,6 @@ fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
         RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
-            // Chest presentation follows in #1315.
-            | RefusalReason::ChestAlreadyOpened
     )
 }
 
@@ -568,6 +573,17 @@ fn has_no_sentence_yet(reason: RefusalReason) -> bool {
 /// build has been told the bar explains, and falls through to the ordinary path.
 fn answered_by_the_energy_bar(refused: &ActionRefused) -> bool {
     refused.action == RefusedAction::Energy && refused.reason == RefusalReason::NotEnoughEnergy
+}
+
+fn describe_contextual_refusal(refused: &ActionRefused, chest: bool) -> Option<String> {
+    if chest
+        && refused.action == RefusedAction::UseMechanism
+        && refused.reason == RefusalReason::MechanismLocked
+    {
+        Some("Locked while the king lives".to_owned())
+    } else {
+        describe_refusal(refused)
+    }
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
@@ -620,6 +636,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
                 Some("Cannot use that: it is not a lever or rune stone".to_owned())
             }
             RefusalReason::MechanismLocked => Some("Cannot use that: it will not move".to_owned()),
+            RefusalReason::ChestAlreadyOpened => Some("Already opened".to_owned()),
             RefusalReason::OutOfReach => Some("Cannot use that: it is too far away".to_owned()),
             RefusalReason::PlayerIsDead => Some("Cannot use that while dead".to_owned()),
             _ => None,
@@ -1501,9 +1518,9 @@ mod tests {
             RefusalReason::NotEnoughEnergy => RefusedAction::Energy,
             RefusalReason::HandsOccupied => RefusedAction::MoveInventory,
             // Their sentences live behind the mechanism action, for the marker trap below.
-            RefusalReason::NotAMechanism | RefusalReason::MechanismLocked => {
-                RefusedAction::UseMechanism
-            }
+            RefusalReason::NotAMechanism
+            | RefusalReason::MechanismLocked
+            | RefusalReason::ChestAlreadyOpened => RefusedAction::UseMechanism,
             RefusalReason::MountNotLearned
             | RefusalReason::AlreadyMounted
             | RefusalReason::MountNotGrounded
@@ -1655,6 +1672,8 @@ mod tests {
                 assert!(
                     line.starts_with("Cannot ")
                         || line == "No arrows"
+                        // The chest acceptance contract specifies this exact short answer.
+                        || (reason == RefusalReason::ChestAlreadyOpened && line == "Already opened")
                         || line == "A two-handed weapon leaves no hand for a shield"
                         || line.starts_with("The map holds no more marks")
                         || line == "That note is too long"
@@ -2548,5 +2567,32 @@ mod tests {
 
         let (_, _, line) = readout(&mut app);
         assert!(line.starts_with("62 fps"), "{line}");
+    }
+    #[test]
+    fn chest_refusals_have_one_sentence_without_changing_lever_lock_text() {
+        let refused = ActionRefused {
+            action: RefusedAction::UseMechanism,
+            reason: RefusalReason::MechanismLocked,
+            anchor: None,
+        };
+        assert_eq!(
+            describe_contextual_refusal(&refused, true).as_deref(),
+            Some("Locked while the king lives")
+        );
+        assert_eq!(
+            describe_contextual_refusal(&refused, false).as_deref(),
+            Some("Cannot use that: it will not move")
+        );
+        assert_eq!(
+            describe_contextual_refusal(
+                &ActionRefused {
+                    reason: RefusalReason::ChestAlreadyOpened,
+                    ..refused
+                },
+                true
+            )
+            .as_deref(),
+            Some("Already opened")
+        );
     }
 }

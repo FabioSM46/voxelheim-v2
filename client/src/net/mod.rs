@@ -573,11 +573,13 @@ impl LearnedMountsInbox {
 #[derive(Resource, Debug, Default)]
 pub struct LootInbox(Vec<LootEvent>);
 
-/// The two server-owned changes one open loot window can receive.
+/// Ordered server answers for loot presentation, including refused chest interactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LootEvent {
     State(LootState),
     Closed(LootClosed),
+    /// Cancels a pending chest use in the same wire order as loot answers.
+    MechanismRefused(ActionRefused),
 }
 
 impl LootInbox {
@@ -881,9 +883,9 @@ impl ResidentInbox {
 /// the **newest** rather than merging: unlike an inventory, two refusals are two
 /// different answers, and the one worth a line on screen is the one that just arrived.
 ///
-/// The whole ECS surface of this message is one resource read by one system, which is
-/// deliberate. A refusal is a sentence; nothing branches on it, nothing simulates from
-/// it, and nothing about the world changes because one arrived.
+/// The status UI consumes this resource once. A mechanism refusal also enters
+/// `LootInbox` in wire order to cancel a pending chest presentation; neither consumer
+/// changes the world or decides whether the requested action was legal.
 #[derive(Resource, Debug, Default)]
 pub struct RefusalInbox(Vec<ActionRefused>);
 
@@ -2648,7 +2650,14 @@ fn drain_session_events(
             // half worth a log line is a refusal that says *this build* sent something the
             // server could not read, and the status line is where that decision is made,
             // beside the sentence it writes for the other half.
-            Ok(SessionEvent::ActionRefused(refused)) => inboxes.refusals.0.push(refused),
+            Ok(SessionEvent::ActionRefused(refused)) => {
+                if refused.action == RefusedAction::UseMechanism
+                    && let Some(loot) = inboxes.loot.as_deref_mut()
+                {
+                    loot.0.push(LootEvent::MechanismRefused(refused));
+                }
+                inboxes.refusals.0.push(refused);
+            }
 
             // Presentation-only queues. The UI keeps every line and never reinterprets
             // received text as a command or as identity.

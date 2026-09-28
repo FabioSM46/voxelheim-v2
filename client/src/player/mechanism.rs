@@ -67,6 +67,9 @@ const fn is_lever(block: BlockId) -> bool {
 /// wrong guess is harmless.
 pub(super) fn looks_operable(pos: IVec3, block_at: impl Fn(IVec3) -> BlockId) -> bool {
     let block = block_at(pos);
+    if palette::is_chest(block) {
+        return true;
+    }
     if !is_mechanism(block) {
         return false;
     }
@@ -96,6 +99,21 @@ pub(super) fn prompt(block: BlockId, key: KeyCode) -> Option<String> {
     Some(format!("[{key}] {verb}"))
 }
 
+fn chest_prompt(key: KeyCode, waiting: bool) -> String {
+    if waiting {
+        return "Waiting for chest response".to_owned();
+    }
+    let key = key_name(key).map_or_else(|| "?".to_owned(), str::to_uppercase);
+    format!("{key}: Chest")
+}
+
+/// The chest uses the station UI's under-crosshair prompt, after corpse priority.
+#[derive(Resource, Default)]
+pub struct ChestHint(pub Option<String>);
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ChestPromptUpdate;
+
 #[derive(Component)]
 struct MechanismHint;
 
@@ -104,6 +122,7 @@ pub(super) struct MechanismPlugin;
 impl Plugin for MechanismPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AimedMechanism>()
+            .init_resource::<ChestHint>()
             .add_systems(Startup, spawn_hint)
             .add_systems(
                 Update,
@@ -111,7 +130,9 @@ impl Plugin for MechanismPlugin {
                     .after(super::target::AimBlocks)
                     .after(AimStructures)
                     .after(ApplySnapshots)
-                    .after(ApplyInputMode),
+                    .after(ApplyInputMode)
+                    .after(super::loot::OriginateInteract)
+                    .in_set(ChestPromptUpdate),
             );
     }
 }
@@ -167,6 +188,8 @@ impl KeyOwners<'_> {
 }
 
 fn show_hint(
+    loot: Option<Res<super::LootWindow>>,
+    mut chest: ResMut<ChestHint>,
     gate: InputGate<'_>,
     aimed: Res<AimedMechanism>,
     owners: KeyOwners<'_>,
@@ -177,6 +200,25 @@ fn show_hint(
         || KeyCode::KeyF,
         |settings| settings.bindings().key(Control::Interact),
     );
+    chest.0 = aimed
+        .0
+        .filter(|aimed| {
+            palette::is_chest(aimed.block)
+                && gate.may_act()
+                && !owners.session.as_deref().is_some_and(|session| {
+                    owners
+                        .buffer
+                        .nearest_accessible_corpse(session.0.entity_id, MAX_REACH)
+                        .is_some()
+                })
+        })
+        .map(|_| {
+            chest_prompt(
+                key,
+                loot.as_deref()
+                    .is_some_and(super::LootWindow::chest_request_outstanding),
+            )
+        });
     let line = aimed
         .0
         .filter(|_| gate.may_aim() && !owners.outranked())
@@ -200,6 +242,7 @@ fn show_hint(
 
 pub(super) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<AimedMechanism>(world);
+    crate::world::transition::reset::<ChestHint>(world);
 }
 
 #[cfg(test)]
@@ -290,5 +333,32 @@ mod tests {
             Some("[F] Touch the rune stone")
         );
         assert_eq!(prompt(palette::STONE, KeyCode::KeyF), None);
+    }
+    #[test]
+    fn closed_and_open_chests_are_aimable_and_use_the_bound_interact_key() {
+        for chest in [palette::CHEST, palette::CHEST_OPEN] {
+            assert!(looks_operable(IVec3::ZERO, |at| if at == IVec3::ZERO {
+                chest
+            } else {
+                palette::STONE
+            }));
+            assert!(
+                prompt(chest, KeyCode::KeyF).is_none(),
+                "no second mechanism hint"
+            );
+        }
+        assert_eq!(chest_prompt(KeyCode::KeyF, false), "F: Chest");
+        assert_eq!(chest_prompt(KeyCode::KeyE, false), "E: Chest");
+    }
+    #[test]
+    fn an_outstanding_chest_answer_has_feedback_without_an_actionable_key() {
+        assert_eq!(
+            chest_prompt(KeyCode::KeyF, true),
+            "Waiting for chest response"
+        );
+        assert_eq!(
+            chest_prompt(KeyCode::KeyE, true),
+            "Waiting for chest response"
+        );
     }
 }
