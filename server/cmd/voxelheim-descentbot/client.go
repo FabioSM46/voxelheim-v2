@@ -82,9 +82,16 @@ type client struct {
 	control   intent
 	// updates counts every BlockUpdate by cell, so a caller can wait for "this cell
 	// changed since I asked" without keeping its own subscription.
-	updates  map[cell]int
-	stacks   []uint16
-	chunksIn int
+	updates           map[cell]int
+	stacks            []uint16
+	inventory         protocol.InventoryState
+	inventoryRevision uint64
+	lootStates        []protocol.LootState
+	lootClosed        []uint64
+	actionRefusals    []protocol.ActionRefused
+	structures        []protocol.StructureState
+	accessibleLoot    []uint64
+	chunksIn          int
 	// roster is how many characters the latest snapshot's party roster names.
 	roster int
 	// believed is every region the latest EncounterTimeline announced, and believedAt
@@ -121,13 +128,19 @@ func dial(ctx context.Context, addr, fingerprint string) (net.Conn, error) {
 	return dialer.DialContext(ctx, "tcp", addr)
 }
 
-// join performs the handshake: hello with a ticket and a character creation written back
-// to back, then everything up to the welcome.
-func join(ctx context.Context, addr, fingerprint, name string, credential []byte, stats *runStats) (*client, error) {
+// join follows the real three-exchange handshake. On rejoin an absent saved character
+// is a failure, never permission to create a replacement that hides persistence loss.
+func join(ctx context.Context, addr, fingerprint, name string, credential []byte, stats *runStats, existing bool) (*client, error) {
 	conn, err := dial(ctx, addr, fingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
+	welcomed := false
+	defer func() {
+		if !welcomed {
+			_ = conn.Close()
+		}
+	}()
 	c := &client{
 		name: name, conn: conn, reader: bufio.NewReaderSize(conn, 64<<10),
 		view: newBlockView(), mobs: make(map[uint64]mobView), updates: make(map[cell]int),
@@ -139,17 +152,10 @@ func join(ctx context.Context, addr, fingerprint, name string, credential []byte
 		return nil, err
 	}
 	hello := protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, name, credential)
-	create := protocol.EncodeCreateCharacterRequest(protocol.CreateCharacterRequest{
-		Name: name, Appearance: protocol.Appearance{
-			SkinColor: 0x00E3C4A0, ShirtColor: 0x004A5D3B, TrousersColor: 0x002B2118,
-			ShoesColor: 0x00553311, HairModel: vnet.HairModelBraided, HairColor: 0x00B07A32,
-		}, HasAppearance: true,
-	})
-	for _, frame := range [][]byte{hello, create} {
-		if err := transport.WriteFrame(conn, frame); err != nil {
-			return nil, fmt.Errorf("write the handshake: %w", err)
-		}
+	if err := transport.WriteFrame(conn, hello); err != nil {
+		return nil, fmt.Errorf("write the hello: %w", err)
 	}
+	chose := false
 	for {
 		frame, err := transport.ReadFrame(c.reader)
 		if err != nil {
@@ -158,8 +164,29 @@ func join(ctx context.Context, addr, fingerprint, name string, credential []byte
 		envelope := vnet.GetRootAsEnvelope(frame, 0)
 		var table flatbuffers.Table
 		switch envelope.PayloadType() {
+		case vnet.PayloadServerCharacterList:
+			if chose || !envelope.Payload(&table) {
+				return nil, errors.New("unexpected character list")
+			}
+			var list vnet.ServerCharacterList
+			list.Init(table.Bytes, table.Pos)
+			characters := make([]protocol.CharacterSummary, 0, list.CharactersLength())
+			var summary vnet.CharacterSummary
+			for i := range list.CharactersLength() {
+				if list.Characters(&summary, i) {
+					characters = append(characters, protocol.CharacterSummary{CharacterID: summary.CharacterId(), Name: string(summary.Name())})
+				}
+			}
+			choice, err := characterChoice(name, characters, existing)
+			if err != nil {
+				return nil, err
+			}
+			if err := transport.WriteFrame(conn, choice); err != nil {
+				return nil, fmt.Errorf("write the character choice: %w", err)
+			}
+			chose = true
 		case vnet.PayloadServerWelcome:
-			if !envelope.Payload(&table) {
+			if !chose || !envelope.Payload(&table) {
 				return nil, errors.New("the welcome carried no payload")
 			}
 			var welcome vnet.ServerWelcome
@@ -171,7 +198,11 @@ func join(ctx context.Context, addr, fingerprint, name string, credential []byte
 				return nil, errors.New("the welcome named no entity id")
 			}
 			c.worldSeed = welcome.WorldSeed()
-			return c, conn.SetDeadline(time.Time{})
+			if err := conn.SetDeadline(time.Time{}); err != nil {
+				return nil, err
+			}
+			welcomed = true
+			return c, nil
 		case vnet.PayloadServerReject:
 			if !envelope.Payload(&table) {
 				return nil, errors.New("refused without a reason")
@@ -287,6 +318,7 @@ func (c *client) absorb(envelope *vnet.Envelope) {
 	case vnet.PayloadActionRefused:
 		var refused vnet.ActionRefused
 		refused.Init(table.Bytes, table.Pos)
+		c.absorbRefusal(&refused)
 		select {
 		case c.refusals <- fmt.Sprintf("%s: %s", vnet.EnumNamesRefusedAction[refused.Action()], vnet.EnumNamesRefusalReason[refused.Reason()]):
 		default:
@@ -300,6 +332,20 @@ func (c *client) absorb(envelope *vnet.Envelope) {
 		}
 		c.mu.Lock()
 		c.stacks = stacks
+		c.inventory = inventoryFromWire(&state)
+		c.inventoryRevision++
+		c.mu.Unlock()
+	case vnet.PayloadLootState:
+		var state vnet.LootState
+		state.Init(table.Bytes, table.Pos)
+		c.mu.Lock()
+		c.lootStates = append(c.lootStates, lootFromWire(&state))
+		c.mu.Unlock()
+	case vnet.PayloadLootClosed:
+		var closed vnet.LootClosed
+		closed.Init(table.Bytes, table.Pos)
+		c.mu.Lock()
+		c.lootClosed = append(c.lootClosed, closed.CorpseId())
 		c.mu.Unlock()
 	case vnet.PayloadBlowLanded:
 		var blow vnet.BlowLanded
@@ -336,6 +382,7 @@ func (c *client) absorbSnapshot(table flatbuffers.Table) {
 		c.level, c.energy = vitals.Level(), vitals.Energy()
 	}
 	c.roster = snapshot.PartyRosterLength()
+	c.absorbHoardSnapshot(&snapshot)
 	seen := make(map[uint64]bool, snapshot.MobsLength())
 	var m vnet.MobState
 	for i := range snapshot.MobsLength() {
