@@ -25,7 +25,7 @@ use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
 use super::crafting::{
     ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_CAP,
-    ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_PICKAXE,
+    ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_RUNIC_SWORD,
     ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
     ITEM_WOODEN_SCEPTRE,
 };
@@ -63,6 +63,9 @@ pub(super) const ITEM_RAW_IRON: u16 = 6;
 pub(super) const ITEM_BONE: u16 = 13;
 pub(super) const ITEM_VARGR_PELT: u16 = 14;
 pub(super) const ITEM_RAW_MEAT: u16 = 19;
+
+/// The king's personal-loot reagent; presentation only, appended by the server at 47.
+pub(super) const ITEM_KING_RUNE: u16 = 47;
 
 /// The three blocks worldgen 3 put in the ground: a desert's sand and sandstone,
 /// and the gravel patches that break up plains and taiga soil.
@@ -283,6 +286,10 @@ enum ItemColour {
     Silver,
     /// One of the world horse rig's three exact coat colours.
     Horse(MountKind),
+    /// Cold violet reagent, distinct from iron and coal.
+    KingRune,
+    /// Pale violet steel, distinct from the iron blade in every shared renderer.
+    RunicSteel,
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
@@ -332,6 +339,8 @@ impl ItemColour {
                 let [r, g, b] = SILVER_LINEAR;
                 [r, g, b, 1.0]
             }
+            Self::KingRune => [0.32, 0.13, 0.60, 1.0],
+            Self::RunicSteel => [0.58, 0.48, 0.78, 1.0],
             Self::Horse(kind) => {
                 let colour = super::horse::coat_colour(kind).to_linear();
                 [colour.red, colour.green, colour.blue, colour.alpha]
@@ -445,7 +454,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 46] = [
+pub(super) const ITEMS: [ItemDisplay; 48] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -887,6 +896,22 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         livery: None,
         armour_style: None,
     },
+    ItemDisplay {
+        item_id: ITEM_KING_RUNE,
+        name: "King's Rune",
+        shape: ItemShape::Material,
+        colour: ItemColour::KingRune,
+        livery: None,
+        armour_style: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_RUNIC_SWORD,
+        name: "Runic Sword",
+        shape: ItemShape::Blade,
+        colour: ItemColour::RunicSteel,
+        livery: None,
+        armour_style: None,
+    },
 ];
 
 /// The stablemaster item whose canonical label belongs to one wire mount kind.
@@ -1169,6 +1194,8 @@ mod tests {
             ITEM_LEATHER_BENCH,
             ITEM_ARMOUR_BENCH,
             ITEM_ENCHANTING_TABLE,
+            ITEM_KING_RUNE,
+            ITEM_RUNIC_SWORD,
         ];
         for item_id in declared {
             assert!(
@@ -1180,6 +1207,28 @@ mod tests {
             ITEMS.len(),
             declared.len(),
             "the registry holds a row for an id nothing else declares, or this list is stale"
+        );
+    }
+
+    #[test]
+    fn kings_hoard_rows_keep_the_server_ids_and_distinct_existing_shapes() {
+        assert_eq!(ITEM_KING_RUNE, 47);
+        assert_eq!(ITEM_RUNIC_SWORD, 48);
+        assert_eq!(item_shape(ITEM_KING_RUNE), ItemShape::Material);
+        assert_eq!(item_shape(ITEM_RUNIC_SWORD), ItemShape::Blade);
+        assert_eq!(item_label(ITEM_KING_RUNE), "King's Rune");
+        assert_eq!(item_label(ITEM_RUNIC_SWORD), "Runic Sword");
+        assert_ne!(
+            item_linear_rgba(ITEM_KING_RUNE),
+            item_linear_rgba(ITEM_RAW_IRON)
+        );
+        assert_ne!(
+            item_linear_rgba(ITEM_KING_RUNE),
+            item_linear_rgba(ITEM_RAW_COAL)
+        );
+        assert_ne!(
+            item_linear_rgba(ITEM_RUNIC_SWORD),
+            item_linear_rgba(ITEM_IRON_SWORD)
         );
     }
 

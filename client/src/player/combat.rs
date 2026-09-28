@@ -56,10 +56,15 @@ pub(super) const ITEM_RUSTY_SWORD: u16 = 7;
 /// `BLADE_SHAPES` is narrower and test-only: it pins blade presentation to this routing,
 /// while the bow is deliberately routed here without pretending to be a blade.
 #[cfg(test)]
-const BLADE_SHAPES: &[u16] = &[ITEM_RUSTY_SWORD, crafting::ITEM_IRON_SWORD];
+const BLADE_SHAPES: &[u16] = &[
+    ITEM_RUSTY_SWORD,
+    crafting::ITEM_IRON_SWORD,
+    crafting::ITEM_RUNIC_SWORD,
+];
 const LEFT_BUTTON_USES: &[u16] = &[
     ITEM_RUSTY_SWORD,
     crafting::ITEM_IRON_SWORD,
+    crafting::ITEM_RUNIC_SWORD,
     crafting::ITEM_BOW,
     crafting::ITEM_WOODEN_SCEPTRE,
 ];
@@ -820,7 +825,7 @@ mod tests {
     use crate::net::{
         InventoryInbox, InventoryStack, InventoryState, PlayerVitals, Session, SessionParams,
     };
-    use crate::player::crafting::{ITEM_IRON_SWORD, ITEM_SHARPENING_STONE};
+    use crate::player::crafting::{ITEM_IRON_SWORD, ITEM_RUNIC_SWORD, ITEM_SHARPENING_STONE};
     use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE, ItemShape};
     use crate::player::structures::{ITEM_FORGE, ITEM_TENT};
     use crate::player::{InputMode, PlayerPlugin, SelfVitals};
@@ -1022,6 +1027,7 @@ mod tests {
         [
             ("the rusty sword", blade_of(ITEM_RUSTY_SWORD)),
             ("the iron sword", blade_of(ITEM_IRON_SWORD)),
+            ("the runic sword", blade_of(ITEM_RUNIC_SWORD)),
         ]
     }
 
@@ -1687,6 +1693,7 @@ mod tests {
         for (blade, item_id) in [
             ("the rusty sword", ITEM_RUSTY_SWORD),
             ("the iron sword", ITEM_IRON_SWORD),
+            ("the runic sword", ITEM_RUNIC_SWORD),
         ] {
             for (wear, durability, max_durability, want) in [
                 ("fresh", 100, 100, true),
@@ -1814,7 +1821,7 @@ mod tests {
 
         // The other direction, and the proof this sweep is not passing vacuously: a run
         // that matched nothing at all would satisfy the loop above perfectly.
-        for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
+        for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD, ITEM_RUNIC_SWORD] {
             assert!(
                 drawn_as_blades.contains(&item_id),
                 "item {item_id} swings and the hand does not draw it as a blade"
