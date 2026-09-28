@@ -23,12 +23,6 @@ func newLootRNG(worldSeed int64) *rand.Rand {
 	return rand.New(rand.NewPCG(uint64(worldSeed), mobLootStream))
 }
 
-type lootRoll struct {
-	item     ItemID
-	silver   bool
-	min, max uint16
-}
-
 type corpseEntry struct {
 	entryID uint64
 	stack   inventoryStack
@@ -286,7 +280,11 @@ func standingDistanceSquared(a, b [3]float64) float64 {
 // rollLootLocked rolls the species table exactly once, at the Corpse transition — which is
 // the tick of the killing blow, and the only tick on which it is ever called.
 func (s *Sim) rollLootLocked(m *mob) corpseContainer {
-	table := m.species().loot
+	return s.rollTableLocked(m.species().loot)
+}
+
+// rollTableLocked settles one ordinary container from any reward source.
+func (s *Sim) rollTableLocked(table lootTable) corpseContainer {
 	container := corpseContainer{entries: make([]corpseEntry, 0, len(table)), revision: 1}
 	for _, roll := range table {
 		count := roll.min
@@ -300,9 +298,13 @@ func (s *Sim) rollLootLocked(m *mob) corpseContainer {
 			container.silver += uint32(count)
 			continue
 		}
+		item := roll.item
+		if len(roll.oneOf) != 0 {
+			item = roll.oneOf[s.loot.IntN(len(roll.oneOf))]
+		}
 		container.entries = append(container.entries, corpseEntry{
 			entryID: uint64(len(container.entries) + 1),
-			stack:   stackOf(roll.item, count),
+			stack:   stackOf(item, count),
 		})
 	}
 	return container
