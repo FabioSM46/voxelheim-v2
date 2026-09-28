@@ -102,6 +102,7 @@ func TestTheBossRowsCarryThePricedNumbers(t *testing.T) {
 		loot: []lootRoll{
 			{item: ItemIronSword, min: 1, max: 1},
 			{item: ItemBone, min: 3, max: 5},
+			{item: ItemKingRune, min: 1, max: 1},
 		},
 	}
 	if !reflect.DeepEqual(draugrKingRow, wantKing) {

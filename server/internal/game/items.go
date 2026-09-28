@@ -153,6 +153,11 @@ const (
 	ItemLeatherBench
 	ItemArmourBench
 	ItemEnchantingTable
+
+	// The king's reagent and the blade it binds. Appended, never inserted: these ids
+	// cross the wire and are persisted, so the bench ids above must never move.
+	ItemKingRune
+	ItemRunicSword
 )
 
 // What each blade is worth, and the only copy of it.
@@ -175,6 +180,12 @@ const (
 	// where this one is worth the ore because it is worth *carrying*.
 	IronSwordMaxDurability uint16 = 200
 	IronSwordDamage        uint16 = 40
+
+	// A king's rune raises iron's 40 damage to 50 without one-shotting a 60-health
+	// draugr. Three hundred durability adds half again to iron's 200; the reagent buys
+	// longer use as well as harder hits, while field kits still restore flat amounts.
+	RunicSwordMaxDurability uint16 = 300
+	RunicSwordDamage        uint16 = 50
 
 	// What the three implements are worth, on the same terms the blades are: their own
 	// numbers, beside the registry, generalising to nothing.
@@ -399,6 +410,10 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// The forge's own products. The blade is equipment on the same terms the rusty one
 	// is: one to a slot, its own wear, its own damage, worn in one hand.
 	ItemIronSword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, oneHanded: true, maxDurability: IronSwordMaxDurability, meleeDamage: IronSwordDamage},
+	// The rune is a small stackable reagent: all capability columns deliberately stay
+	// zero. Its only sink is the enchanting recipe; it is neither a kit nor food.
+	ItemKingRune:   {places: world.Air, maxStack: 64},
+	ItemRunicSword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, oneHanded: true, maxDurability: RunicSwordMaxDurability, meleeDamage: RunicSwordDamage},
 
 	// A stone is a consumable, not equipment: it wears nothing out because spending it
 	// *is* how it is used, and eight to a stack is what makes "limited supplies" a

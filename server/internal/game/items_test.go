@@ -276,7 +276,7 @@ func TestEveryWeaponIsWornInTheMainHandAndNothingElseIs(t *testing.T) {
 				id, definition.wornAt, definition.meleeDamage, definition.launches)
 		}
 	}
-	for _, id := range []ItemID{ItemRustySword, ItemIronSword, ItemBow, ItemWoodenSceptre} {
+	for _, id := range []ItemID{ItemRustySword, ItemIronSword, ItemRunicSword, ItemBow, ItemWoodenSceptre} {
 		if definition, _ := itemByID(id); definition.wornAt != wornMainHand {
 			t.Errorf("weapon %d is worn at %d, want the main hand", id, definition.wornAt)
 		}

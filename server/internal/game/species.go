@@ -437,12 +437,13 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		nocturnal:           false,
 		// The king's own iron sword, and the bones of what he was. One blade, fixed:
 		// stackOf gives it full durability, so this is a whole second weapon rather than
-		// a fraction of one, and a fixed count is what keeps a boss's reward a *thing*
-		// the party divides rather than a number they roll. No silver, for the reason
-		// the guardian carries none.
+		// a fraction of one. Each frozen roster member gets a personal blade and one
+		// rune to bind into it at an enchanting table, alongside the existing bones.
+		// No silver, for the reason the guardian carries none.
 		loot: []lootRoll{
 			{item: ItemIronSword, min: 1, max: 1},
 			{item: ItemBone, min: 3, max: 5},
+			{item: ItemKingRune, min: 1, max: 1},
 		},
 	},
 

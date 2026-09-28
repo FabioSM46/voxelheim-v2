@@ -15,11 +15,12 @@ import (
 var mainHandHands = map[ItemID]bool{
 	ItemRustySword:    true,
 	ItemIronSword:     true,
+	ItemRunicSword:    true,
 	ItemBow:           false,
 	ItemWoodenSceptre: false,
 }
 
-// The registry records which weapons need both hands: the bow and the sceptre do, the two
+// The registry records which weapons need both hands: the bow and the sceptre do, the three
 // swords do not, every main-hand row is classified, and no row that is not held in the
 // main hand claims to be one-handed.
 func TestEveryMainHandRowIsClassifiedByHowManyHandsItTakes(t *testing.T) {
