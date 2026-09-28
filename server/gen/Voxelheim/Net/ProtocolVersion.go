@@ -359,7 +359,13 @@ const (
 	/// `ActionRefused`, whose decoders are total. Mechanism *state* adds nothing to the
 	/// contract — levers, lit runes and doors are blocks, and a block changing is the
 	/// existing `BlockUpdate`.
-	ProtocolVersionCurrent ProtocolVersion = 46
+	/// The king's hoard: StationRepairRequest is client -> server; a V46 server
+	/// cannot name its tag and would close the session after a clean handshake.
+	/// RunicSword, StationRepair, ChestAlreadyOpened, NothingToRepair and NotAtStation
+	/// are appended;
+	/// station repair reuses NotEnoughSilver = 28. Chests add no message: they reuse
+	/// MechanismUseRequest inbound and LootState/LootTakeAllRequest for looting.
+	ProtocolVersionCurrent ProtocolVersion = 47
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

@@ -973,6 +973,8 @@ pub enum RecipeId {
     LeatherBench,
     ArmourBench,
     EnchantingTable,
+    #[allow(dead_code)] // V47 contract; #1316 adds the display recipe.
+    RunicSword,
 }
 
 impl RecipeId {
@@ -1010,6 +1012,7 @@ impl RecipeId {
             Self::LeatherBench => fb::RecipeID::LeatherBench,
             Self::ArmourBench => fb::RecipeID::ArmourBench,
             Self::EnchantingTable => fb::RecipeID::EnchantingTable,
+            Self::RunicSword => fb::RecipeID::RunicSword,
         }
     }
 }
@@ -1511,6 +1514,7 @@ pub enum RefusedAction {
     /// V46. A lever or rune stone use that moved nothing; the blocks in view are still
     /// the complete answer.
     UseMechanism,
+    StationRepair,
 }
 
 impl RefusedAction {
@@ -1541,6 +1545,7 @@ impl RefusedAction {
             fb::RefusedAction::Energy => Self::Energy,
             fb::RefusedAction::MoveInventory => Self::MoveInventory,
             fb::RefusedAction::UseMechanism => Self::UseMechanism,
+            fb::RefusedAction::StationRepair => Self::StationRepair,
             _ => Self::Unknown,
         }
     }
@@ -1629,6 +1634,9 @@ pub enum RefusalReason {
     NotAMechanism,
     /// V46. The named mechanism belongs to a sealed or already-solved puzzle.
     MechanismLocked,
+    ChestAlreadyOpened,
+    NothingToRepair,
+    NotAtStation,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1698,6 +1706,9 @@ impl RefusalReason {
             fb::RefusalReason::HandsOccupied => Self::HandsOccupied,
             fb::RefusalReason::NotAMechanism => Self::NotAMechanism,
             fb::RefusalReason::MechanismLocked => Self::MechanismLocked,
+            fb::RefusalReason::ChestAlreadyOpened => Self::ChestAlreadyOpened,
+            fb::RefusalReason::NothingToRepair => Self::NothingToRepair,
+            fb::RefusalReason::NotAtStation => Self::NotAtStation,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1805,6 +1816,13 @@ pub struct CraftRequest {
     pub recipe: RecipeId,
     /// This client's own tick counter — the same one `PlayerInput` uses.
     pub client_tick: u32,
+}
+
+/// Full forge repair intent. Only the server decides cost, reach and durability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // The station UI consumes this V47 contract in #1316.
+pub struct StationRepairRequest {
+    pub target_slot: u16,
 }
 
 /// Intent to mend one carried item with one repair kit. Two slot indexes and nothing else.
@@ -5379,6 +5397,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::InstanceEntryAnswer
         | fb::Payload::BlockRequest
         | fb::Payload::DrawRequest
+        | fb::Payload::StationRepairRequest
         | fb::Payload::MechanismUseRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -8040,6 +8059,23 @@ pub fn encode_craft_request(request: &CraftRequest) -> Vec<u8> {
     let payload = table.finish();
 
     finish_envelope(builder, fb::Payload::CraftRequest, payload.as_union_value())
+}
+
+/// Encodes one authoritative inventory slot, including values gameplay will refuse.
+#[allow(dead_code)] // The station UI consumes this V47 contract in #1316.
+pub fn encode_station_repair_request(request: &StationRepairRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::StationRepairRequest::create(
+        &mut builder,
+        &fb::StationRepairRequestArgs {
+            target_slot: request.target_slot,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::StationRepairRequest,
+        payload.as_union_value(),
+    )
 }
 
 /// Builds one repair intent.
@@ -10888,7 +10924,8 @@ mod tests {
         // V46 appends `MobKind::CaveSpider` and `MobKind::Scorpion`, which `MobState.kind`
         // refuses when it cannot name them, and `MechanismUseRequest`, which a V45 server
         // cannot name.
-        assert_eq!(fb::ProtocolVersion::Current.0, 46);
+        // V47 adds StationRepairRequest, whose unknown tag a V46 server refuses.
+        assert_eq!(fb::ProtocolVersion::Current.0, 47);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -10963,6 +11000,7 @@ mod tests {
             (fb::Payload::EncounterTimeline, 71),
             (fb::Payload::DrawRequest, 72),
             (fb::Payload::MechanismUseRequest, 73),
+            (fb::Payload::StationRepairRequest, 74),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -10978,7 +11016,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            74,
+            75,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -11008,7 +11046,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 74] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 75] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -11105,6 +11143,7 @@ mod tests {
         (fb::Payload::DrawRequest, Handling::ClientOnly),
         // V46's mechanism use travels client -> server only.
         (fb::Payload::MechanismUseRequest, Handling::ClientOnly),
+        (fb::Payload::StationRepairRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -13098,6 +13137,8 @@ mod tests {
         assert_eq!(fb::RefusedAction::Energy.0, 22);
         assert_eq!(fb::RefusedAction::MoveInventory.0, 23);
         assert_eq!(fb::RefusedAction::UseMechanism.0, 24);
+        assert_eq!(fb::RefusedAction::StationRepair.0, 25);
+        assert_eq!(fb::RecipeID::RunicSword.0, 25);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -13108,7 +13149,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            25,
+            26,
             "a removal is refused in silence by design"
         );
 
@@ -13183,6 +13224,9 @@ mod tests {
             // whatever cell it names, and both answers are about the world.
             (fb::RefusalReason::NotAMechanism, 55),
             (fb::RefusalReason::MechanismLocked, 56),
+            (fb::RefusalReason::ChestAlreadyOpened, 57),
+            (fb::RefusalReason::NothingToRepair, 58),
+            (fb::RefusalReason::NotAtStation, 59),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -13192,7 +13236,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            61,
+            64,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -13226,6 +13270,9 @@ mod tests {
             RefusalReason::NotAVendor,
             RefusalReason::NotEnoughSilver,
             RefusalReason::VendorDoesNotWant,
+            RefusalReason::ChestAlreadyOpened,
+            RefusalReason::NothingToRepair,
+            RefusalReason::NotAtStation,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -16447,6 +16494,69 @@ mod tests {
     }
 
     #[test]
+    fn v47_station_repair_preserves_slots_and_is_client_only() {
+        for target_slot in [0, 39, 40, 255, 256, u16::MAX] {
+            let frame = encode_station_repair_request(&StationRepairRequest { target_slot });
+            let envelope = fb::root_as_envelope(&frame).expect("valid envelope");
+            assert_eq!(envelope.payload_type(), fb::Payload::StationRepairRequest);
+            let request = envelope
+                .payload_as_station_repair_request()
+                .expect("station repair");
+            assert_eq!(request.target_slot(), target_slot);
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::ClientOnly("StationRepairRequest"))
+            );
+        }
+    }
+
+    #[test]
+    fn v47_hoard_refusals_keep_their_names() {
+        for (action, reason, expected_action, expected_reason) in [
+            (
+                fb::RefusedAction::UseMechanism,
+                fb::RefusalReason::ChestAlreadyOpened,
+                RefusedAction::UseMechanism,
+                RefusalReason::ChestAlreadyOpened,
+            ),
+            (
+                fb::RefusedAction::StationRepair,
+                fb::RefusalReason::NothingToRepair,
+                RefusedAction::StationRepair,
+                RefusalReason::NothingToRepair,
+            ),
+            (
+                fb::RefusedAction::StationRepair,
+                fb::RefusalReason::NotAtStation,
+                RefusedAction::StationRepair,
+                RefusalReason::NotAtStation,
+            ),
+            (
+                fb::RefusedAction::StationRepair,
+                fb::RefusalReason::NotEnoughSilver,
+                RefusedAction::StationRepair,
+                RefusalReason::NotEnoughSilver,
+            ),
+        ] {
+            let mut builder = FlatBufferBuilder::new();
+            let mut table = fb::ActionRefusedBuilder::new(&mut builder);
+            table.add_action(action);
+            table.add_reason(reason);
+            let payload = table.finish();
+            let frame = finish_envelope(
+                builder,
+                fb::Payload::ActionRefused,
+                payload.as_union_value(),
+            );
+            let Message::ActionRefused(refused) = decode(&frame).expect("refusal decodes") else {
+                panic!("expected refusal");
+            };
+            assert_eq!(refused.action, expected_action);
+            assert_eq!(refused.reason, expected_reason);
+        }
+    }
+
+    #[test]
     fn v46_mechanism_use_request_carries_only_the_cell_and_is_never_read_by_a_client() {
         let frame = encode_mechanism_use_request(&MechanismUseRequest {
             pos: BlockCoord {
@@ -16552,6 +16662,7 @@ mod tests {
             (RecipeId::LeatherBench, fb::RecipeID::LeatherBench),
             (RecipeId::ArmourBench, fb::RecipeID::ArmourBench),
             (RecipeId::EnchantingTable, fb::RecipeID::EnchantingTable),
+            (RecipeId::RunicSword, fb::RecipeID::RunicSword),
         ];
 
         for (recipe, wire) in named {

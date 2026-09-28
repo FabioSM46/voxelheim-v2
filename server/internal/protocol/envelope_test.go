@@ -335,8 +335,9 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	// their descriptors without rendering these authoritative obstacles.
 	// V46 appends MobKind.CaveSpider and Scorpion, which MobState.kind refuses when it
 	// cannot name them, and MechanismUseRequest, which a V45 server cannot name.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 46 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 46", got)
+	// V47 adds StationRepairRequest, whose tag a V46 server cannot name.
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 47 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 47", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -428,6 +429,7 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 		// V46's mechanism use, client -> server. A V45 server cannot name the tag and
 		// closes the session. Its answers are BlockUpdate and ActionRefused, both older.
 		vnet.PayloadMechanismUseRequest,
+		vnet.PayloadStationRepairRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2844,7 +2846,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.Energy":        {byte(vnet.RefusedActionEnergy), 22},
 		"RefusedAction.MoveInventory": {byte(vnet.RefusedActionMoveInventory), 23},
 		// V46's mechanism use: a lever that does not move is answered, not silent.
-		"RefusedAction.UseMechanism": {byte(vnet.RefusedActionUseMechanism), 24},
+		"RefusedAction.UseMechanism":  {byte(vnet.RefusedActionUseMechanism), 24},
+		"RefusedAction.StationRepair": {byte(vnet.RefusedActionStationRepair), 25},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2859,8 +2862,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 25 {
-		t.Errorf("RefusedAction has %d members, want 25 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 26 {
+		t.Errorf("RefusedAction has %d members, want 26 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2931,19 +2934,22 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"HandsOccupied": {byte(vnet.RefusalReasonHandsOccupied), 54},
 		// V46's two, appended inside the low group: a mechanism request is well formed
 		// whatever cell it names, and both answers are about the world.
-		"NotAMechanism":     {byte(vnet.RefusalReasonNotAMechanism), 55},
-		"MechanismLocked":   {byte(vnet.RefusalReasonMechanismLocked), 56},
-		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
-		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
-		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
-		"MalformedKind":     {byte(vnet.RefusalReasonMalformedKind), 67},
+		"NotAMechanism":      {byte(vnet.RefusalReasonNotAMechanism), 55},
+		"MechanismLocked":    {byte(vnet.RefusalReasonMechanismLocked), 56},
+		"ChestAlreadyOpened": {byte(vnet.RefusalReasonChestAlreadyOpened), 57},
+		"NothingToRepair":    {byte(vnet.RefusalReasonNothingToRepair), 58},
+		"NotAtStation":       {byte(vnet.RefusalReasonNotAtStation), 59},
+		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
+		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
+		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
+		"MalformedKind":      {byte(vnet.RefusalReasonMalformedKind), 67},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 61 {
-		t.Errorf("RefusalReason has %d members, want 61 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 64 {
+		t.Errorf("RefusalReason has %d members, want 64 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -3501,6 +3507,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"RecipeID.LeatherBench":         {byte(vnet.RecipeIDLeatherBench), 22},
 		"RecipeID.ArmourBench":          {byte(vnet.RecipeIDArmourBench), 23},
 		"RecipeID.EnchantingTable":      {byte(vnet.RecipeIDEnchantingTable), 24},
+		"RecipeID.RunicSword":           {byte(vnet.RecipeIDRunicSword), 25},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -3516,7 +3523,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// did it together, and V46 two more after them.
 		"MobKind":       {len(vnet.EnumNamesMobKind), 10},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 8},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 25},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 26},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])

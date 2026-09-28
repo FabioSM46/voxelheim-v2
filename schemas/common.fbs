@@ -362,7 +362,14 @@ enum ProtocolVersion : ushort {
   /// `ActionRefused`, whose decoders are total. Mechanism *state* adds nothing to the
   /// contract — levers, lit runes and doors are blocks, and a block changing is the
   /// existing `BlockUpdate`.
-  Current = 46
+  // -- V47
+  /// The king's hoard: StationRepairRequest is client -> server; a V46 server
+  /// cannot name its tag and would close the session after a clean handshake.
+  /// RunicSword, StationRepair, ChestAlreadyOpened, NothingToRepair and NotAtStation
+  /// are appended;
+  /// station repair reuses NotEnoughSilver = 28. Chests add no message: they reuse
+  /// MechanismUseRequest inbound and LootState/LootTakeAllRequest for looting.
+  Current = 47
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

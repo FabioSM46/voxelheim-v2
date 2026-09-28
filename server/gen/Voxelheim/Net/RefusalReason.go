@@ -193,6 +193,12 @@ const (
 	/// than plain `Locked`, because this enum is shared by every action and a bare word
 	/// would read as an answer about doors, chests or accounts.
 	RefusalReasonMechanismLocked RefusalReason = 56
+	/// The instance chest was already opened. Paired with UseMechanism.
+	RefusalReasonChestAlreadyOpened RefusalReason = 57
+	/// The target has no missing durability. Paired with StationRepair.
+	RefusalReasonNothingToRepair RefusalReason = 58
+	/// No required crafting station is within authoritative reach.
+	RefusalReasonNotAtStation RefusalReason = 59
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -265,6 +271,9 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonHandsOccupied:               "HandsOccupied",
 	RefusalReasonNotAMechanism:               "NotAMechanism",
 	RefusalReasonMechanismLocked:             "MechanismLocked",
+	RefusalReasonChestAlreadyOpened:          "ChestAlreadyOpened",
+	RefusalReasonNothingToRepair:             "NothingToRepair",
+	RefusalReasonNotAtStation:                "NotAtStation",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -329,6 +338,9 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"HandsOccupied":               RefusalReasonHandsOccupied,
 	"NotAMechanism":               RefusalReasonNotAMechanism,
 	"MechanismLocked":             RefusalReasonMechanismLocked,
+	"ChestAlreadyOpened":          RefusalReasonChestAlreadyOpened,
+	"NothingToRepair":             RefusalReasonNothingToRepair,
+	"NotAtStation":                RefusalReasonNotAtStation,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,

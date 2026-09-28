@@ -331,7 +331,10 @@ union Payload {
   //    changing, which is `BlockUpdate`, and one that does not is `ActionRefused`. The
   //    same version carries `MobKind.CaveSpider` and `MobKind.Scorpion`. See `player.fbs`
   //    and `ProtocolVersion` in `common.fbs`.
-  MechanismUseRequest     // 73  client -> server
+  MechanismUseRequest,    // 73  client -> server
+
+  // -- V47. Appended; a V46 server cannot name this client intent.
+  StationRepairRequest    // 74  client -> server
 }
 
 table Envelope {

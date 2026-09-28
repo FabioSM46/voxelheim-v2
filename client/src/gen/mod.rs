@@ -138,6 +138,8 @@ pub mod voxelheim {
         pub use self::mechanism_use_request_generated::*;
         mod craft_request_generated;
         pub use self::craft_request_generated::*;
+        mod station_repair_request_generated;
+        pub use self::station_repair_request_generated::*;
         mod repair_request_generated;
         pub use self::repair_request_generated::*;
         mod consume_request_generated;

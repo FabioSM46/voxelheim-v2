@@ -84,7 +84,8 @@ const (
 	RefusedActionMoveInventory RefusedAction = 23
 	/// A `MechanismUseRequest` that moved nothing. No lever flipped and no rune lit; the
 	/// blocks the player can see are still the complete answer.
-	RefusedActionUseMechanism RefusedAction = 24
+	RefusedActionUseMechanism  RefusedAction = 24
+	RefusedActionStationRepair RefusedAction = 25
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -113,6 +114,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionEnergy:         "Energy",
 	RefusedActionMoveInventory:  "MoveInventory",
 	RefusedActionUseMechanism:   "UseMechanism",
+	RefusedActionStationRepair:  "StationRepair",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -141,6 +143,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"Energy":         RefusedActionEnergy,
 	"MoveInventory":  RefusedActionMoveInventory,
 	"UseMechanism":   RefusedActionUseMechanism,
+	"StationRepair":  RefusedActionStationRepair,
 }
 
 func (v RefusedAction) String() string {
