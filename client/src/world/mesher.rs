@@ -1101,6 +1101,7 @@ fn build_architecture(
                 let block = chunk.block(cell);
                 if palette::is_chest(block) {
                     dungeon::push_chest(mesh, cell, block);
+                    dungeon::push_chest_inlays(glow, cell, block);
                 } else if palette::is_lever(block) {
                     dungeon::push_lever(mesh, cell, block);
                 } else if palette::glows(block) {
@@ -6873,7 +6874,7 @@ mod tests {
             let mut chunk = air(SIZE);
             chunk.set(5, 6, 7, block);
             let mesh = super::mesh_chunk(&chunk, &alone());
-            assert!(mesh.cover.is_empty() && mesh.water.is_empty() && mesh.glow.is_empty());
+            assert!(mesh.cover.is_empty() && mesh.water.is_empty());
             assert!(palette::is_solid(block) && !palette::is_greedy_opaque(block));
             let mut top = 0.0f32;
             for vertex in &mesh.opaque.positions {
@@ -6999,7 +7000,39 @@ mod tests {
     }
 
     #[test]
-    fn only_a_lit_rune_stone_puts_anything_in_the_glow_half() {
+    fn chest_inlays_are_bounded_amber_geometry_and_follow_both_lid_states() {
+        let mut meshes = Vec::new();
+        for block in [palette::CHEST, palette::CHEST_OPEN] {
+            let mut chunk = air(SIZE);
+            chunk.set(5, 6, 7, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            // Nine shell channels, four lid edges and a three-stroke maker's mark.
+            assert_eq!(mesh.glow.quad_count(), 16 * 6);
+            assert!(
+                mesh.glow
+                    .colors
+                    .iter()
+                    .all(|color| *color == opaque(palette::CHEST_INLAY_LINEAR))
+            );
+            for vertex in &mesh.glow.positions {
+                for (axis, coordinate) in vertex.iter().enumerate() {
+                    assert!(([5.0, 6.0, 7.0][axis]..=[6.0, 7.0, 8.0][axis]).contains(coordinate));
+                }
+            }
+            assert!(
+                !mesh.opaque.is_empty(),
+                "wood stays in the lit terrain pass"
+            );
+            meshes.push(mesh);
+        }
+        // The upright frame rises a quarter-block above the closed inlay plane.
+        let top = |mesh: &SurfaceMesh| mesh.positions.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+        assert!(top(&meshes[1].glow) > top(&meshes[0].glow) + 0.25);
+        assert_ne!(meshes[0].glow.positions, meshes[1].glow.positions);
+    }
+
+    #[test]
+    fn only_lit_runes_and_chest_inlays_put_geometry_in_the_glow_half() {
         const EDGE: usize = 4;
         for block in palette::PALETTE {
             let mut chunk = air(EDGE);
@@ -7007,7 +7040,10 @@ mod tests {
             let mesh = super::mesh_chunk(&chunk, &alone());
             assert_eq!(
                 !mesh.glow.is_empty(),
-                block == palette::RUNE_STONE_LIT,
+                matches!(
+                    block,
+                    palette::RUNE_STONE_LIT | palette::CHEST | palette::CHEST_OPEN
+                ),
                 "block {block}"
             );
         }

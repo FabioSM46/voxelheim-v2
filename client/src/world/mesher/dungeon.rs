@@ -280,6 +280,61 @@ pub(super) fn push_chest(mesh: &mut SurfaceMesh, cell: [usize; 3], block: BlockI
     }
 }
 
+/// Thin runic inlays follow the actual shell and lid, without lighting the room.
+///
+/// The sand chest sits outside the wall sconces' nine-block radius. Its PBR wood is
+/// correctly dark there; these small amber channels use the existing unlit rune pass
+/// so the lip, corners and raised lid can still be read. There is no capture-only path.
+pub(super) fn push_chest_inlays(glow: &mut SurfaceMesh, cell: [usize; 3], block: BlockId) {
+    let origin = cell.map(|v| v as f32);
+    let mut part = |centre: [f32; 3], half: [f32; 3]| {
+        push_box(
+            glow,
+            std::array::from_fn(|i| origin[i] + centre[i]),
+            [
+                [half[0], 0.0, 0.0],
+                [0.0, half[1], 0.0],
+                [0.0, 0.0, half[2]],
+            ],
+            opaque(palette::CHEST_INLAY_LINEAR),
+        );
+    };
+    // Rim and four corner channels outline the dark recess from any approach.
+    for z in [0.092, 0.908] {
+        part([0.5, 0.552, z], [0.46, 0.012, 0.008]);
+        for x in [0.037, 0.963] {
+            part([x, 0.32, z], [0.008, 0.22, 0.008]);
+        }
+    }
+    for x in [0.037, 0.963] {
+        part([x, 0.552, 0.5], [0.008, 0.012, 0.40]);
+    }
+    // One basal seam establishes the box's height even with no light on the front.
+    part([0.5, 0.095, 0.092], [0.46, 0.008, 0.008]);
+
+    // Coordinates on the lid's outside plane: horizontal when shut, vertical when
+    // open. The smaller upright panel stays within the authoritative one-block cell.
+    let open = block == palette::CHEST_OPEN;
+    let half_height = if open { 0.225 } else { 0.365 };
+    let mut lid_piece = |s: f32, t: f32, width: f32, height: f32| {
+        if open {
+            part([0.5 + s, 0.75 + t, 0.800], [width, height, 0.006]);
+        } else {
+            part([0.5 + s, 0.705, 0.5 + t], [width, 0.006, height]);
+        }
+    };
+    for s in [-0.445, 0.445] {
+        lid_piece(s, 0.0, 0.012, half_height);
+    }
+    for t in [-half_height, half_height] {
+        lid_piece(0.0, t, 0.445, 0.012);
+    }
+    // A three-stroke maker's mark gives the lid a readable face, not just an outline.
+    lid_piece(-0.04, 0.0, 0.014, 0.12);
+    lid_piece(0.025, 0.105, 0.065, 0.014);
+    lid_piece(0.025, 0.025, 0.065, 0.014);
+}
+
 /// A closed box about `centre` whose three half-extent vectors `axes` are right-handed.
 ///
 /// Each face is wound so the normal [`face_normal`] derives from its corners points out

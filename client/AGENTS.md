@@ -3369,7 +3369,9 @@ Recorded here so the next reader does not mistake them for oversights:
 ### Chest loot presentation
 
 Chest and ChestOpen are server-owned solid blocks, drawn with an enclosed or raised lid
-inside their cell. They share the existing aimed-mechanism sender and the station prompt;
+inside their cell. Thin amber inlays use the shared unlit rune mesh to keep the rim and
+lid readable outside sconce range; wood stays PBR and no chest light is added. They share
+the existing aimed-mechanism sender and the station prompt;
 Interact priority is corpse, chest, station, ordinary mechanism, player, resident. Never
 synthesize a MobState for a chest. Loot presentation keeps one outstanding chest request,
 created only after a queued outbound frame; cancellation retains a reply tombstone until

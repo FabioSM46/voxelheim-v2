@@ -181,7 +181,7 @@ pub const fn is_lever(block: BlockId) -> bool {
 /// Whether `block` carries light of its own: the faces the mesher routes into the unlit
 /// glow half, which neither the sun nor a cave's darkness dims.
 pub const fn glows(block: BlockId) -> bool {
-    block == RUNE_STONE_LIT
+    block == RUNE_STONE_LIT || is_chest(block)
 }
 
 /// Geometry one block occupies inside its voxel.
@@ -805,6 +805,9 @@ pub const LEVER_PLINTH_LINEAR: [f32; 3] = [0.068_478, 0.072_272, 0.080_220];
 pub const LEVER_GRIP_LINEAR: [f32; 3] = [0.30, 0.16, 0.05];
 pub const CHEST_LINEAR: [f32; 3] = [0.34, 0.14, 0.045];
 pub const CHEST_OPEN_LINEAR: [f32; 3] = [0.055, 0.022, 0.009];
+/// Restrained amber rune inlays: shared unlit geometry keeps the chest legible between
+/// distant sconces. The wooden shell still uses the ordinary lit terrain material.
+pub const CHEST_INLAY_LINEAR: [f32; 3] = [0.18, 0.085, 0.025];
 /// A lit rune's stone: the unlit [`RUNE_STONE_LINEAR`] with the cold of its own light
 /// in it.
 const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.03, 0.085, 0.1];
