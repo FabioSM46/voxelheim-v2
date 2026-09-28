@@ -1,7 +1,8 @@
 # Chest client presentation and capture
 
-References #1315. Implementation and the manual capture workflow ship before visual
-acceptance. The follow-up evidence PR records actual images, run URL and source SHA.
+References #1315. Implementation and the manual capture workflow landed in #1348; the
+readability correction landed in #1349. [Accepted remote evidence](reviews/chests-1315/README.md)
+records the inspected original images, successful run and exact source SHA.
 
 The server sends Chest (64) or ChestOpen (65). The mesher draws a bronze-banded wooden
 box, with a horizontal closed lid or an upright open lid and dark interior. All vertices
@@ -83,5 +84,6 @@ on the lid, including a small maker's mark. They use the existing shared unlit r
 change position with the actual lid geometry, and stay inside the same solid voxel. The
 wood remains shaded, the dark open recess remains visible by contrast, and no point light,
 room illumination, camera/exposure change or capture-specific enhancement is introduced.
-The capture workflow and camera are unchanged. A second remote run and direct inspection
-of its PNGs are still required before visual acceptance can be recorded.
+The capture workflow and camera were unchanged. The second remote run and direct inspection
+of its PNGs passed; the [acceptance record](reviews/chests-1315/README.md) contains the original
+closed/open images, hashes and provenance. The first failed result remains documented here.
