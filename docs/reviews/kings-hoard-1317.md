@@ -2,13 +2,14 @@
 
 ## Status
 
-The live acceptance is **not yet executed**. This document defines the reproducible
-procedure and declared setup limits. Ordinary CI validates the harness implementation;
-it is not evidence that the three-member live scenario passed.
+The first live acceptance **failed at the post-restart chest check**. The pre-restart
+chest, rune, crafting and paid repair assertions passed. Issue #1317 remains open, blocked
+by the separately reported production defect [#1353](https://github.com/FabioSM46/voxelheim-v2/issues/1353).
+No gameplay fix or relaxed assertion is included in this evidence record.
 
-Infrastructure landed in #1351. The scenario/workflow must land on `develop` before
-manual dispatch. A later evidence PR records the exact successful run and may satisfy
-issue #1317; this implementation alone leaves that issue open.
+Infrastructure landed in #1351 and the scenario/workflow in #1352. The real-server run
+below exercises that merged source. Ordinary CI validates the harness implementation;
+it does not substitute for this live result.
 
 ## Remote procedure
 
@@ -78,10 +79,62 @@ raw error text is deliberately excluded.
 - Rune, silver, the consumed iron input and the crafted runic sword come from real loot
   or crafting. No immortality, injected wear or balance/price changes are introduced.
 
-## Acceptance record to complete after the live run
+## Live attempt 1 — failed, 2026-09-28
 
-Record the source SHA, run URL, artifact digest, per-member rolls/refusals, crafting and
-repair observations, restart result and any failed assertions. Product defects belong in
-separate issues; harness defects may be remediated here. A green workflow plus inspected
-complete evidence is required before claiming acceptance. This file currently makes no
-such claim.
+- Tested source: `f52c73366a9d8e95bdd09e8462333f75d336d8b0`.
+- [Workflow run 36462056384, attempt 1](https://github.com/FabioSM46/voxelheim-v2/actions/runs/36462056384/attempts/1),
+  created 17:59:42 UTC, completed 18:23:16 UTC with failure. This interval includes setup
+  and builds; it is not a dungeon-clear timing measurement.
+- Artifact: `kings-hoard-f52c73366a9d8e95bdd09e8462333f75d336d8b0-1`, ID `10989466676`.
+- Artifact archive digest reported by GitHub:
+  `sha256:426faea7103b5f5dd5d400cfee67a0e4f8c6ffd9fec030e6f131833c9d68b82c`.
+- Exact sanitized [acceptance.json](evidence/kings-hoard-1317-f52c733/acceptance.json),
+  preserved unchanged with [SHA256SUMS](evidence/kings-hoard-1317-f52c733/SHA256SUMS):
+  `173365f35ae712f7dd245dfb3c46cb73072c44d46815cab0744706a4e95033f8`.
+
+The workflow used the invocation and declared fixtures above. The report is complete
+(`report_status: reported`) and explicitly failed (`exit_code: 1`, `success: false`).
+Raw logs, keys, world storage and process diagnostics are not part of this record.
+
+| Member | Chest 1 | Chest 2 | Chest 3 | Earned silver | King personal loot |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 10 arrows, 11 silver | 1 SharpeningStone, 14 silver | 1 RustyHelm, 29 silver | 54 | IronSword, 3 bones, KingRune |
+| 2 | 12 arrows, 11 silver | 1 SharpeningStone, 19 silver | 1 RustyHelm, 22 silver | 52 | IronSword, 4 bones, KingRune |
+| 3 | 8 arrows, 10 silver | 1 SharpeningStone, 13 silver | 1 RustyHelm, 26 silver | 49 | IronSword, 5 bones, KingRune |
+
+Every member has all three `ChestDone` flags true: these flags follow the unchanged
+personal reopen, exact loot gain, exhausted `ChestAlreadyOpened` refusal and open-block
+assertions. All three `KingDone` and `RuneOut` flags are true. King loot awarded no silver.
+Each member died twice; each sent zero immortality commands. Stuck-assist counts were
+0, 1 and 1, with four portal placements per member across initial entry and re-entry.
+The explicit fixtures and travel assists remain acceptance limits, not earned rewards.
+
+The leader placed and consumed the one table fixture at `[249 62 -148]`, consumed the
+earned IronSword in pack slot 4 and KingRune, and received a RunicSword while preserving
+the equipped bootstrap blade and purse. At the capital forge it repaired the cheapest
+affordable actual wear: slot 0, item 7, durability **64 to 100**, silver **54 to 18**,
+an exact **36 silver** debit. The chosen target was an already carried item, not a claim
+that the newly crafted sword had worn. No kit was needed and no wear was injected.
+
+After the restart, the leader reached stage `saved chest 1`, awaiting `persisted ChestOpen`.
+All nine `Restored` flags remained false. The code reaches this wait only after the original
+server's checked shutdown, all existing-character full inventory comparisons, party
+reformation, normal portal entry, same saved-run ID/seed checks and the leader's walk to
+chest 1. Thus those earlier assertions passed. The artifact does **not** record the actual
+block ID read: it proves the expected open block was not accepted by the wait, not that
+every chest was observed closed. No post-restart chest-use request or repeat loot claim
+was attempted after this failed visual check.
+
+Static source inspection identifies a production restoration defect consistent with the
+failure: `persist.RewardStore.OverlaySessions` replaces the stored session with the
+journal's record, then copies checkpoint/solved-puzzle/cleared-group progress but omits
+`OpenedChests`. The journal does not carry ordinary chest opening progress. The initial
+session-only overlay branch also omits the detached-copy treatment for this new list.
+The sessions-v3 codec and server mapping do carry the field, so the omission is at the
+overlay boundary. This is recorded separately in #1353 with regression criteria.
+Potential repeat loot is an inference from the first-open branch, not an observed exploit.
+
+Reproduction is the manual dispatch described above at the recorded SHA. After #1353 is
+separately addressed and merged, rerun at the exact new merge SHA and inspect all nine
+post-restart flags. The current run is useful partial evidence, **not completed acceptance**.
+No local tests, builds, lint or live scenario were executed while preparing this report.
