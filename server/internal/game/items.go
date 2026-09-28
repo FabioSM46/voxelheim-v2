@@ -570,7 +570,9 @@ var blockDrops = map[world.Block]ItemID{
 	world.DarkGlass:             ItemNone,
 
 	// A torn web leaves nothing to carry.
-	world.Cobweb: ItemNone,
+	world.Cobweb:    ItemNone,
+	world.Chest:     ItemNone,
+	world.ChestOpen: ItemNone,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -643,7 +645,9 @@ var blockExperience = map[world.Block]uint16{
 	world.DarkGlass:             0,
 
 	// Clearing a web is a way forward, not a lesson.
-	world.Cobweb: 0,
+	world.Cobweb:    0,
+	world.Chest:     0,
+	world.ChestOpen: 0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {
