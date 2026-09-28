@@ -246,7 +246,9 @@ func (w *serveWorld) awaitFrames(t *testing.T, c *serveClient, what string, done
 	deadline := time.Now().Add(20 * time.Second)
 	for !c.frames.read(done) {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+			var refusals []protocol.ActionRefused
+			c.frames.read(func(f *serveFrames) bool { refusals = slices.Clone(f.refusals); return true })
+			t.Fatalf("timed out waiting for %s; refusals %+v", what, refusals)
 		}
 		w.manager.Step()
 		time.Sleep(time.Millisecond)
@@ -337,6 +339,12 @@ func (w *serveWorld) cross(t *testing.T, c *serveClient) game.InstanceSession {
 		w.manager.Step()
 		time.Sleep(time.Millisecond)
 	}
+	// Serve may still have one read issued in the source world's epoch when it
+	// sends WorldChange. Consume that read with harmless input before any loot
+	// action: otherwise the first action can be discarded as a stale-world frame.
+	// The connection is FIFO and Serve has only one outstanding read.
+	w.input++
+	c.conn.send(protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: w.input}))
 	var id uint64
 	c.frames.read(func(f *serveFrames) bool { id = f.worlds[len(f.worlds)-1]; return true })
 	run, found := w.manager.Lookup(id)
@@ -404,12 +412,16 @@ func (w *serveWorld) awaitClaim(t *testing.T, c *serveClient, owner identity.Pla
 				t.Fatal(err)
 			}
 		}
-		rec := w.record(t, owner)
 		snapshot, err := w.journal.Snapshot()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(snapshot.Intents) == 0 && done(rec, w.guardianDefeat(t)) {
+		defeat := w.guardianDefeat(t)
+		// A claim writes the character before acknowledging the journal. Read the
+		// acknowledgement first, then the record: the opposite order can pair a
+		// pre-claim record with a newly taken share and return stale experience.
+		rec := w.record(t, owner)
+		if len(snapshot.Intents) == 0 && done(rec, defeat) {
 			return rec
 		}
 		if time.Now().After(deadline) {
