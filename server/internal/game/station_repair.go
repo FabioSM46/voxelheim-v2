@@ -34,15 +34,18 @@ func (p *Player) StationRepair(req protocol.StationRepairRequest) (protocol.Inve
 
 	// The wire index is wider than stackAtLocked's index: bound it before narrowing
 	// so a request for slot 256 cannot wrap around and spend silver on slot zero.
+	// InventorySlots is itself uint8; the admitted index is representable here.
 	if req.TargetSlot >= uint16(protocol.InventorySlots) {
 		return protocol.InventoryState{}, vnet.RefusalReasonNothingToRepair, errors.New("the target slot is outside the inventory")
 	}
-	target, occupied := p.inventory.stackAtLocked(uint8(req.TargetSlot))
+	slot := uint8(req.TargetSlot)
+	target, occupied := p.inventory.stackAtLocked(slot)
 	if !occupied || !target.durable() || target.durability >= target.maxDurability {
 		return protocol.InventoryState{}, vnet.RefusalReasonNothingToRepair, errors.New("the target has no missing durability")
 	}
 	missing := target.maxDurability - target.durability
-	// Widen before multiplying; a fully worn uint16 maximum must not wrap the price.
+	// With the fixed rate of one, the largest price is 65535 silver. Compute in
+	// the purse's uint32 width; a future rate change must preserve that bound.
 	price := max(uint32(1), uint32(missing)*RepairSilverPerPoint)
 	if p.inventory.silver < price {
 		return protocol.InventoryState{}, vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("repair costs %d silver, more than the purse holds", price)
@@ -51,7 +54,7 @@ func (p *Player) StationRepair(req protocol.StationRepairRequest) (protocol.Inve
 	// All fallible checks precede both writes, under the same simulation/inventory
 	// locks. A refusal cannot spend silver or partly repair the item.
 	p.inventory.silver -= price
-	p.inventory.slots[req.TargetSlot].durability = restoredBy(target, missing)
+	p.inventory.slots[slot].durability = restoredBy(target, missing)
 	p.refreshWornLocked()
 	return p.inventory.stateLocked(), vnet.RefusalReasonUnknown, nil
 }
