@@ -921,7 +921,8 @@ pub(super) const ITEMS: [ItemDisplay; 48] = [
         name: "Runic Sword",
         shape: ItemShape::Blade,
         colour: ItemColour::RunicSteel,
-        livery: None,
+        // Enchanting keeps the forged blade and wooden grip; the violet tint is its own.
+        livery: Some(Livery::ForgedSteel),
         armour_style: None,
     },
 ];
@@ -1230,6 +1231,7 @@ mod tests {
         assert_eq!(item_shape(ITEM_RUNIC_SWORD), ItemShape::Blade);
         assert_eq!(item_label(ITEM_KING_RUNE), "King's Rune");
         assert_eq!(item_label(ITEM_RUNIC_SWORD), "Runic Sword");
+        assert_eq!(item_livery(ITEM_RUNIC_SWORD), Some(Livery::ForgedSteel));
         assert_ne!(
             item_linear_rgba(ITEM_KING_RUNE),
             item_linear_rgba(ITEM_RAW_IRON)

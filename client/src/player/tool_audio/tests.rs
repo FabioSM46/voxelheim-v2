@@ -347,6 +347,12 @@ fn real_swing_message_plays_without_any_hit_and_world_or_disconnect_returns_sour
     app.update();
     assert!(app.world().resource::<Tools>().playing.is_empty());
     app.world_mut().write_message(SwingSent {
+        item_id: ITEM_RUNIC_SWORD,
+    });
+    app.update();
+    assert_eq!(app.world().resource::<Tools>().playing.len(), 1);
+    reset_world(app.world_mut());
+    app.world_mut().write_message(SwingSent {
         item_id: ITEM_IRON_SWORD,
     });
     app.update();

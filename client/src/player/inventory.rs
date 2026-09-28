@@ -19,8 +19,9 @@ use bevy::prelude::*;
 use super::combat::{ITEM_RUSTY_SWORD, WeaponDrawn};
 use super::crafting::{
     ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN,
-    ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES,
-    ITEM_RUSTY_HELM, ITEM_SHARPENING_STONE, ITEM_WOODEN_SCEPTRE, ITEM_WOODEN_SHIELD,
+    ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_RUNIC_SWORD, ITEM_RUSTY_CUIRASS,
+    ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM, ITEM_SHARPENING_STONE, ITEM_WOODEN_SCEPTRE,
+    ITEM_WOODEN_SHIELD,
 };
 use super::items::{ITEM_BLACK_HORSE, ITEM_BROWN_HORSE, ITEM_GREY_HORSE, ITEM_RAW_MEAT};
 use super::{
@@ -718,7 +719,7 @@ const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
 ///
 /// **Sized by the last offset it routes**, so a worn slot appended after the main hand is a
 /// new named offset first and a longer table second. The main hand takes every weapon the
-/// server's registry names `wornMainHand`: both swords, the bow and the sceptre. Which of them
+/// server's registry names `wornMainHand`: all three swords, the bow and the sceptre. Which of them
 /// leave a hand free for a shield is the server's `oneHanded`, and nothing here mirrors it —
 /// a refused pair comes back as `HandsOccupied` and `ui/status.rs` says why.
 pub(crate) const EQUIPMENT_ROUTES: [&[u16]; MAIN_HAND_OFFSET as usize + 1] = [
@@ -729,6 +730,7 @@ pub(crate) const EQUIPMENT_ROUTES: [&[u16]; MAIN_HAND_OFFSET as usize + 1] = [
     &[
         ITEM_RUSTY_SWORD,
         ITEM_IRON_SWORD,
+        ITEM_RUNIC_SWORD,
         ITEM_BOW,
         ITEM_WOODEN_SCEPTRE,
     ],
@@ -1572,6 +1574,7 @@ mod tests {
         for id in [
             ITEM_RUSTY_SWORD,
             ITEM_IRON_SWORD,
+            ITEM_RUNIC_SWORD,
             ITEM_BOW,
             ITEM_WOODEN_SCEPTRE,
         ] {
@@ -1608,6 +1611,7 @@ mod tests {
             &[
                 ITEM_RUSTY_SWORD,
                 ITEM_IRON_SWORD,
+                ITEM_RUNIC_SWORD,
                 ITEM_BOW,
                 ITEM_WOODEN_SCEPTRE
             ]
