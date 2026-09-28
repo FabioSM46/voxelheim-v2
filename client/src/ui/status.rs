@@ -1672,6 +1672,8 @@ mod tests {
                 assert!(
                     line.starts_with("Cannot ")
                         || line == "No arrows"
+                        // The chest acceptance contract specifies this exact short answer.
+                        || (reason == RefusalReason::ChestAlreadyOpened && line == "Already opened")
                         || line == "A two-handed weapon leaves no hand for a shield"
                         || line.starts_with("The map holds no more marks")
                         || line == "That note is too long"
