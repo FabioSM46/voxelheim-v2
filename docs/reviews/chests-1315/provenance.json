@@ -1,0 +1,60 @@
+{
+  "source_commit": "5095bcb247ae2f49a854bef55e168d141a9c2395",
+  "workflow_run": "https://github.com/FabioSM46/voxelheim-v2/actions/runs/36453791986",
+  "artifact": "chest-visual-5095bcb247ae2f49a854bef55e168d141a9c2395",
+  "seed": 0,
+  "facing": 0,
+  "worldgen": 37,
+  "world_tick": 6000,
+  "resolution": "1280x720",
+  "loaded_chunks": 120,
+  "sconces": 7,
+  "active_point_lights": 3,
+  "gpu_name": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "gpu_driver": "llvmpipe",
+  "gpu_driver_info": "Mesa 25.2.8-0ubuntu0.24.04.2 (LLVM 20.1.2)",
+  "gpu_backend": "Vulkan",
+  "tonemapping": "AcesFitted",
+  "captures": {
+    "closed": {
+      "image": "chest_closed.png",
+      "image_sha256": "bd2e16087cfb30349a80ac328ff26b0f20d94915b327fff594576fc84a207194",
+      "chest_block_id": 64,
+      "server_fixture_sha256": "6f83e23e77ede2e800029d3647d48e34afbf622a052bfde1bb6462e87f247fc9",
+      "server_snapshot_sha256": "06a3be874d671178dbeda29abd2a4472c14214ab4eb53a6d3601c81c981b6840",
+      "view": "chest_closed",
+      "dungeon_gates": "opened",
+      "eye_target_distance_blocks": 5.0,
+      "eye_drawing": [
+        17.5,
+        11.62,
+        30.627054
+      ],
+      "target_drawing": [
+        17.5,
+        10.5,
+        35.5
+      ]
+    },
+    "open": {
+      "image": "chest_open.png",
+      "image_sha256": "14b3971343fe0ec37cdc65edd4fdcf6c68f347000064702998ea924f04df718f",
+      "chest_block_id": 65,
+      "server_fixture_sha256": "df30fb441f73d1693fe57ac2c933bfbb5b3276d12dc2e49be81257641b9e4442",
+      "server_snapshot_sha256": "06a3be874d671178dbeda29abd2a4472c14214ab4eb53a6d3601c81c981b6840",
+      "view": "chest_open",
+      "dungeon_gates": "opened",
+      "eye_target_distance_blocks": 5.0,
+      "eye_drawing": [
+        17.5,
+        11.62,
+        30.627054
+      ],
+      "target_drawing": [
+        17.5,
+        10.5,
+        35.5
+      ]
+    }
+  }
+}
