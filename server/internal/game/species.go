@@ -145,7 +145,7 @@ type mobDefinition struct {
 	// nobody has been near it for five seconds — leaves nothing, and the two removals in
 	// spawn.go say so by not asking this field. Loot is the reward for the kill; a world
 	// that paid it out for having existed would be a world where waiting is a strategy.
-	loot []lootRoll
+	loot lootTable
 
 	// armour is the share of every player-authored blow this species' hide turns aside,
 	// in percentage points of [ArmourScale] — the worn multiplier a player's armour
@@ -193,7 +193,7 @@ type mobAttack struct {
 // TestSilverIsReservedCurrencyDroppedOnlyByDraugr holds that line for every row. A bone
 // is the generic remains every other creature already yields, so the descent's minor
 // kills feed the same economy the surface does rather than inventing a new item.
-var minorLoot = []lootRoll{{item: ItemBone, min: 1, max: 1}}
+var minorLoot = lootTable{{item: ItemBone, min: 1, max: 1}}
 
 type mobRank uint8
 

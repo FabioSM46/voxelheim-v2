@@ -234,6 +234,11 @@ const (
 	LeverOff     Block = 61
 	LeverOn      Block = 62
 	RuneStoneLit Block = 63
+
+	// Dungeon chests are world-only, solid and never player-placeable or minable.
+	// Opening is an authoritative mechanism transition, not a block edit.
+	Chest     Block = 64
+	ChestOpen Block = 65
 )
 
 // ShapeKind is the geometry a block occupies inside its voxel.
@@ -457,10 +462,10 @@ func Cover(b Block) bool {
 		b == Bush || b == DesertShrub || b == Cobweb
 }
 
-// Mechanism reports whether a block is a lever or a rune stone, lit or not: the
-// cells a dungeon puzzle is operated through.
+// Mechanism reports whether a block accepts dungeon interaction: a lever, a rune
+// stone (lit or not), or a closed chest. Open chests have their own retry handling.
 func Mechanism(b Block) bool {
-	return b == LeverOff || b == LeverOn || b == RuneStone || b == RuneStoneLit
+	return b == LeverOff || b == LeverOn || b == RuneStone || b == RuneStoneLit || b == Chest
 }
 
 // Snares reports whether a block slows a body standing in it. Only [Cobweb]

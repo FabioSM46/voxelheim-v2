@@ -83,6 +83,8 @@ const (
 	AnchorInstanceTrigger
 	AnchorInstanceMechanism
 	AnchorInstanceDoor
+	// AnchorInstanceChest carries the stable chest index within one dungeon run.
+	AnchorInstanceChest
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -132,6 +134,8 @@ func (a AnchorKind) String() string {
 		return "instance mechanism"
 	case AnchorInstanceDoor:
 		return "instance door"
+	case AnchorInstanceChest:
+		return "instance chest"
 	default:
 		return "no anchor"
 	}
@@ -354,6 +358,10 @@ func anchorProblem(s *Schematic) string {
 			// A unique, non-solid heart carries the crossing coordinate.
 			if cell != PortalHeart {
 				return "portal anchor is not a portal heart"
+			}
+		case AnchorInstanceChest:
+			if cell != Chest || a.Index < 0 || a.Index >= InstanceChestCount {
+				return "chest anchor is not an indexed closed chest"
 			}
 		case AnchorInstanceMechanism:
 			if !Mechanism(cell) {

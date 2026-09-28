@@ -154,6 +154,10 @@ pub const COBWEB: BlockId = 60;
 pub const LEVER_OFF: BlockId = 61;
 pub const LEVER_ON: BlockId = 62;
 pub const RUNE_STONE_LIT: BlockId = 63;
+
+// Server palette compatibility; chest interaction and detailed meshes follow in #1315.
+pub const CHEST: BlockId = 64;
+pub const CHEST_OPEN: BlockId = 65;
 pub const BOUNDS_SCALE: f32 = 20.0;
 const IRON_GRILLE_LINEAR: [f32; 3] = [0.055, 0.065, 0.075];
 pub const fn is_grille(block: BlockId) -> bool {
@@ -609,7 +613,7 @@ pub fn material_class(block: BlockId) -> MaterialClass {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 63] = [
+pub const PALETTE: [BlockId; 65] = [
     STONE,
     DIRT,
     GRASS,
@@ -673,6 +677,8 @@ pub const PALETTE: [BlockId; 63] = [
     LEVER_OFF,
     LEVER_ON,
     RUNE_STONE_LIT,
+    CHEST,
+    CHEST_OPEN,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -792,6 +798,8 @@ const LEVER_ON_LINEAR: [f32; 3] = [0.16, 0.13, 0.085];
 pub const LEVER_PLINTH_LINEAR: [f32; 3] = [0.068_478, 0.072_272, 0.080_220];
 /// The grip at a lever's tip: bronze, the one warm colour on it.
 pub const LEVER_GRIP_LINEAR: [f32; 3] = [0.30, 0.16, 0.05];
+const CHEST_LINEAR: [f32; 3] = [0.19, 0.075, 0.025];
+const CHEST_OPEN_LINEAR: [f32; 3] = [0.12, 0.045, 0.015];
 /// A lit rune's stone: the unlit [`RUNE_STONE_LINEAR`] with the cold of its own light
 /// in it.
 const RUNE_STONE_LIT_LINEAR: [f32; 3] = [0.03, 0.085, 0.1];
@@ -957,6 +965,8 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         LEVER_OFF => LEVER_OFF_LINEAR,
         LEVER_ON => LEVER_ON_LINEAR,
         RUNE_STONE_LIT => RUNE_STONE_LIT_LINEAR,
+        CHEST => CHEST_LINEAR,
+        CHEST_OPEN => CHEST_OPEN_LINEAR,
         SLATE_SLAB_BOTTOM => SLATE_SLAB_BOTTOM_LINEAR,
         SLATE_SLAB_TOP => SLATE_SLAB_TOP_LINEAR,
         SLATE_STAIR_NORTH_BOTTOM => SLATE_STAIR_NORTH_BOTTOM_LINEAR,
@@ -1265,7 +1275,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=RUNE_STONE_LIT {
+        for block in 1..=CHEST_OPEN {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
