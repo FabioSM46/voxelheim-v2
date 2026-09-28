@@ -1017,13 +1017,13 @@ mod tests {
         blade_of(ITEM_RUSTY_SWORD)
     }
 
-    /// Both blades, named.
+    /// Every blade, named.
     ///
     /// The invariant this issue exists for is that the routing cannot tell them apart, so
-    /// the tests that are about routing run over the pair. One test each would let the two
+    /// the tests that are about routing run over all three. Separate tests could
     /// drift into asserting different things, which is how the client came to draw a blade
     /// it would not swing.
-    fn blades() -> [(&'static str, InventoryStack); 2] {
+    fn blades() -> [(&'static str, InventoryStack); 3] {
         [
             ("the rusty sword", blade_of(ITEM_RUSTY_SWORD)),
             ("the iron sword", blade_of(ITEM_IRON_SWORD)),

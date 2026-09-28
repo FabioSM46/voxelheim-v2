@@ -307,6 +307,12 @@ const ARROW_LINEAR: [f32; 3] = [0.686_686, 0.584_078, 0.366_253];
 /// `#BFC7D2`, converted from sRGB to the linear space vertex colours use.
 const SILVER_LINEAR: [f32; 3] = [0.520_996, 0.571_125, 0.644_480];
 
+/// Deliberately chosen linear-space violet swatches, not sRGB channel fractions.
+/// The rune is darker and more saturated; the blade is pale enough to remain distinct
+/// from forged steel. No colour-space conversion or screen capture is implied here.
+const KING_RUNE_LINEAR: [f32; 3] = [0.32, 0.13, 0.60];
+const RUNIC_STEEL_LINEAR: [f32; 3] = [0.58, 0.48, 0.78];
+
 impl ItemColour {
     fn linear_rgba(self) -> [f32; 4] {
         match self {
@@ -339,8 +345,14 @@ impl ItemColour {
                 let [r, g, b] = SILVER_LINEAR;
                 [r, g, b, 1.0]
             }
-            Self::KingRune => [0.32, 0.13, 0.60, 1.0],
-            Self::RunicSteel => [0.58, 0.48, 0.78, 1.0],
+            Self::KingRune => {
+                let [r, g, b] = KING_RUNE_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::RunicSteel => {
+                let [r, g, b] = RUNIC_STEEL_LINEAR;
+                [r, g, b, 1.0]
+            }
             Self::Horse(kind) => {
                 let colour = super::horse::coat_colour(kind).to_linear();
                 [colour.red, colour.green, colour.blue, colour.alpha]
