@@ -178,10 +178,10 @@ pub const fn is_lever(block: BlockId) -> bool {
     matches!(block, LEVER_OFF | LEVER_ON)
 }
 
-/// Whether `block` carries light of its own: the faces the mesher routes into the unlit
-/// glow half, which neither the sun nor a cave's darkness dims.
+/// Whether a stone's rune glyph belongs in the unlit mesh pass. This dispatch
+/// predicate creates no light source; chest inlays have their own earlier mesh branch.
 pub const fn glows(block: BlockId) -> bool {
-    block == RUNE_STONE_LIT || is_chest(block)
+    block == RUNE_STONE_LIT
 }
 
 /// Geometry one block occupies inside its voxel.
