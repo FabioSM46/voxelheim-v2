@@ -6,7 +6,9 @@ acceptance. The follow-up evidence PR records actual images, run URL and source 
 The server sends Chest (64) or ChestOpen (65). The mesher draws a bronze-banded wooden
 box, with a horizontal closed lid or an upright open lid and dark interior. All vertices
 stay inside the authoritative solid cell. Neither state occludes neighbouring geometry.
-The client never changes a chest block or remembers a local opening result.
+The client never changes a chest block or remembers a local opening result. Amber runic
+inlays follow the body corners, rim and lid through the existing unlit rune mesh; the
+wooden shell and bronze fittings remain in the ordinary lit terrain pass.
 
 The existing aimed-mechanism pass recognizes either block. The existing station prompt
 shows `F: Chest` under the crosshair, substituting the configured Interact key. Corpse
@@ -60,3 +62,26 @@ Inspect both actual PNGs at full size. Acceptance requires an identifiable close
 and a visibly raised lid/dark opening at the stated distance in the sand hall. Copy the
 reviewed images and their provenance into the follow-up evidence PR and link the successful
 workflow run. A green ordinary CI run does not establish this visual acceptance.
+
+## First remote result and corrective scope
+
+[Capture run 36450141868](https://github.com/FabioSM46/voxelheim-v2/actions/runs/36450141868)
+succeeded at source `3964691d9597cd8cff3f50497fdab2088159e9b7`, but inspection of both
+actual images **failed visual acceptance**: the closed/open lid outline barely differed
+against the nearly black box. The manifests report five blocks, 1280×720, llvmpipe Vulkan,
+seven sconces and three active point lights. Successful rendering did not mean readability.
+
+The source explains the result. The sand chest is at drawing cell (17, 10, 35), while the
+nearest sand-hall sconces are along x=1 and x=33, z=30. Their wall-light range is nine blocks,
+so neither reaches the central chest. The production sand grade disables the sun and
+reduces ambient brightness to one fifth. Merely counting active lights concealed that gap.
+The fixture's closed/open block assertions passed; the camera and cave-light pipeline were
+working as configured.
+
+The corrective rendering adds thin amber rune channels around the body rim/corners and
+on the lid, including a small maker's mark. They use the existing shared unlit rune material,
+change position with the actual lid geometry, and stay inside the same solid voxel. The
+wood remains shaded, the dark open recess remains visible by contrast, and no point light,
+room illumination, camera/exposure change or capture-specific enhancement is introduced.
+The capture workflow and camera are unchanged. A second remote run and direct inspection
+of its PNGs are still required before visual acceptance can be recorded.

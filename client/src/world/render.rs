@@ -184,7 +184,7 @@ struct WaterMaterial(Handle<FlowingWater>);
 #[derive(Resource, Debug)]
 struct CoverMaterial(Handle<StandardMaterial>);
 
-/// The material every glowing face shares: the rune on a lit rune stone.
+/// The shared material for lit stone runes and the chest's amber inlays.
 ///
 /// The fourth material, and the split is by **lighting**: `unlit` is what makes a vertex
 /// colour reach the screen whatever light arrives at it, which is the whole of how a rune
@@ -1416,6 +1416,38 @@ mod tests {
             stats(app).meshed_chunks == 1
         });
         assert_eq!(chunk_entities(&mut app), vec![(true, 0)]);
+    }
+
+    #[test]
+    fn both_chest_states_share_rune_material_while_the_wood_remains_lit() {
+        for block in [palette::CHEST, palette::CHEST_OPEN] {
+            const LAYER: u16 = SIZE * SIZE;
+            let mut app = headless_world();
+            push(
+                &mut app,
+                WorldUpdate::Chunk {
+                    coord: coord(0, 0, 0),
+                    runs: vec![
+                        palette::STONE,
+                        LAYER,
+                        block,
+                        1,
+                        palette::AIR,
+                        VOLUME - LAYER - 1,
+                    ],
+                },
+            );
+            pump_until(&mut app, "chest and inlay mesh", |app| {
+                stats(app).meshed_chunks == 1
+            });
+            assert_eq!(chunk_entities(&mut app), vec![(true, 1)]);
+            let glow = app.world().resource::<GlowMaterial>().0.clone();
+            let terrain = app.world().resource::<TerrainMaterial>().0.clone();
+            assert_eq!(cover_child_materials(&mut app), vec![glow.clone()]);
+            let materials = app.world().resource::<Assets<StandardMaterial>>();
+            assert!(materials.get(&glow).unwrap().unlit);
+            assert!(!materials.get(&terrain).unwrap().unlit);
+        }
     }
 
     #[test]
