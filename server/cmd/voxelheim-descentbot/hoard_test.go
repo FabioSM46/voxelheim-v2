@@ -2,13 +2,28 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
+
+func TestTerminalHoardDeathPreservesCauseWithoutRetryingLoot(t *testing.T) {
+	r := &runner{pilot: &pilot{stats: newRunStats(newTally()), say: func(string, ...any) {}}}
+	calls := 0
+	err := r.phase(context.Background(), "chest 1", func(context.Context) error {
+		calls++
+		return fmt.Errorf("partial transfer: %w", &terminalHoardError{cause: errDied})
+	})
+	var terminal *terminalHoardError
+	if calls != 1 || !errors.Is(err, errDied) || !errors.As(err, &terminal) {
+		t.Fatalf("terminal reward retried or cause lost: calls %d error %v", calls, err)
+	}
+}
 
 func TestHoardRequiresThreeMembersAndKeepsOrdinaryRoute(t *testing.T) {
 	for _, members := range []string{"1", "2", "4", "5"} {

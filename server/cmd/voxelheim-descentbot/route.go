@@ -155,7 +155,8 @@ func (r *runner) phase(ctx context.Context, name string, body func(context.Conte
 	r.stats.begin(name)
 	for {
 		err := body(ctx)
-		if !errors.Is(err, errDied) {
+		var terminal *terminalHoardError
+		if errors.As(err, &terminal) || !errors.Is(err, errDied) {
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
@@ -239,11 +240,11 @@ func (r *runner) route() []struct {
 				body func(context.Context) error
 			}{fmt.Sprintf("chest %d", index+1), func(ctx context.Context) error {
 				if err := r.checkChest(ctx, index); err != nil {
-					return fmt.Errorf("hoard assertion: %v", err)
+					return &terminalHoardError{cause: fmt.Errorf("hoard assertion: %w", err)}
 				}
 				if index == world.KingChest {
 					if err := r.collectKing(ctx); err != nil {
-						return fmt.Errorf("king reward assertion: %v", err)
+						return &terminalHoardError{cause: fmt.Errorf("king reward assertion: %w", err)}
 					}
 				}
 				return nil

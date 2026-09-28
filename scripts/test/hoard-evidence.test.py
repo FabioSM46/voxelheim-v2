@@ -13,7 +13,7 @@ SPEC.loader.exec_module(EXPORTER)
 
 class EvidenceBoundary(unittest.TestCase):
     def setUp(self):
-        os.environ.update(HOARD_SOURCE_COMMIT="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+        os.environ.update(HOARD_SOURCE_COMMIT="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="example/renamed-project")
 
     def exported(self, raw, code):
         with tempfile.TemporaryDirectory() as directory:
@@ -27,6 +27,7 @@ class EvidenceBoundary(unittest.TestCase):
         self.assertTrue(passed)
         self.assertNotIn("private diagnostic sentinel", json.dumps(report))
         self.assertEqual(report["source_commit"], "a" * 40)
+        self.assertEqual(report["run_url"], "https://github.com/example/renamed-project/actions/runs/123/attempts/1")
 
     def test_failure_and_missing_report_fail_closed(self):
         for raw, code in [("private diagnostic", 0), ('HOARD_EVIDENCE {"Version":1,"Success":true}', 1), ('HOARD_EVIDENCE {"Version":1,"Success":false}', 0)]:

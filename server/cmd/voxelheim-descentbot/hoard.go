@@ -14,6 +14,13 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
+// A partially consumed reward must never be retried as a fresh chest assertion.
+// Preserve the cause for diagnostics while explicitly opting out of death retries.
+type terminalHoardError struct{ cause error }
+
+func (e *terminalHoardError) Error() string { return e.cause.Error() }
+func (e *terminalHoardError) Unwrap() error { return e.cause }
+
 // Evidence is populated only after its wire assertions pass. No item, currency or
 // durability value below is ever written back as authoritative state.
 type hoardEvidence struct {
@@ -102,6 +109,8 @@ func (r *runner) awaitLoot(ctx context.Context, corpse uint64, closed bool, refu
 			}
 			return protocol.LootState{}, fmt.Errorf("unexpected hoard refusal %s/%s", reply.Action, reply.Reason)
 		}
+		// game.offerLootLocked never emits an empty state: an exhausted container
+		// queues LootClosed and clears openLootID. A state here means a remainder.
 		for _, state := range states {
 			if refusal != vnet.RefusalReasonUnknown || closed {
 				return state, errors.New("unexpected loot state instead of refusal/closure")

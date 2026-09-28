@@ -28,8 +28,12 @@ def export(raw, destination, exit_code):
     source = os.environ["HOARD_SOURCE_COMMIT"]
     run_id = os.environ["GITHUB_RUN_ID"]
     attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+    server = os.environ["GITHUB_SERVER_URL"]
+    repository = os.environ["GITHUB_REPOSITORY"]
     if not re.fullmatch(r"[0-9a-f]{40}", source) or not run_id.isdecimal() or not attempt.isdecimal():
         raise ValueError("invalid public run identity")
+    if server != "https://github.com" or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("invalid public repository identity")
     records = [line.removeprefix("HOARD_EVIDENCE ") for line in raw.splitlines()
                if line.startswith("HOARD_EVIDENCE ")]
     observed = None
@@ -48,7 +52,7 @@ def export(raw, destination, exit_code):
     success = exit_code == 0 and observed is not None and observed["Success"] is True
     result = {
         "source_commit": source,
-        "run_url": f"https://github.com/FabioSM46/voxelheim-v2/actions/runs/{run_id}/attempts/{attempt}",
+        "run_url": f"{server}/{repository}/actions/runs/{run_id}/attempts/{attempt}",
         "invocation": "voxelheim-descentbot -server <built-server> -party 3 -hoard -timeout 75m -seed 1",
         "fixtures": "Original iron sword and rusty armor bootstrap per member; one leader EnchantingTable after normal exit. No earned reagent or silver grants.",
         "travel_assists": "Existing portal and stuck placements; two post-exit overworld placements for table and capital forge. No dungeon skips or injected durability.",
