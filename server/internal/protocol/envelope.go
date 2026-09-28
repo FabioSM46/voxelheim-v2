@@ -3933,6 +3933,15 @@ func EncodeCraftRequest(r CraftRequest) []byte {
 	return finishEnvelope(b, vnet.PayloadCraftRequest, request)
 }
 
+// EncodeStationRepairRequest builds client intent for protocol and session tests.
+func EncodeStationRepairRequest(r StationRepairRequest) []byte {
+	b := flatbuffers.NewBuilder(64)
+	vnet.StationRepairRequestStart(b)
+	vnet.StationRepairRequestAddTargetSlot(b, r.TargetSlot)
+	request := vnet.StationRepairRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadStationRepairRequest, request)
+}
+
 // EncodeRepairRequest builds one repair intent, for the reason EncodeCraftRequest exists:
 // the server never sends one, and the tests need the bytes a client produces rather than a
 // second encoder written by hand that could drift from this one.
@@ -4119,13 +4128,4 @@ func finishEnvelope(b *flatbuffers.Builder, kind vnet.Payload, payload flatbuffe
 
 	vnet.FinishEnvelopeBuffer(b, envelope)
 	return b.FinishedBytes()
-}
-
-// EncodeStationRepairRequest builds client intent for protocol and session tests.
-func EncodeStationRepairRequest(r StationRepairRequest) []byte {
-	b := flatbuffers.NewBuilder(64)
-	vnet.StationRepairRequestStart(b)
-	vnet.StationRepairRequestAddTargetSlot(b, r.TargetSlot)
-	request := vnet.StationRepairRequestEnd(b)
-	return finishEnvelope(b, vnet.PayloadStationRepairRequest, request)
 }

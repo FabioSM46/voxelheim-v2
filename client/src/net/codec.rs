@@ -11013,7 +11013,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            74,
+            75,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -11043,7 +11043,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 74] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 75] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -13267,6 +13267,9 @@ mod tests {
             RefusalReason::NotAVendor,
             RefusalReason::NotEnoughSilver,
             RefusalReason::VendorDoesNotWant,
+            RefusalReason::ChestAlreadyOpened,
+            RefusalReason::NothingToRepair,
+            RefusalReason::NotAtStation,
         ] {
             assert!(
                 !reason.is_client_defect(),

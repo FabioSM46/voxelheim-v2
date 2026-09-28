@@ -1428,6 +1428,10 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		// V46's mechanism refusals, produced by Player.UseMechanism.
 		vnet.RefusalReasonNotAMechanism,
 		vnet.RefusalReasonMechanismLocked,
+		// V47 declarations; producers follow in #1312 and #1314.
+		vnet.RefusalReasonChestAlreadyOpened,
+		vnet.RefusalReasonNothingToRepair,
+		vnet.RefusalReasonNotAtStation,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1453,8 +1457,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// the same pattern: the contract carries it, and #1236 is its producer. V46's
 	// MechanismLocked is the same again: the contract carries it and Player.UseMechanism
 	// produces it. The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 61 {
-		t.Errorf("RefusalReason has %d members, want 61 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 64 {
+		t.Errorf("RefusalReason has %d members, want 64 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 
