@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -113,5 +114,42 @@ func TestServerUsesDurableStorageButReportOmitsOperationalArguments(t *testing.T
 	}
 	if !strings.Contains(report, "<temporary-world>") {
 		t.Fatal("report hides the persistence mode")
+	}
+}
+
+func TestShutdownFailureChangesTheReportAndPreservesTheRouteFailure(t *testing.T) {
+	routeErr := errors.New("route failed")
+	flushErr := errors.New("persistence flush failed")
+	for _, playErr := range []error{nil, routeErr} {
+		lead := &runner{pilot: &pilot{c: &client{name: "Delver"}, stats: newRunStats(newTally())}, server: &serverProcess{commandLine: "fixture"}}
+		pt := newParty([]*runner{lead})
+		var report strings.Builder
+		calls := 0
+		err := finishRun(&report, pt, playErr, func() error { calls++; return flushErr })
+		if calls != 1 || !errors.Is(err, flushErr) || (playErr != nil && !errors.Is(err, playErr)) {
+			t.Fatalf("lost failure or repeated shutdown: %v calls %d", err, calls)
+		}
+		if strings.Contains(report.String(), "RESULT: cleared") || !strings.Contains(report.String(), "persistence flush failed") {
+			t.Fatalf("misleading report: %s", report.String())
+		}
+	}
+}
+
+func TestConcurrentShutdownCallersRetainTheSameExitFailure(t *testing.T) {
+	exited := make(chan struct{})
+	failure := errors.New("server flush failed")
+	server := &serverProcess{exited: exited, waitErr: failure}
+	close(exited)
+	results := make(chan error, 8)
+	for range cap(results) {
+		go func() { results <- server.shutdown() }()
+	}
+	for range cap(results) {
+		if err := <-results; err != failure {
+			t.Fatalf("shutdown lost exit failure: %v", err)
+		}
+	}
+	if err := server.shutdown(); err != failure {
+		t.Fatalf("repeat shutdown: %v", err)
 	}
 }

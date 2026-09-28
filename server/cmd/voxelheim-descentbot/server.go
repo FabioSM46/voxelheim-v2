@@ -34,11 +34,13 @@ type serverProcess struct {
 	addr        string
 	fingerprint string
 
-	mu      sync.Mutex
-	tail    []string
-	done    sync.WaitGroup
-	exited  chan struct{}
-	waitErr error // written before exited closes
+	mu           sync.Mutex
+	tail         []string
+	done         sync.WaitGroup
+	exited       chan struct{}
+	waitErr      error // written before exited closes
+	shutdownOnce sync.Once
+	shutdownErr  error // published by shutdownOnce to every caller
 }
 
 func serverArgs(o options, ticketKey string) []string {
@@ -142,12 +144,13 @@ func (s *serverProcess) lastLines() string {
 	return strings.Join(s.tail, "\n")
 }
 
-func (s *serverProcess) stop() {
-	_ = s.shutdown()
-}
-
 // shutdown is idempotent and refuses to call a forced stop a persistence success.
 func (s *serverProcess) shutdown() error {
+	s.shutdownOnce.Do(func() { s.shutdownErr = s.shutdownProcess() })
+	return s.shutdownErr
+}
+
+func (s *serverProcess) shutdownProcess() error {
 	select {
 	case <-s.exited:
 		return s.waitErr

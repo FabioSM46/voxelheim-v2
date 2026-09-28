@@ -92,7 +92,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, o options, out, progress io.Writer) error {
+func run(ctx context.Context, o options, out, progress io.Writer) (runErr error) {
 	maxWipes = o.maxWipes
 	keyDir, err := os.MkdirTemp("", "voxelheim-descentbot-")
 	if err != nil {
@@ -112,7 +112,13 @@ func run(ctx context.Context, o options, out, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer server.stop()
+	shutdownChecked := false
+	defer func() {
+		// Early setup failures still own the server and must retain a shutdown failure.
+		if !shutdownChecked {
+			runErr = errors.Join(runErr, server.shutdown())
+		}
+	}()
 
 	tally := newTally()
 	say := func(name string) func(string, ...any) {
@@ -156,14 +162,18 @@ func run(ctx context.Context, o options, out, progress io.Writer) error {
 	for _, m := range members {
 		m.stats.finish()
 	}
-	writeReport(out, pt, playErr)
-	if playErr != nil {
-		return playErr
+	// end interrupts every reader. Include all their final results before reporting;
+	// a late transport failure must not follow an already-published success verdict.
+	for range members {
+		playErr = errors.Join(playErr, <-readErrs)
 	}
-	select {
-	case err := <-readErrs:
-		return err
-	default:
-		return nil
-	}
+	shutdownChecked = true
+	return finishRun(out, pt, playErr, server.shutdown)
+}
+
+// A successful route is not yet a successful acceptance: persistence must finish.
+func finishRun(out io.Writer, pt *party, playErr error, shutdown func() error) error {
+	err := errors.Join(playErr, shutdown())
+	writeReport(out, pt, err)
+	return err
 }
