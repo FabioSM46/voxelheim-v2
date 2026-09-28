@@ -1820,7 +1820,6 @@ pub struct CraftRequest {
 
 /// Full forge repair intent. Only the server decides cost, reach and durability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // The station UI consumes this V47 contract in #1316.
 pub struct StationRepairRequest {
     pub target_slot: u16,
 }
@@ -8062,7 +8061,6 @@ pub fn encode_craft_request(request: &CraftRequest) -> Vec<u8> {
 }
 
 /// Encodes one authoritative inventory slot, including values gameplay will refuse.
-#[allow(dead_code)] // The station UI consumes this V47 contract in #1316.
 pub fn encode_station_repair_request(request: &StationRepairRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let payload = fb::StationRepairRequest::create(

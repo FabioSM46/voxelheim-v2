@@ -79,7 +79,7 @@ pub use codec::{
     StaticPropState, StructureKind, StructureState, WorldClock, WorldUpdate,
     map_tile_explored_bytes, map_tile_span,
 };
-pub use codec::{BlockRequest, DrawRequest};
+pub use codec::{BlockRequest, DrawRequest, StationRepairRequest, encode_station_repair_request};
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[cfg(test)]
 pub use codec::MountState;

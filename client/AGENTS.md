@@ -993,6 +993,21 @@ any more**: they were expressible while a body was one capsule inscribed in the 
 rig of a dozen-odd boxes says things a `const` expression cannot, so `player/appearance.rs` asserts
 them as tests instead.
 
+## Paid repairs at the forge
+
+`player/station_repair.rs` originates only `StationRepairRequest{target_slot}`. The forge
+panel in `ui/station.rs` lists worn slots from the latest complete inventory, including backpack
+and equipment, and previews missing durability times `REPAIR_SILVER_PER_POINT`. That display
+constant mirrors `RepairSilverPerPoint` in the server source and a source-parity test pins it.
+No affordability, reach or wear decision in the sender blocks a request: the server's full
+`InventoryState` and `ActionRefused` are the answer. Clicking neither debits silver nor removes a
+row. The existing field-kit drag flow is unchanged.
+
+Only the forge shows this section. Repairs and recipes share one bounded, wheel-scrollable
+viewport so a fully worn pack does not make the recipe list unreachable. The generic status
+notice path names station-repair refusals, including missing forge access, insufficient silver
+and nothing to repair. Pending repair clicks are cleared with the rest of the world input.
+
 ## The rig: a body cut from the same grain as the world
 
 A character is thirteen axis-aligned boxes and a haircut — between one box and four — authored in

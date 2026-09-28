@@ -86,6 +86,7 @@ mod shapes;
 mod sky;
 mod static_props;
 mod station;
+mod station_repair;
 mod structures;
 mod target;
 mod tool_audio;
@@ -143,6 +144,9 @@ pub use loot::{LootTakeClick, LootWindow};
 pub use mounts::{LearnedMounts, mount_label, preference_from_mount};
 pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 pub use station::{StationHint, StationWindow, recipes_made_at, station_title};
+pub(crate) use station_repair::{
+    OriginateStationRepair, REPAIR_SILVER_PER_POINT, StationRepairClick, repair_previews,
+};
 // The sky the low-health vignette has to be visible against. Test-only and deliberately
 // so: `ui/health.rs` reads the colour to assert that its edge is not one the night has
 // already reached (#553), and nothing at runtime may read a rule back out of it.
@@ -588,6 +592,7 @@ impl Plugin for PlayerPlugin {
             .add_plugins(crafting::CraftingPlugin)
             .add_plugins(loot::LootPlugin)
             .add_plugins(station::StationPlugin)
+            .add_plugins(station_repair::StationRepairPlugin)
             .add_plugins(mounts::MountsPlugin)
             .add_plugins(trade::PlayerTradePlugin)
             .add_plugins(instance_entry::InstanceEntryPlugin)
@@ -3452,6 +3457,7 @@ pub(crate) fn reset_world(world: &mut World) {
     clear_messages::<PlayerTradeEnded>(world);
     clear_messages::<LootTakeClick>(world);
     clear_messages::<station::OpenStation>(world);
+    clear_messages::<StationRepairClick>(world);
     clear_messages::<VendorTradeClick>(world);
     clear_messages::<InventoryClick>(world);
     clear_messages::<CraftClick>(world);
