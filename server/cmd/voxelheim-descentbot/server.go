@@ -18,8 +18,9 @@ import (
 )
 
 // The server under test, started here as cmd/voxelheim-voicebot starts it (copied, since a
-// command cannot import another): an ephemeral world on a kernel-chosen port, its address
-// and fingerprint read from its Info startup lines, and a SIGKILL at the end.
+// command cannot import another): a temporary durable world on a kernel-chosen port,
+// its address and fingerprint read from its Info startup lines. A clean stop waits for
+// the server's persistence flush, so restarting that directory tests real saved state.
 
 const (
 	listeningMessage   = "voxelheimd listening"
@@ -33,15 +34,17 @@ type serverProcess struct {
 	addr        string
 	fingerprint string
 
-	mu   sync.Mutex
-	tail []string
-	done sync.WaitGroup
+	mu      sync.Mutex
+	tail    []string
+	done    sync.WaitGroup
+	exited  chan struct{}
+	waitErr error // written before exited closes
 }
 
 func serverArgs(o options, ticketKey string) []string {
 	return []string{
 		"-listen", "127.0.0.1:0",
-		"-world-dir=",
+		"-world-dir", o.worldDir,
 		"-world-name", o.worldName,
 		"-ticket-key", ticketKey,
 		"-seed", strconv.FormatInt(o.seed, 10),
@@ -67,10 +70,16 @@ func startServer(ctx context.Context, o options, ticketKey string) (*serverProce
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", o.serverBin, err)
 	}
-	s := &serverProcess{cmd: cmd, commandLine: strings.Join(append([]string{"voxelheimd"}, args...), " ")}
+	s := &serverProcess{cmd: cmd, commandLine: reportServerArgs(o), exited: make(chan struct{})}
 	ready := make(chan error, 1)
 	s.done.Add(1)
 	go s.scan(stderr, ready)
+	go func() {
+		// Drain the log before Wait closes the pipe; never race the scanner with Wait.
+		s.done.Wait()
+		s.waitErr = cmd.Wait()
+		close(s.exited)
+	}()
 
 	timer := time.NewTimer(serverStartLimit)
 	defer timer.Stop()
@@ -134,11 +143,37 @@ func (s *serverProcess) lastLines() string {
 }
 
 func (s *serverProcess) stop() {
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+	_ = s.shutdown()
+}
+
+// shutdown is idempotent and refuses to call a forced stop a persistence success.
+func (s *serverProcess) shutdown() error {
+	select {
+	case <-s.exited:
+		return s.waitErr
+	default:
 	}
-	_ = s.cmd.Wait()
-	s.done.Wait()
+	if err := s.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		_ = s.cmd.Process.Kill()
+		<-s.exited
+		return fmt.Errorf("request server shutdown: %w", err)
+	}
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-s.exited:
+		return s.waitErr
+	case <-timer.C:
+		_ = s.cmd.Process.Kill()
+		<-s.exited
+		return errors.New("server did not finish its persistence shutdown within one minute")
+	}
+}
+
+// Reports contain neither the temporary path nor an operational signing key/address.
+func reportServerArgs(o options) string {
+	return fmt.Sprintf("voxelheimd -world-dir <temporary-world> -world-name %s -seed %d -view-distance %d -dev-commands (ephemeral listener; ticket key omitted)",
+		o.worldName, o.seed, o.viewDistance)
 }
 
 // residentBytes is the server's resident set, read from /proc. Linux only, and it says so

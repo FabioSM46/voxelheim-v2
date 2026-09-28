@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
@@ -33,6 +34,8 @@ type options struct {
 	maxWipes     int
 	members      int
 	quiet        bool
+	// Owned temporary storage, retained across the acceptance scenario's restart.
+	worldDir string
 }
 
 const tickRate = 20
@@ -96,6 +99,7 @@ func run(ctx context.Context, o options, out, progress io.Writer) error {
 		return fmt.Errorf("make a directory for the signing key: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(keyDir) }()
+	o.worldDir = filepath.Join(keyDir, "world")
 	pair, err := ticket.LoadOrCreate(keyDir)
 	if err != nil {
 		return fmt.Errorf("mint a signing key: %w", err)
@@ -131,7 +135,7 @@ func run(ctx context.Context, o options, out, progress io.Writer) error {
 			return fmt.Errorf("mint a ticket: %w", err)
 		}
 		stats := newRunStats(tally)
-		c, err := join(ctx, server.addr, server.fingerprint, name, credential[:], stats)
+		c, err := join(ctx, server.addr, server.fingerprint, name, credential[:], stats, false)
 		if err != nil {
 			return fmt.Errorf("join %s: %w", name, err)
 		}
