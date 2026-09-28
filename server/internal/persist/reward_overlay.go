@@ -55,6 +55,7 @@ func (s *RewardStore) OverlaySessions(saved []SessionRecord, now int64, content 
 		rec.DefeatedBosses = append(rec.DefeatedBosses[:0:0], rec.DefeatedBosses...)
 		rec.SolvedPuzzles = slices.Clone(rec.SolvedPuzzles)
 		rec.ClearedGroups = slices.Clone(rec.ClearedGroups)
+		rec.OpenedChests = slices.Clone(rec.OpenedChests)
 		byKey[key] = RestoredRewardSession{Session: rec}
 	}
 	seen := make(map[rewardRunIdentity]bool)
@@ -93,6 +94,7 @@ func (s *RewardStore) OverlaySessions(saved []SessionRecord, now int64, content 
 		rec.Checkpoints = prior.Session.Checkpoints
 		rec.SolvedPuzzles = slices.Clone(prior.Session.SolvedPuzzles)
 		rec.ClearedGroups = slices.Clone(prior.Session.ClearedGroups)
+		rec.OpenedChests = slices.Clone(prior.Session.OpenedChests)
 		byKey[key] = RestoredRewardSession{Generation: run.Generation, Session: rec}
 	}
 	if len(byKey) > MaxSavedSessions {
