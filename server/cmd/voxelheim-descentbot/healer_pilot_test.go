@@ -295,3 +295,109 @@ func TestHealerRangeLeavesMarginBeforeServerOrbExpiry(t *testing.T) {
 		t.Fatal("bot range reaches the expiry boundary")
 	}
 }
+
+// signalWriteConn announces each actual socket Write before blocking on the
+// underlying pipe. transport.WriteFrame writes a length and then a payload.
+type signalWriteConn struct {
+	net.Conn
+	writes chan struct{}
+}
+
+func (c *signalWriteConn) Write(data []byte) (int, error) {
+	c.writes <- struct{}{}
+	return c.Conn.Write(data)
+}
+
+func TestLaunchWriteFailureDoesNotCommitRequestsOrEarlyHealing(t *testing.T) {
+	for _, failAttack := range []bool{false, true} {
+		t.Run(fmt.Sprint(failAttack), func(t *testing.T) {
+			p := healerPilotFixture()
+			local, remote := net.Pipe()
+			defer func() { _ = local.Close(); _ = remote.Close() }()
+			if err := remote.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			writes := make(chan struct{}, 8)
+			p.c.conn = &signalWriteConn{Conn: local, writes: writes}
+			target, _ := woundedAlly(1, orbOrigin(p.c.pos), p.c.healing.members)
+			done := make(chan error, 1)
+			go func() { done <- p.launchOrb(target, intent{}, time.Now()) }()
+			<-writes // first frame's prefix is now blocked on the pipe
+			readDone := make(chan struct{})
+			go func() { p.c.inventoryAnswer(); close(readDone) }()
+			select {
+			case <-readDone:
+			case <-time.After(time.Second):
+				t.Fatal("reader mutex held over aim write")
+			}
+			if failAttack {
+				if readBotMessage(t, remote).PlayerInput == nil {
+					t.Fatal("first frame is not aim")
+				}
+				<-writes // first frame payload
+				<-writes // attack prefix: provisional observation exists, write is blocked
+				p.c.mu.Lock()
+				if len(p.c.healing.pending) != 1 {
+					t.Fatal("attack has no provisional observation")
+				}
+				shot := p.c.healing.pending[0]
+				shot.earliest = time.Now().Add(-time.Millisecond)
+				p.c.healing.observe([]allyView{ally(2, 30, 10)}, time.Now())
+				if p.c.healing.totals != (healerTotals{}) || shot.restored != 10 {
+					t.Fatal("unwritten attack committed evidence")
+				}
+				p.c.mu.Unlock()
+			}
+			_ = remote.Close()
+			if err := <-done; err == nil {
+				t.Fatal("failed write returned success")
+			}
+			if p.c.healingTotals() != (healerTotals{}) {
+				t.Fatal("failed write counted request or healing")
+			}
+			p.c.mu.Lock()
+			pending := len(p.c.healing.pending)
+			p.c.mu.Unlock()
+			if pending != 0 || !p.lastSwing.IsZero() {
+				t.Fatal("failed launch retained attempt state")
+			}
+		})
+	}
+}
+
+func TestUnreachableHealerCreatureIsRecordedAndDroppedButNotABoss(t *testing.T) {
+	p := healerPilotFixture()
+	now := time.Now()
+	m := p.c.mobs[9]
+	engaged := map[uint64]time.Time{}
+	if p.healerUnreachable(m.id, false, []mobView{m}, engaged, now) {
+		t.Fatal("gave up immediately")
+	}
+	if !p.healerUnreachable(m.id, false, []mobView{m}, engaged, now.Add(time.Minute+time.Nanosecond)) {
+		t.Fatal("unreachable creature retained forever")
+	}
+	if _, ok := p.orbFocus(p.c.self(), func(mobView) bool { return true }, []mobView{m}); ok {
+		t.Fatal("unreachable creature reselected")
+	}
+	p.healerUnreachable(m.id, false, []mobView{m}, engaged, now.Add(2*time.Minute))
+	if len(p.stats.unreachedMobs) != 1 {
+		t.Fatal("unreachable report duplicated")
+	}
+	for _, kind := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
+		m.kind = kind
+		if p.healerUnreachable(m.id, false, []mobView{m}, engaged, now.Add(2*time.Minute)) {
+			t.Fatal("mandatory boss abandoned")
+		}
+	}
+	p = healerPilotFixture()
+	m = p.c.mobs[9]
+	engaged = map[uint64]time.Time{m.id: now.Add(-2 * time.Minute)}
+	if p.healerUnreachable(m.id, true, []mobView{m}, engaged, now) || engaged[m.id] != now {
+		t.Fatal("firing line did not reset timeout")
+	}
+	p.stats.hitAt[m.id] = now
+	engaged[m.id] = now.Add(-2 * time.Minute)
+	if p.healerUnreachable(m.id, false, []mobView{m}, engaged, now) {
+		t.Fatal("recent party hit ignored")
+	}
+}

@@ -149,7 +149,7 @@ func orbLineClear(v *blockView, from [3]float64, target orbTarget, members []all
 type healerState struct {
 	members []allyView
 	seenAt  time.Time
-	pending []healObservation
+	pending []*healObservation
 	totals  healerTotals
 }
 
@@ -162,18 +162,42 @@ type healerTotals struct {
 type healObservation struct {
 	target            uint64
 	earliest, expires time.Time
+	written           bool
+	restored          uint64
 }
 
-func (h *healerState) launched(target orbTarget, origin [3]float64, now time.Time) {
+// beginLaunch reserves an observation window without claiming a written request.
+// Observations arriving while the attack write is pending are tentative too.
+func (h *healerState) beginLaunch(target orbTarget, origin [3]float64, now time.Time) *healObservation {
 	if !target.ally {
-		h.totals.creatures++
+		return nil
+	}
+	flight := time.Duration(distance3(origin, target.point) / game.OrbSpeed * float64(time.Second))
+	earliest := now.Add(max(time.Duration(0), flight-150*time.Millisecond))
+	shot := &healObservation{target: target.id, earliest: earliest, expires: now.Add(flight + healerObservationSlack)}
+	h.pending = append(h.pending, shot)
+	return shot
+}
+
+// finishLaunch commits both kinds of evidence only on a successful write. A
+// failed write discards even a tentative delta already consumed by observe.
+func (h *healerState) finishLaunch(target orbTarget, shot *healObservation, written bool) {
+	if !written {
+		for i, pending := range h.pending {
+			if pending == shot {
+				h.pending = append(h.pending[:i], h.pending[i+1:]...)
+				break
+			}
+		}
 		return
 	}
-	h.totals.allies++
-	flight := time.Duration(distance3(origin, target.point) / game.OrbSpeed * float64(time.Second))
-	// A body is hit before its centre; the spawn nudge shortens the flight too.
-	earliest := now.Add(max(time.Duration(0), flight-150*time.Millisecond))
-	h.pending = append(h.pending, healObservation{target: target.id, earliest: earliest, expires: now.Add(flight + healerObservationSlack)})
+	if target.ally {
+		h.totals.allies++
+		shot.written = true
+		h.totals.restored += shot.restored
+	} else {
+		h.totals.creatures++
+	}
 }
 
 // observe replaces the complete party vector. Respawns, max-health changes,
@@ -203,7 +227,11 @@ func (h *healerState) observe(members []allyView, now time.Time) {
 		}
 		if !now.Before(shot.earliest) && next.health > old.health && now.Sub(h.seenAt) <= healerObservationSlack {
 			if !credited[shot.target] {
-				h.totals.restored += uint64(next.health - old.health)
+				if shot.written {
+					h.totals.restored += uint64(next.health - old.health)
+				} else {
+					shot.restored += uint64(next.health - old.health)
+				}
 				credited[shot.target] = true
 			}
 			// Only one outstanding request may claim this delta in this observer.
