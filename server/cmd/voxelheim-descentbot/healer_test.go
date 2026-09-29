@@ -150,7 +150,7 @@ func TestHealerHealthObservationIsBoundToOwnTargetAndFlightWindow(t *testing.T) 
 func TestTwoPendingRequestsCannotClaimOneDeltaTwice(t *testing.T) {
 	now := time.Unix(100, 0)
 	h := &healerState{members: []allyView{ally(2, 20, 10)}, seenAt: now,
-		pending: []healObservation{{target: 2, earliest: now, expires: now.Add(time.Second)}, {target: 2, earliest: now, expires: now.Add(time.Second)}}}
+		pending: []*healObservation{{target: 2, earliest: now, expires: now.Add(time.Second), written: true}, {target: 2, earliest: now, expires: now.Add(time.Second), written: true}}}
 	h.observe([]allyView{ally(2, 30, 10)}, now.Add(100*time.Millisecond))
 	if h.totals.restored != 10 || len(h.pending) != 0 {
 		t.Fatalf("duplicate inference %+v", h)
@@ -170,5 +170,25 @@ func TestCreatureAimAndEmptyHealerTotals(t *testing.T) {
 	c.healing = &healerState{totals: healerTotals{allies: 3, creatures: 7, restored: 20}}
 	if c.healingTotals() != c.healing.totals {
 		t.Fatal("report lost totals")
+	}
+}
+
+// launched is the already-written path used by deterministic observation tests.
+func (h *healerState) launched(target orbTarget, origin [3]float64, now time.Time) {
+	h.finishLaunch(target, h.beginLaunch(target, origin, now), true)
+}
+
+func TestEarlyHealObservationCommitsOnlyWhenAttackWriteSucceeds(t *testing.T) {
+	now := time.Now()
+	target := orbTarget{id: 2, point: [3]float64{10, 1.9, 3}, ally: true}
+	h := &healerState{members: []allyView{ally(2, 20, 10)}, seenAt: now}
+	shot := h.beginLaunch(target, orbOrigin([3]float64{2, 1, 3}), now)
+	h.observe([]allyView{ally(2, 30, 10)}, now.Add(500*time.Millisecond))
+	if h.totals != (healerTotals{}) || shot.restored != 10 {
+		t.Fatal("tentative evidence committed early")
+	}
+	h.finishLaunch(target, shot, true)
+	if h.totals.allies != 1 || h.totals.restored != 10 {
+		t.Fatal("successful write lost early evidence")
 	}
 }

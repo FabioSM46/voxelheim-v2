@@ -448,6 +448,10 @@ func (c *client) drive(ctx context.Context, rate int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if c.healing != nil {
+				_ = c.healerHeartbeat()
+				continue
+			}
 			c.mu.Lock()
 			in := c.control
 			c.mu.Unlock()

@@ -96,6 +96,7 @@ func writeReport(out io.Writer, pt *party, failure error) {
 		m.stats.mu.Unlock()
 	}
 	fmt.Fprintf(&b, "deaths, whole party: %d\n", totalDeaths)
+	writeHealerReport(&b, pt)
 
 	fmt.Fprintf(&b, "\ncreatures (seen / killed by the party):\n")
 	t := lead.stats.tally
@@ -158,7 +159,9 @@ func writeReport(out io.Writer, pt *party, failure error) {
 		guardian, _ := pt.fightTime("guardian fight")
 		king, _ := pt.fightTime("king fight")
 		fmt.Fprintf(&b, "\nparty run, portal to portal: %.1f min\n", pt.total.Minutes())
-		if human, ok := humanEstimate(len(pt.members), pt.total, guardian, king); ok {
+		if lead.opts.healers > 0 {
+			fmt.Fprintln(&b, "estimated human clear: unavailable for healer parties; the historical boss baselines use only iron blades")
+		} else if human, ok := humanEstimate(len(pt.members), pt.total, guardian, king); ok {
 			verdict := "inside"
 			if human < humanBand[0] || human > humanBand[1] {
 				verdict = "OUTSIDE"
