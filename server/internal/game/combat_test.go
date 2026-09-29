@@ -465,7 +465,7 @@ func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
 
 	memberShare := uint32(draugrRow.experience) / 2
 	h.sim.mu.Lock()
-	member.experience = experienceBefore(2) - memberShare
+	member.experience = ExperienceBefore(2) - memberShare
 	h.sim.mu.Unlock()
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
 	h.sim.mu.Lock()
@@ -476,8 +476,8 @@ func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
 	}
 	h.step()
 
-	if got := experienceOf(member); got != experienceBefore(2) {
-		t.Fatalf("member experience = %d, want level boundary %d", got, experienceBefore(2))
+	if got := experienceOf(member); got != ExperienceBefore(2) {
+		t.Fatalf("member experience = %d, want level boundary %d", got, ExperienceBefore(2))
 	}
 	if got := appearanceLevels(t, killerOut, member.entityID); !equalLevels(got, []uint16{1, 2}) {
 		t.Errorf("killer received member appearance levels %v, want [1 2]", got)

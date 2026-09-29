@@ -185,7 +185,7 @@ func TestLevelFiveRegeneratesAndRespawnsToItsOwnMaximum(t *testing.T) {
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
 	h.sim.mu.Lock()
-	player.experience = experienceBefore(5)
+	player.experience = ExperienceBefore(5)
 	player.health = PlayerMaxHealth
 	player.sinceDamageTicks = h.sim.regenDelayTicks
 	for player.health < maxHealthFor(5) {

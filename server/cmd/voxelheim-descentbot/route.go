@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -24,7 +25,8 @@ import (
 // /additem gives the iron blade and rusty armour before the portal. /teleport places each
 // member beside the open world's portal before it walks in (a veil is never a path cell,
 // so no walk reaches it from spawn), and is otherwise only [pilot.assist]; the report
-// counts both. Nothing else is a development command: no member is ever made immortal
+// counts both and any /addexperience grant requested by -level before provisioning.
+// No member is ever made immortal
 // (#1333), and none of them opens a door, lights a rune, kills a creature or moves a
 // member past anything the server has not opened.
 
@@ -299,6 +301,47 @@ func (r *runner) play(ctx context.Context) error {
 	}
 	r.stats.finish()
 	return nil
+}
+
+// prepareLevel waits for authoritative vitals before any member starts the portal
+// route. The fresh-run join refuses existing characters; the hoard restart
+// re-enters the portal directly without replaying this provisioning step.
+// A chat answer alone can be a refusal and is never evidence of a level-up.
+func (r *runner) prepareLevel(ctx context.Context) error {
+	if r.opts.level == 1 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	answer, err := r.c.command(ctx, fmt.Sprintf("/addexperience %d", game.ExperienceBefore(uint16(r.opts.level))))
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(answer, "Added ") {
+		return fmt.Errorf("experience grant refused: %s", answer)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Second / tickRate)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if got := r.c.self().level; got == uint16(r.opts.level) {
+			return nil
+		} else if got > uint16(r.opts.level) {
+			return fmt.Errorf("level is %d, above requested %d", got, r.opts.level)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("server did not confirm level %d after experience grant", r.opts.level)
+		case <-tick.C:
+		}
+	}
 }
 
 // equip puts the #1099 reference's blade in the main hand and rusty armour on.

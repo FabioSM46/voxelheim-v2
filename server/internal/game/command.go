@@ -11,7 +11,7 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-const commandHelp = "/help | /teleport <x> <y> <z> | /additem <item-id> <count> | /immortal <true|false>"
+const commandHelp = "/help | /teleport <x> <y> <z> | /additem <item-id> <count> | /addexperience <amount> | /immortal <true|false>"
 
 // commandLocked parses one slash-prefixed line under Sim.mu.
 func (p *Player) commandLocked(line string) ChatOutcome {
@@ -49,6 +49,8 @@ func (p *Player) commandLocked(line string) ChatOutcome {
 		outcome, accepted = p.teleportCommandLocked(args)
 	case "/additem":
 		outcome, accepted = p.addItemCommandLocked(args)
+	case "/addexperience":
+		outcome, accepted = p.addExperienceCommandLocked(args)
 	case "/immortal":
 		outcome, accepted = p.immortalCommandLocked(args)
 	default:
@@ -202,6 +204,24 @@ func (p *Player) addSilverCommandLocked(argument string) (ChatOutcome, bool) {
 		PrivateText: fmt.Sprintf("Added %d silver.", rawCount),
 		Inventory:   &state,
 	}, true
+}
+
+// addExperienceCommandLocked uses the same lifetime award path as earned experience,
+// including level-up health and appearance invalidation. Persistence reads that total.
+func (p *Player) addExperienceCommandLocked(args []string) (ChatOutcome, bool) {
+	if len(args) != 1 {
+		return privateCommand(fmt.Sprintf("/addexperience needs 1 argument <amount>; got %d.", len(args))), false
+	}
+	if err := p.cannotActLocked(); err != nil {
+		return privateCommand(fmt.Sprintf("/addexperience refused: %s.", err)), false
+	}
+	amount, err := strconv.ParseUint(args[0], 10, 64)
+	if err != nil || amount == 0 {
+		return privateCommand("/addexperience amount must be a whole number greater than zero, within uint64 range."), false
+	}
+	before := p.experience
+	p.sim.awardExperienceLocked(p, uint32(min(amount, uint64(ExperienceCap))))
+	return privateCommand(fmt.Sprintf("Added %d experience; total %d, level %d.", p.experience-before, p.experience, levelFor(p.experience))), true
 }
 
 // immortalCommandLocked turns the development immortality toggle on or off.

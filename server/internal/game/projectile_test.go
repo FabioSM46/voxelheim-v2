@@ -470,8 +470,8 @@ func TestOrbHealingScalesWithTheHealerAtImpact(t *testing.T) {
 			target, _ := h.join(2, [3]float32{4.5, 64, 0.5})
 			mobID := h.spawnDraugrAt([3]float32{8.5, 64, 5.5})
 			h.sim.mu.Lock()
-			owner.experience = experienceBefore(tc.launchLevel)
-			target.experience = experienceBefore(tc.targetLevel)
+			owner.experience = ExperienceBefore(tc.launchLevel)
+			target.experience = ExperienceBefore(tc.targetLevel)
 			target.health = target.maxHealthLocked() - tc.missing
 			beforeHealth := target.health
 			h.sim.mobs[mobID].target = target.entityID
@@ -479,7 +479,7 @@ func TestOrbHealingScalesWithTheHealerAtImpact(t *testing.T) {
 
 			orbID := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{1, 0, 0}, OrbSpeed)
 			h.sim.mu.Lock()
-			owner.experience = experienceBefore(tc.impactLevel)
+			owner.experience = ExperienceBefore(tc.impactLevel)
 			h.sim.mu.Unlock()
 			if tc.offline {
 				h.sim.Leave(owner)
@@ -512,7 +512,7 @@ func TestOrbMobDamageDoesNotScaleWithHealerLevel(t *testing.T) {
 		owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 		mobID := h.spawnDraugrAt([3]float32{0.5, 64, -3.5})
 		h.sim.mu.Lock()
-		owner.experience = experienceBefore(level)
+		owner.experience = ExperienceBefore(level)
 		h.sim.mu.Unlock()
 		before := h.mobHealth(mobID)
 		orbID := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{0, 0, -1}, OrbSpeed)

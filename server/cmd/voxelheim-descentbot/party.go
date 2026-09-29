@@ -248,6 +248,9 @@ func (pt *party) form(ctx context.Context) error {
 // playing the route at once. The first member to fail ends the run for all of them.
 func (pt *party) play(ctx context.Context) error {
 	for _, m := range pt.members {
+		if err := m.prepareLevel(ctx); err != nil {
+			return fmt.Errorf("level %s: %w", m.c.name, err)
+		}
 		if err := m.equip(ctx); err != nil {
 			return fmt.Errorf("equip %s: %w", m.c.name, err)
 		}
