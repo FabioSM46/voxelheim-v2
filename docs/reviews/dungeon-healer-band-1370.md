@@ -99,11 +99,15 @@ equipment (#1099).
 
 - `server/internal/game/dungeon_route_healer_estimate_test.go` — the role-aware estimate,
   its validation against #1361 and the pinned route times.
+- `server/internal/game/sceptre_share.go` — `OrbBladeShare`, the one share both the
+  estimate and the bot's report read, so the number printed is the number validated. It
+  decides nothing in the simulation.
 - `server/internal/game/dungeon_route_estimate_test.go` — the siege and the blow timing take
   the party's blades; with none traded they are what they were, which
   `TestAPartyOfBladesIsTheReferenceEstimate` checks term for term.
 - `server/cmd/voxelheim-descentbot/report.go` — a healer party's report carries the
   estimate, the blades it was taken at, and the statement that the band is the reference's.
+  With more than one healer it marks the estimate as extrapolated.
 - `server/internal/game/dungeon_balance.go` — the comment on the band says whose it is.
 
 No live run was repeated for this record. Two healers in one party are estimated by the

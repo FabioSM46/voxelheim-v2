@@ -195,7 +195,7 @@ func TestHealerDoesNotSendStaleDeadSelfBrokenOrCooldownAttacks(t *testing.T) {
 }
 
 func TestHealerReportShowsInferenceAssistanceAndItsOwnEstimate(t *testing.T) {
-	for _, count := range []int{0, 1} {
+	for _, count := range []int{0, 1, 2} {
 		var members []*runner
 		for i := range 3 {
 			p := healerPilotFixture()
@@ -210,12 +210,16 @@ func TestHealerReportShowsInferenceAssistanceAndItsOwnEstimate(t *testing.T) {
 		var report strings.Builder
 		writeReport(&report, newParty(members), nil)
 		text := report.String()
+		if extrapolated := strings.Contains(text, "EXTRAPOLATED: only 1 healer was ever measured"); extrapolated != (count > measuredHealers) {
+			t.Fatalf("%d healers: extrapolation stated %t", count, extrapolated)
+		}
 		if count == 0 {
 			if strings.Contains(text, "healers:") || strings.Contains(text, "inferred") || !strings.Contains(text, "estimated human clear for a party of 3:") {
 				t.Fatal("zero-healer report changed")
 			}
 		} else {
-			for _, want := range []string{"Orm: orb launch requests sent to allies 7, creatures 3", "restored near own ally requests 20 (inferred)", "2 worn sceptres replaced", "regeneration and other healers can overlap", "estimated human clear for a party of 3 (1 with a sceptre):", "at 2.2 blades for 3 members' health"} {
+			blades := map[int]string{1: "2.2", 2: "1.4"}[count]
+			for _, want := range []string{"Orm: orb launch requests sent to allies 7, creatures 3", "restored near own ally requests 20 (inferred)", "2 worn sceptres replaced", "regeneration and other healers can overlap", fmt.Sprintf("estimated human clear for a party of 3 (%d with a sceptre):", count), "at " + blades + " blades for 3 members' health"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing %q", want)
 				}

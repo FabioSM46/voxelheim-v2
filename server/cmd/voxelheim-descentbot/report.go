@@ -24,9 +24,11 @@ import (
 // lands at a blade's pace and its orb is worth game.OrbDamage where the blade is worth
 // game.IronSwordDamage, so a healer is a fifth of a blade while the boss still carries a
 // whole member's health for them: the readers' kill is longer by the members over the
-// blades. #1361's paired runs measured that slowdown within four percent of it
+// blades, at the share game.OrbBladeShare gives against that boss — the function the
+// validated estimate reads. #1361's paired runs measured that slowdown within four percent of it
 // (TestTheHealerSlowdownIsTheOneMeasured, in internal/game). The band it is printed beside
-// is the iron-blade reference's, which a healer party is not held to.
+// is the iron-blade reference's, which a healer party is not held to. Only one healer was
+// ever measured: with more the same arithmetic is an extrapolation, and the report says so.
 
 // readerKills are the iron readers' boss kill times in seconds under the energy economy —
 // the Vargr and then the Draugr — for the party sizes they were measured at. A party of one
@@ -42,10 +44,13 @@ var readerKills = map[int][2]float64{
 // humanBand is the acceptance band for one clear by a party of three to five.
 var humanBand = [2]time.Duration{17 * time.Minute, 23 * time.Minute}
 
-// partyBlades is how many iron blades a party of members swings as when healers of them
-// hold a sceptre instead.
-func partyBlades(members, healers int) float64 {
-	return float64(members-healers) + float64(healers)*game.OrbDamage/float64(game.IronSwordDamage)
+// measuredHealers is the most healers a party was ever measured with (#1361).
+const measuredHealers = 1
+
+// partyBlades is how many iron blades a party of members swings as against a creature of
+// kind when healers of them hold a sceptre instead.
+func partyBlades(members, healers int, kind vnet.MobKind) float64 {
+	return float64(members-healers) + float64(healers)*game.OrbBladeShare(kind)
 }
 
 // humanEstimate is the clock with both boss fights replaced by the readers' kills for a
@@ -56,8 +61,9 @@ func humanEstimate(members, healers int, total, guardianFight, kingFight time.Du
 	if !ok || healers < 0 || healers >= members {
 		return 0, false
 	}
-	slower := float64(members) / partyBlades(members, healers)
-	bosses := time.Duration((kills[0] + kills[1]) * slower * float64(time.Second))
+	guardian := kills[0] * float64(members) / partyBlades(members, healers, vnet.MobKindVargrGuardian)
+	king := kills[1] * float64(members) / partyBlades(members, healers, vnet.MobKindDraugrKing)
+	bosses := time.Duration((guardian + king) * float64(time.Second))
 	return total - guardianFight - kingFight + bosses, true
 }
 
@@ -185,7 +191,11 @@ func writeReport(out io.Writer, pt *party, failure error) {
 				fmt.Fprintf(&b, "estimated human clear for a party of %d (%d with a sceptre): %.1f min, %s the iron-blade reference's %v–%v band\n",
 					len(pt.members), lead.opts.healers, human.Minutes(), verdict, humanBand[0], humanBand[1])
 				fmt.Fprintf(&b, "  boss kills are the iron readers' at %.1f blades for %d members' health; a healer party is not held to that band (#1370)\n",
-					partyBlades(len(pt.members), lead.opts.healers), len(pt.members))
+					partyBlades(len(pt.members), lead.opts.healers, vnet.MobKindVargrGuardian), len(pt.members))
+				if lead.opts.healers > measuredHealers {
+					fmt.Fprintf(&b, "  EXTRAPOLATED: only %d healer was ever measured (#1361); %d is the same arithmetic, unvalidated\n",
+						measuredHealers, lead.opts.healers)
+				}
 			} else {
 				fmt.Fprintf(&b, "estimated human clear for a party of %d: %.1f min, %s the %v–%v band\n",
 					len(pt.members), human.Minutes(), verdict, humanBand[0], humanBand[1])

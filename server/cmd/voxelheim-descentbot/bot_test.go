@@ -97,8 +97,10 @@ func TestTheHumanEstimateReplacesOnlyTheBossFights(t *testing.T) {
 // A healer is a fifth of a blade against a whole member's health (#1370): three with one
 // healer kill at 2.2 blades, so both fights take 3/2.2 as long as the readers'.
 func TestTheHumanEstimateCountsAHealerAsAFifthOfABlade(t *testing.T) {
-	if got := partyBlades(3, 1); math.Abs(got-2.2) > 1e-9 {
-		t.Fatalf("three with a healer swing as %.3f blades, want 2.2", got)
+	for _, kind := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
+		if got := partyBlades(3, 1, kind); math.Abs(got-2.2) > 1e-9 {
+			t.Fatalf("three with a healer swing as %.3f blades, want 2.2", got)
+		}
 	}
 	got, ok := humanEstimate(3, 1, 20*time.Minute, 5*time.Minute, 6*time.Minute)
 	slower := 3 / 2.2

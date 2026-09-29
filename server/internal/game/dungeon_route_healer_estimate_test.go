@@ -36,17 +36,10 @@ import (
 // estimate below is what the trade costs. With one healer, four and five stay inside the
 // band and three leaves it by about a minute.
 
-// orbBladeShare is what one sceptre is worth, in iron blades, against a creature of kind:
-// the orb's damage over the blade's, each after the species' armour.
-func orbBladeShare(kind vnet.MobKind) float64 {
-	m := &mob{kind: kind}
-	return float64(m.armoured(OrbDamage)) / float64(m.armoured(IronSwordDamage))
-}
-
 // partyBlades is how many iron blades a party of members with healers among them swings as
 // against a creature of kind.
 func partyBlades(members, healers int, kind vnet.MobKind) float64 {
-	return float64(members-healers) + float64(healers)*orbBladeShare(kind)
+	return float64(members-healers) + float64(healers)*OrbBladeShare(kind)
 }
 
 // healerBossSeconds is the readers' kill of a boss of kind with healers of the party
@@ -89,16 +82,16 @@ func TestASceptreIsAFifthOfAnIronBlade(t *testing.T) {
 		t.Fatalf("a cooldown outlasts the %.2f s refill: the two weapons no longer share a pace", refill)
 	}
 	for _, kind := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
-		if got := orbBladeShare(kind); math.Abs(got-0.2) > 0.01 {
+		if got := OrbBladeShare(kind); math.Abs(got-0.2) > 0.01 {
 			t.Errorf("a sceptre is %.3f of an iron blade against a %s, want 0.2", got, kind)
 		}
 	}
 	for _, species := range dungeonGroupSpecies {
-		if got := orbBladeShare(species.kind); got < 0.16 || got > 0.21 {
+		if got := OrbBladeShare(species.kind); got < 0.16 || got > 0.21 {
 			t.Errorf("a sceptre is %.3f of an iron blade against a %s, want a sixth to a fifth", got, species.kind)
 		}
 	}
-	if got := orbBladeShare(vnet.MobKindCaveSpider); got < 0.16 || got > 0.21 {
+	if got := OrbBladeShare(vnet.MobKindCaveSpider); got < 0.16 || got > 0.21 {
 		t.Errorf("a sceptre is %.3f of an iron blade against a spider, want a sixth to a fifth", got)
 	}
 }
