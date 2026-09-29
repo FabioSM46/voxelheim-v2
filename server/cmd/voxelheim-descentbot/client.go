@@ -102,6 +102,8 @@ type client struct {
 
 	// The facts the report is built from, written by the reader.
 	stats *runStats
+	// Optional healer observations, set before the reader starts.
+	healing *healerState
 
 	changes  chan worldChange
 	offers   chan uint64
@@ -286,6 +288,9 @@ func (c *client) absorb(envelope *vnet.Envelope) {
 		c.view = newBlockView()
 		c.mobs = make(map[uint64]mobView)
 		c.kingTarget = mobView{}
+		if c.healing != nil {
+			c.healing.members, c.healing.pending = nil, nil
+		}
 		c.worldID, c.worldSeed, c.havePos = wc.id, wc.seed, false
 		c.mu.Unlock()
 		select {
@@ -384,6 +389,7 @@ func (c *client) absorbSnapshot(table flatbuffers.Table) {
 		c.level, c.energy = vitals.Level(), vitals.Energy()
 	}
 	c.roster = snapshot.PartyRosterLength()
+	c.absorbHealerSnapshot(&snapshot, now)
 	c.absorbHoardSnapshot(&snapshot)
 	seen := make(map[uint64]bool, snapshot.MobsLength())
 	var m vnet.MobState
