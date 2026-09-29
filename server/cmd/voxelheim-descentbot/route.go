@@ -344,13 +344,13 @@ func (r *runner) prepareLevel(ctx context.Context) error {
 	}
 }
 
-// equip puts the #1099 reference's blade in the main hand and rusty armour on.
+// equip puts the role's weapon in the main hand and the same rusty armour on.
 func (r *runner) equip(ctx context.Context) error {
 	wear := []struct {
 		item game.ItemID
 		slot uint8
 	}{
-		{game.ItemIronSword, mainHandSlot},
+		{r.mainHandItem(), mainHandSlot},
 		{game.ItemRustyHelm, uint8(protocol.InventorySlots - protocol.EquipmentSlots)},
 		{game.ItemRustyCuirass, uint8(protocol.InventorySlots - protocol.EquipmentSlots + 1)},
 		{game.ItemRustyGreaves, uint8(protocol.InventorySlots - protocol.EquipmentSlots + 2)},

@@ -327,6 +327,9 @@ func boss(kind vnet.MobKind) bool {
 
 // fight closes on and strikes the nearest creature pick accepts until none is left alive.
 func (p *pilot) fight(ctx context.Context, pick func(mobView) bool) error {
+	if p.c.healing != nil {
+		return p.healerFight(ctx, pick)
+	}
 	var route []cell
 	var nextPlan time.Time // throttled on time alone, as walkTo's is
 	reach := map[uint64]float64{}

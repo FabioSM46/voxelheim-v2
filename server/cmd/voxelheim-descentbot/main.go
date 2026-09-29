@@ -35,6 +35,7 @@ type options struct {
 	maxWipes     int
 	members      int
 	level        int
+	healers      int
 	quiet        bool
 	hoard        bool
 	// Owned temporary storage, retained across the acceptance scenario's restart.
@@ -56,6 +57,7 @@ func parseFlags(name string, args []string) (options, error) {
 		"wipes in a row, every member dead at once with nothing killed between, before the party gives up the run")
 	flags.IntVar(&o.members, "party", 3,
 		fmt.Sprintf("how many bots play, each its own character in one party: 1 to %d", len(memberNames)))
+	flags.IntVar(&o.healers, "healers", 0, "last N party members use a wooden sceptre; 0 to party minus 1")
 	flags.IntVar(&o.level, "level", 1, fmt.Sprintf("starting level for every party member: 1 to %d", game.MaxLevel))
 	flags.BoolVar(&o.quiet, "quiet", false, "print only the report, not the run's progress")
 	flags.BoolVar(&o.hoard, "hoard", false, "verify personal chests, earned rune craft, paid repair and saved chests after restart (party 3)")
@@ -73,6 +75,10 @@ func parseFlags(name string, args []string) (options, error) {
 		return o, fmt.Errorf("-timeout must be positive, got %v", o.timeout)
 	case o.members < 1 || o.members > len(memberNames):
 		return o, fmt.Errorf("-party must be in 1..%d, got %d", len(memberNames), o.members)
+	case o.healers < 0 || o.healers >= o.members:
+		return o, fmt.Errorf("-healers must be in 0..%d, got %d", o.members-1, o.healers)
+	case o.hoard && o.healers != 0:
+		return o, errors.New("-healers is not supported with -hoard")
 	case o.level < 1 || o.level > int(game.MaxLevel):
 		return o, fmt.Errorf("-level must be in 1..%d, got %d", game.MaxLevel, o.level)
 	case o.hoard && o.members != 3:
@@ -141,7 +147,7 @@ func run(ctx context.Context, o options, out, progress io.Writer) (runErr error)
 	defer end()
 	readErrs := make(chan error, o.members)
 	members := make([]*runner, 0, o.members)
-	for _, name := range memberNames[:o.members] {
+	for i, name := range memberNames[:o.members] {
 		sum := sha256.Sum256([]byte(name))
 		var account ticket.AccountID
 		copy(account[:], sum[:])
@@ -153,6 +159,9 @@ func run(ctx context.Context, o options, out, progress io.Writer) (runErr error)
 		c, err := join(ctx, server.addr, server.fingerprint, name, credential[:], stats, false)
 		if err != nil {
 			return fmt.Errorf("join %s: %w", name, err)
+		}
+		if healerMember(o, i) {
+			c.healing = &healerState{}
 		}
 		defer func() { _ = c.conn.Close() }()
 		go func() { readErrs <- c.listen(session) }()
