@@ -442,3 +442,88 @@ func TestSnapshotsCarryProjectileKindPositionVelocityAndDespawn(t *testing.T) {
 		t.Fatalf("expired projectile remains in newest snapshot: %+v", newest)
 	}
 }
+
+func TestOrbHealingScalesWithTheHealerAtImpact(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		launchLevel uint16
+		impactLevel uint16
+		targetLevel uint16
+		missing     uint16
+		offline     bool
+		restored    uint16
+		threat      float64
+	}{
+		{"level one heals ten", 1, 1, 30, 50, false, 10, 5},
+		{"level twenty one heals twenty", 21, 21, 1, 50, false, 20, 10},
+		{"level thirty heals twenty four", 30, 30, 1, 50, false, 24, 12},
+		{"level gained during flight", 1, 30, 1, 50, false, 24, 12},
+		{"overheal credits only restored health", 30, 30, 1, 3, false, 3, 1.5},
+		{"full health credits nothing", 30, 30, 1, 0, false, 0, 0},
+		{"offline owner heals at level one", 30, 30, 1, 50, true, 10, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
+			owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			target, _ := h.join(2, [3]float32{4.5, 64, 0.5})
+			mobID := h.spawnDraugrAt([3]float32{8.5, 64, 5.5})
+			h.sim.mu.Lock()
+			owner.experience = ExperienceBefore(tc.launchLevel)
+			target.experience = ExperienceBefore(tc.targetLevel)
+			target.health = target.maxHealthLocked() - tc.missing
+			beforeHealth := target.health
+			h.sim.mobs[mobID].target = target.entityID
+			h.sim.mu.Unlock()
+
+			orbID := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{1, 0, 0}, OrbSpeed)
+			h.sim.mu.Lock()
+			owner.experience = ExperienceBefore(tc.impactLevel)
+			h.sim.mu.Unlock()
+			if tc.offline {
+				h.sim.Leave(owner)
+			}
+			h.sim.mu.Lock()
+			beforeThreat := h.sim.mobs[mobID].threat[owner.entityID]
+			h.sim.mu.Unlock()
+			for range 6 {
+				advanceTestProjectiles(h)
+			}
+			if _, live := projectileState(h, orbID); live {
+				t.Fatal("orb did not land on the target")
+			}
+			if got := h.vitals(target).Health - beforeHealth; got != tc.restored {
+				t.Errorf("restored health = %d, want %d", got, tc.restored)
+			}
+			h.sim.mu.Lock()
+			defer h.sim.mu.Unlock()
+			if got := h.sim.mobs[mobID].threat[owner.entityID] - beforeThreat; got != tc.threat {
+				t.Errorf("heal threat delta = %v, want %v", got, tc.threat)
+			}
+		})
+	}
+}
+
+func TestOrbMobDamageDoesNotScaleWithHealerLevel(t *testing.T) {
+	t.Parallel()
+	for level := uint16(1); level <= MaxLevel; level++ {
+		h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
+		owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		mobID := h.spawnDraugrAt([3]float32{0.5, 64, -3.5})
+		h.sim.mu.Lock()
+		owner.experience = ExperienceBefore(level)
+		h.sim.mu.Unlock()
+		before := h.mobHealth(mobID)
+		orbID := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{0, 0, -1}, OrbSpeed)
+		for range 6 {
+			advanceTestProjectiles(h)
+		}
+		if _, live := projectileState(h, orbID); live {
+			t.Fatalf("level %d: orb did not land on the mob", level)
+		}
+		if got := before - h.mobHealth(mobID); got != OrbDamage {
+			t.Errorf("level %d: orb damage = %d, want %d", level, got, OrbDamage)
+		}
+	}
+}

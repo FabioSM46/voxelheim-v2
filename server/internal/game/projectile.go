@@ -373,8 +373,15 @@ func (s *Sim) onProjectileHitLocked(proj *projectile, target any) {
 		case *mob:
 			s.creditMobBlowLocked(owner, target, OrbDamage, vnet.BlowKindEnergyOrb)
 		case *Player:
-			restored := target.healLocked(OrbHeal)
-			if s.onlineLocked(owner) {
+			online := s.onlineLocked(owner)
+			heal := uint16(OrbHeal)
+			if online {
+				// Read the healer's level at impact, not launch. A departed owner's
+				// retained reference still heals at the base value and earns no threat.
+				heal = uint16(min(uint32(OrbHeal)*uint32(levelDamagePercent(levelFor(owner.experience)))/100, math.MaxUint16))
+			}
+			restored := target.healLocked(heal)
+			if online {
 				s.creditHealThreatLocked(owner, target, restored)
 			}
 		}
