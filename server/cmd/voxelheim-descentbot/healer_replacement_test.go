@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,27 @@ func TestWornSceptreReplacementUsesAuthoritativeMoves(t *testing.T) {
 					t.Fatalf("replacement: %v", err)
 				}
 				state = player.InventoryState()
+				if outcome == "equip-refused" {
+					// A refused second move is a failed acceptance, not a lost item.
+					// Preserve the exact partial state instead of pretending rollback
+					// or a future retry was accepted by the authoritative player.
+					want := sceptreInventory(0)
+					want.Stacks[0] = sceptreInventory(game.SceptreMaxDurability).Stacks[mainHandSlot]
+					want.Stacks[1] = want.Stacks[mainHandSlot]
+					want.Stacks[mainHandSlot] = protocol.InventoryStack{}
+					if !reflect.DeepEqual(state, want) {
+						t.Fatalf("refused equip changed conserved inventory: got %+v want %+v", state, want)
+					}
+				}
+				if outcome == "unconfirmed" {
+					// The server may have accepted an equip whose answer was never
+					// received. It still cannot be counted as confirmed assistance.
+					want := sceptreInventory(game.SceptreMaxDurability)
+					want.Stacks[1] = sceptreInventory(0).Stacks[mainHandSlot]
+					if !reflect.DeepEqual(state, want) {
+						t.Fatalf("unconfirmed equip lost an item: got %+v want %+v", state, want)
+					}
+				}
 				if outcome == "confirmed" {
 					worn := 0
 					for _, s := range state.Stacks[:protocol.InventorySlots-protocol.EquipmentSlots] {
