@@ -14,6 +14,9 @@ replaced. The group runs are in [Group runs (#1333)](#group-runs-1333). The solo
 [The run](#the-run) are **superseded by the 3–5 rule** and are kept only as the record of
 #1298.
 
+A level-21 comparison with and without a healer, including the failed healer attempts,
+is recorded in [the #1361 measurement](dungeon-healer-1361.md).
+
 ## Group runs (#1333)
 
 `server/cmd/voxelheim-descentbot` now plays with `-party N` bots, from 1 to 5. Each bot is its
