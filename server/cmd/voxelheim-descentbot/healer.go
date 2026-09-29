@@ -19,6 +19,16 @@ const (
 	// Delivery can lag the flight by several ticks. This bounds attribution, not
 	// gameplay: the wire does not identify the source of a positive health delta.
 	healerObservationSlack = 500 * time.Millisecond
+	// Target positions/life state are a different question from heal attribution.
+	// This bot starts the default 20 Hz server, which publishes one snapshot per
+	// tick. Ten missed ticks already means a stalled view; do not aim using several
+	// seconds of old positions or life state. Keep this budget independent of the
+	// attribution slack even though their current durations happen to match.
+	healerViewFreshFor = 10 * time.Second / tickRate
+	// Once the encounter has no engageable creature, allow a few extra launches
+	// for recovery, then rejoin the route. A wounded ally behind a closed wall must
+	// never turn a cleared room or the regroup barrier into a run-wide timeout.
+	healerAfterFightLimit = 5 * time.Second
 )
 
 type allyView struct {
@@ -266,7 +276,7 @@ func (c *client) absorbHealerSnapshot(snapshot *vnet.EntitySnapshot, now time.Ti
 func (c *client) healerMembers(now time.Time) []allyView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.healing == nil || now.Sub(c.healing.seenAt) > healerObservationSlack {
+	if c.healing == nil || now.Sub(c.healing.seenAt) > healerViewFreshFor {
 		return nil
 	}
 	return append([]allyView(nil), c.healing.members...)

@@ -13,6 +13,7 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 func TestHealerFlagAndLastMemberAssignment(t *testing.T) {
@@ -399,5 +400,78 @@ func TestUnreachableHealerCreatureIsRecordedAndDroppedButNotABoss(t *testing.T) 
 	engaged[m.id] = now.Add(-2 * time.Minute)
 	if p.healerUnreachable(m.id, false, []mobView{m}, engaged, now) {
 		t.Fatal("recent party hit ignored")
+	}
+}
+
+func TestHealerRecoveryWindowIsBoundedAndNewCombatResetsIt(t *testing.T) {
+	now := time.Unix(100, 0)
+	var recovery healerRecovery
+	if recovery.finished(false, now) {
+		t.Fatal("recovery ended before any healing opportunity")
+	}
+	if recovery.finished(false, now.Add(healerAfterFightLimit-time.Nanosecond)) {
+		t.Fatal("recovery grace cut short")
+	}
+	if !recovery.finished(false, now.Add(healerAfterFightLimit)) {
+		t.Fatal("cleared encounter never ended")
+	}
+	if recovery.finished(true, now.Add(healerAfterFightLimit+time.Second)) || !recovery.quietSince.IsZero() {
+		t.Fatal("new combat did not reset recovery")
+	}
+	if recovery.finished(false, now.Add(2*healerAfterFightLimit)) {
+		t.Fatal("old quiet period ended new combat prematurely")
+	}
+}
+
+func TestClearedRoomReturnsWithFreshWoundedAllyBehindWall(t *testing.T) {
+	p := healerPilotFixture()
+	p.c.mobs = nil
+	// The only delivered chunk is cut in two by a solid wall; the ally is in
+	// range on the far side, but neither an orb nor a walk can reach that side.
+	for z := int64(0); z < world.ChunkSize; z++ {
+		for y := int64(1); y < world.ChunkSize; y++ {
+			p.c.view.set(6, y, z, world.Stone)
+		}
+	}
+	target, _ := woundedAlly(1, orbOrigin(p.c.pos), p.c.healing.members)
+	if orbLineClear(p.c.view, orbOrigin(p.c.pos), target, p.c.healing.members, nil, 1) {
+		t.Fatal("fixture has a firing line")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), healerAfterFightLimit+2*time.Second)
+	defer cancel()
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		ticker := time.NewTicker(time.Second / tickRate)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.c.mu.Lock()
+				p.c.healing.observe([]allyView{ally(2, 20, 10)}, time.Now())
+				p.c.mu.Unlock()
+			}
+		}
+	}()
+	started := time.Now()
+	err := p.fight(ctx, func(mobView) bool { return true })
+	cancel()
+	<-refreshed
+	if err != nil {
+		t.Fatalf("cleared encounter waited for global timeout: %v", err)
+	}
+	if time.Since(started) < healerAfterFightLimit {
+		t.Fatal("test exited via stale snapshot instead of bounded recovery")
+	}
+	if p.c.healingTotals() != (healerTotals{}) {
+		t.Fatal("unreachable ally received a request")
+	}
+	p.c.mu.Lock()
+	controls := p.c.control
+	p.c.mu.Unlock()
+	if controls.moveX != 0 || controls.moveZ != 0 {
+		t.Fatal("healer kept moving after completing the fight")
 	}
 }

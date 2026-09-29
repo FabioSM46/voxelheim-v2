@@ -50,6 +50,7 @@ func (p *pilot) healerFight(ctx context.Context, pick func(mobView) bool) error 
 	var nextPlan time.Time
 	var plannedID uint64
 	engaged := map[uint64]time.Time{}
+	var recovery healerRecovery
 	for {
 		if err := p.tickWait(ctx); err != nil {
 			return err
@@ -61,9 +62,14 @@ func (p *pilot) healerFight(ctx context.Context, pick func(mobView) bool) error 
 		now := time.Now()
 		members, mobs := p.c.healerMembers(now), p.c.mobList()
 		origin := orbOrigin(self.pos)
+		focus, fighting := p.orbFocus(self, pick, mobs)
+		if recovery.finished(fighting, now) {
+			p.c.stand()
+			return nil
+		}
 		target, ok := woundedAlly(p.c.entityID, origin, members)
 		if !ok {
-			target, ok = p.orbFocus(self, pick, mobs)
+			target, ok = focus, fighting
 		}
 		if !ok {
 			p.c.stand()
@@ -189,7 +195,7 @@ func (p *pilot) launchOrb(target orbTarget, face intent, now time.Time) error {
 		if !c.alive || c.energy < game.AttackEnergyCost || !usableSceptre(c.inventory) {
 			return false
 		}
-		if now.Sub(c.healing.seenAt) > healerObservationSlack {
+		if now.Sub(c.healing.seenAt) > healerViewFreshFor {
 			return false
 		}
 		if target.ally {
@@ -237,7 +243,7 @@ func (p *pilot) launchOrb(target orbTarget, face intent, now time.Time) error {
 	c.mu.Lock()
 	// A blocked aim write may have outlived the target. The reader remained live,
 	// so do not send an attack when its newest answer already rules it out.
-	allowed := c.alive && c.energy >= game.AttackEnergyCost && usableSceptre(c.inventory) && time.Since(c.healing.seenAt) <= healerObservationSlack
+	allowed := c.alive && c.energy >= game.AttackEnergyCost && usableSceptre(c.inventory) && time.Since(c.healing.seenAt) <= healerViewFreshFor
 	if target.ally {
 		living := false
 		for _, m := range c.healing.members {
@@ -399,4 +405,20 @@ func (p *pilot) healerUnreachable(id uint64, clear bool, mobs []mobView, engaged
 		return true
 	}
 	return false
+}
+
+// healerRecovery bounds the entire post-fight window, not one ally. Switching
+// between wounded allies, moving, or repeatedly finding an empty route cannot
+// restart it. A new matching creature does restart ordinary combat.
+type healerRecovery struct{ quietSince time.Time }
+
+func (r *healerRecovery) finished(fighting bool, now time.Time) bool {
+	if fighting {
+		r.quietSince = time.Time{}
+		return false
+	}
+	if r.quietSince.IsZero() {
+		r.quietSince = now
+	}
+	return now.Sub(r.quietSince) >= healerAfterFightLimit
 }

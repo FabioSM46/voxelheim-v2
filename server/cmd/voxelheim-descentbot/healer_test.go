@@ -192,3 +192,23 @@ func TestEarlyHealObservationCommitsOnlyWhenAttackWriteSucceeds(t *testing.T) {
 		t.Fatal("successful write lost early evidence")
 	}
 }
+
+func TestHealerViewFreshnessUsesSnapshotCadenceAndStillExcludesNewlyDead(t *testing.T) {
+	now := time.Unix(100, 0)
+	c := &client{healing: &healerState{members: []allyView{ally(2, 20, 10)}, seenAt: now}}
+	if len(c.healerMembers(now.Add(time.Second/tickRate))) != 1 {
+		t.Fatal("ordinary next-tick view rejected")
+	}
+	if len(c.healerMembers(now.Add(healerViewFreshFor+time.Nanosecond))) != 0 {
+		t.Fatal("stalled targeting view accepted")
+	}
+	if len(c.healerMembers(now.Add(3*time.Second))) != 0 {
+		t.Fatal("several seconds of stale life state accepted")
+	}
+	dead := ally(2, 0, 10)
+	dead.alive = false
+	c.healing.observe([]allyView{dead}, now.Add(time.Second/tickRate))
+	if _, ok := woundedAlly(1, orbOrigin([3]float64{2, 1, 3}), c.healerMembers(now.Add(time.Second/tickRate))); ok {
+		t.Fatal("fresh dead member selected")
+	}
+}
