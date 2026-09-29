@@ -303,16 +303,10 @@ func (r *runner) play(ctx context.Context) error {
 	return nil
 }
 
-// startingExperience is the threshold on the server's linear progression curve.
-// Flags have already bounded level before it is narrowed. Fresh-run joins refuse
-// existing characters, so this is a grant to a character with no earned experience.
-func startingExperience(level int) uint32 {
-	completed := uint32(level - 1)
-	return game.ExperiencePerLevelStep * completed * (completed + 1) / 2
-}
-
 // prepareLevel waits for authoritative vitals before any member starts the portal
-// route. A chat answer alone can be a refusal and is never evidence of a level-up.
+// route. The fresh-run join refuses existing characters; the hoard restart
+// re-enters the portal directly without replaying this provisioning step.
+// A chat answer alone can be a refusal and is never evidence of a level-up.
 func (r *runner) prepareLevel(ctx context.Context) error {
 	if r.opts.level == 1 {
 		return nil
@@ -320,7 +314,7 @@ func (r *runner) prepareLevel(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	answer, err := r.c.command(ctx, fmt.Sprintf("/addexperience %d", startingExperience(r.opts.level)))
+	answer, err := r.c.command(ctx, fmt.Sprintf("/addexperience %d", game.ExperienceBefore(uint16(r.opts.level))))
 	if err != nil {
 		return err
 	}

@@ -15,7 +15,7 @@ func joinAtLevel(t *testing.T, h *vitalsHarness, entityID uint64, level uint16, 
 	t.Helper()
 	pos := [3]float32{0.5 + float32(entityID), 64, 0.5}
 	life := lifeWearing(t, pos, pieces...)
-	life.Experience = experienceBefore(level)
+	life.Experience = ExperienceBefore(level)
 	life.Health = maxHealthFor(level)
 	p, _ := h.joinLife(entityID, pos, &life)
 	return p

@@ -543,7 +543,7 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 func TestValidateUsesTheMaximumForTheStoredLevel(t *testing.T) {
 	t.Parallel()
 
-	levelFive := experienceBefore(5)
+	levelFive := ExperienceBefore(5)
 	accepted := Life{Health: maxHealthFor(5), Experience: levelFive}
 	if err := accepted.Validate(); err != nil {
 		t.Fatalf("level-five maximum was refused: %v", err)

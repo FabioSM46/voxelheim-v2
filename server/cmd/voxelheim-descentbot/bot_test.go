@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"math"
@@ -183,19 +182,6 @@ func TestLevelFlagRefusesValuesOutsideTheServerCurve(t *testing.T) {
 		if err != nil || o.level != level {
 			t.Fatalf("level %d parsed as %d: %v", level, o.level, err)
 		}
-	}
-}
-
-func TestStartingExperienceUsesEveryServerLevelBoundary(t *testing.T) {
-	var total uint32
-	for level := 1; level <= int(game.MaxLevel); level++ {
-		if got := startingExperience(level); got != total {
-			t.Errorf("level %d requests %d, want %d", level, got, total)
-		}
-		total += uint32(level) * game.ExperiencePerLevelStep
-	}
-	if startingExperience(21) != 10500 || startingExperience(30) != game.ExperienceCap {
-		t.Fatal("reference level or cap diverged")
 	}
 }
 

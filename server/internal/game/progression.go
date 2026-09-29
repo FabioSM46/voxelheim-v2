@@ -69,7 +69,7 @@ func (p *Player) maxHealthLocked() uint16 {
 func levelFor(total uint32) uint16 {
 	total = min(total, ExperienceCap)
 	level := uint16(1)
-	for level < MaxLevel && total >= experienceBefore(level+1) {
+	for level < MaxLevel && total >= ExperienceBefore(level+1) {
 		level++
 	}
 	return level
@@ -86,13 +86,15 @@ func experienceToNext(level uint16) uint32 {
 // full bar instead; [Player.vitalsLocked] owns that contract-specific translation.
 func experienceIntoLevel(total uint32) uint32 {
 	total = min(total, ExperienceCap)
-	return total - experienceBefore(levelFor(total))
+	return total - ExperienceBefore(levelFor(total))
 }
 
-// experienceBefore is the total needed to begin level. It is the one arithmetic-series
+// ExperienceBefore is the total needed to begin level. It is the one arithmetic-series
 // implementation the curve uses; level derivation and progress both read it rather than
-// keeping two copies of the boundary calculation.
-func experienceBefore(level uint16) uint32 {
+// keeping two copies of the boundary calculation. Development tools use the same
+// threshold when preparing a character at a chosen level. Levels below 1 return
+// zero; levels above MaxLevel return ExperienceCap.
+func ExperienceBefore(level uint16) uint32 {
 	if level <= 1 {
 		return 0
 	}
