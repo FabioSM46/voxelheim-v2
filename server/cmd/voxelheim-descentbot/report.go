@@ -8,6 +8,7 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 )
 
 // The human time is the party's own clock with its two boss fights replaced by the energy
@@ -18,6 +19,14 @@ import (
 // other part of the route stands as the party walked, waited, died and fought it.
 //
 // The raw clock is reported beside the estimate and is the number with nothing replaced.
+//
+// **A party with healers has the same estimate, at the blades it holds** (#1370). A sceptre
+// lands at a blade's pace and its orb is worth game.OrbDamage where the blade is worth
+// game.IronSwordDamage, so a healer is a fifth of a blade while the boss still carries a
+// whole member's health for them: the readers' kill is longer by the members over the
+// blades. #1361's paired runs measured that slowdown within four percent of it
+// (TestTheHealerSlowdownIsTheOneMeasured, in internal/game). The band it is printed beside
+// is the iron-blade reference's, which a healer party is not held to.
 
 // readerKills are the iron readers' boss kill times in seconds under the energy economy —
 // the Vargr and then the Draugr — for the party sizes they were measured at. A party of one
@@ -33,14 +42,22 @@ var readerKills = map[int][2]float64{
 // humanBand is the acceptance band for one clear by a party of three to five.
 var humanBand = [2]time.Duration{17 * time.Minute, 23 * time.Minute}
 
+// partyBlades is how many iron blades a party of members swings as when healers of them
+// hold a sceptre instead.
+func partyBlades(members, healers int) float64 {
+	return float64(members-healers) + float64(healers)*game.OrbDamage/float64(game.IronSwordDamage)
+}
+
 // humanEstimate is the clock with both boss fights replaced by the readers' kills for a
-// party of members, and false where no reader was measured at that size.
-func humanEstimate(members int, total, guardianFight, kingFight time.Duration) (time.Duration, bool) {
+// party of members, healers of them holding sceptres, and false where no reader was
+// measured at that size.
+func humanEstimate(members, healers int, total, guardianFight, kingFight time.Duration) (time.Duration, bool) {
 	kills, ok := readerKills[members]
-	if !ok {
+	if !ok || healers < 0 || healers >= members {
 		return 0, false
 	}
-	bosses := time.Duration((kills[0] + kills[1]) * float64(time.Second))
+	slower := float64(members) / partyBlades(members, healers)
+	bosses := time.Duration((kills[0] + kills[1]) * slower * float64(time.Second))
 	return total - guardianFight - kingFight + bosses, true
 }
 
@@ -159,15 +176,20 @@ func writeReport(out io.Writer, pt *party, failure error) {
 		guardian, _ := pt.fightTime("guardian fight")
 		king, _ := pt.fightTime("king fight")
 		fmt.Fprintf(&b, "\nparty run, portal to portal: %.1f min\n", pt.total.Minutes())
-		if lead.opts.healers > 0 {
-			fmt.Fprintln(&b, "estimated human clear: unavailable for healer parties; the historical boss baselines use only iron blades")
-		} else if human, ok := humanEstimate(len(pt.members), pt.total, guardian, king); ok {
+		if human, ok := humanEstimate(len(pt.members), lead.opts.healers, pt.total, guardian, king); ok {
 			verdict := "inside"
 			if human < humanBand[0] || human > humanBand[1] {
 				verdict = "OUTSIDE"
 			}
-			fmt.Fprintf(&b, "estimated human clear for a party of %d: %.1f min, %s the %v–%v band\n",
-				len(pt.members), human.Minutes(), verdict, humanBand[0], humanBand[1])
+			if lead.opts.healers > 0 {
+				fmt.Fprintf(&b, "estimated human clear for a party of %d (%d with a sceptre): %.1f min, %s the iron-blade reference's %v–%v band\n",
+					len(pt.members), lead.opts.healers, human.Minutes(), verdict, humanBand[0], humanBand[1])
+				fmt.Fprintf(&b, "  boss kills are the iron readers' at %.1f blades for %d members' health; a healer party is not held to that band (#1370)\n",
+					partyBlades(len(pt.members), lead.opts.healers), len(pt.members))
+			} else {
+				fmt.Fprintf(&b, "estimated human clear for a party of %d: %.1f min, %s the %v–%v band\n",
+					len(pt.members), human.Minutes(), verdict, humanBand[0], humanBand[1])
+			}
 		}
 	}
 	_, _ = io.WriteString(out, b.String())

@@ -100,6 +100,14 @@ func dungeonPackSize(members int) int {
 // the approved design's minutes was enough, and the siege and the halls, re-read at the
 // energy-bound pace, were already where the band wanted them.
 //
+// **The band is a party of blades', and a party that brings a healer is not held to it**
+// (#1370). A sceptre's orb is a fifth of an iron blade at the same pace, and its holder is
+// still a whole member to every boss and every pack, so one healer costs a clean clear two
+// to four minutes: 23.9 for three, 22.7 for four, 22.0 for five. The owner's decision is
+// that this is the trade a healer is — time for the health they restore — and that no
+// number moves for it. dungeon_route_healer_estimate_test.go is the estimate and its
+// validation against the runs #1361 measured.
+//
 // **A party of one or two is not held to the band.** It meets the dungeon sized for three
 // — each member doing one and a half or three members' work — and the #1099 stander at the
 // iron reference dies to either boss and to one pack before killing it

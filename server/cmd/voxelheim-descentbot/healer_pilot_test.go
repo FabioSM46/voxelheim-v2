@@ -194,7 +194,7 @@ func TestHealerDoesNotSendStaleDeadSelfBrokenOrCooldownAttacks(t *testing.T) {
 	}
 }
 
-func TestHealerReportShowsInferenceAssistanceAndNoBladeTimeEstimate(t *testing.T) {
+func TestHealerReportShowsInferenceAssistanceAndItsOwnEstimate(t *testing.T) {
 	for _, count := range []int{0, 1} {
 		var members []*runner
 		for i := range 3 {
@@ -215,7 +215,7 @@ func TestHealerReportShowsInferenceAssistanceAndNoBladeTimeEstimate(t *testing.T
 				t.Fatal("zero-healer report changed")
 			}
 		} else {
-			for _, want := range []string{"Orm: orb launch requests sent to allies 7, creatures 3", "restored near own ally requests 20 (inferred)", "2 worn sceptres replaced", "regeneration and other healers can overlap", "unavailable for healer parties"} {
+			for _, want := range []string{"Orm: orb launch requests sent to allies 7, creatures 3", "restored near own ally requests 20 (inferred)", "2 worn sceptres replaced", "regeneration and other healers can overlap", "estimated human clear for a party of 3 (1 with a sceptre):", "at 2.2 blades for 3 members' health"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing %q", want)
 				}
