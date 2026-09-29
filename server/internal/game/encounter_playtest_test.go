@@ -403,7 +403,7 @@ func playtestLife(t *testing.T, spawn [3]float32, kit playtestKit, level uint16)
 		pieces = append(pieces, fullTestArmour(item))
 	}
 	life := lifeWearing(t, spawn, pieces...)
-	life.Experience = experienceBefore(level)
+	life.Experience = ExperienceBefore(level)
 	life.Health = maxHealthFor(level)
 	sword := itemRegistry[kit.sword]
 	life.Slots[equipmentMainHand] = protocol.InventoryStack{ItemID: uint16(kit.sword), Count: 1,

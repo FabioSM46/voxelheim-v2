@@ -117,7 +117,7 @@ func TestALevelUpRaisesCurrentHealthWithTheMaximum(t *testing.T) {
 	t.Parallel()
 
 	player := Player{
-		experience: experienceBefore(2) - 1,
+		experience: ExperienceBefore(2) - 1,
 		health:     61,
 		lifeState:  vnet.LifeStateAlive,
 	}
@@ -257,7 +257,7 @@ func TestADeadPlayerKeepsZeroHealthWhenLateExperienceLevelsThem(t *testing.T) {
 	t.Parallel()
 
 	player := Player{
-		experience: experienceBefore(2) - 1,
+		experience: ExperienceBefore(2) - 1,
 		lifeState:  vnet.LifeStateDead,
 	}
 	if !player.awardExperienceLocked(1) {
@@ -324,5 +324,27 @@ func TestProgressionVitalsAreEncodedAtTheStartMiddleAndCap(t *testing.T) {
 				t.Errorf("experience_to_next = %d, want %d", got, tc.toNext)
 			}
 		})
+	}
+}
+
+func TestExperienceBeforeExposesAuthoritativeLevelThresholds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		level uint16
+		want  uint32
+	}{
+		{0, 0}, {1, 0}, {2, 50}, {3, 150}, {21, 10500}, {30, 21750}, {65535, 21750},
+	} {
+		if got := ExperienceBefore(tc.level); got != tc.want {
+			t.Errorf("level %d threshold = %d, want %d", tc.level, got, tc.want)
+		}
+		if tc.level >= 2 && tc.level <= MaxLevel {
+			if got := levelFor(tc.want); got != tc.level {
+				t.Errorf("threshold %d grants level %d, want %d", tc.want, got, tc.level)
+			}
+			if got := levelFor(tc.want - 1); got != tc.level-1 {
+				t.Errorf("one below threshold %d grants level %d, want %d", tc.want, got, tc.level-1)
+			}
+		}
 	}
 }

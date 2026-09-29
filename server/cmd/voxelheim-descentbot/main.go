@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
@@ -33,6 +34,7 @@ type options struct {
 	timeout      time.Duration
 	maxWipes     int
 	members      int
+	level        int
 	quiet        bool
 	hoard        bool
 	// Owned temporary storage, retained across the acceptance scenario's restart.
@@ -54,6 +56,7 @@ func parseFlags(name string, args []string) (options, error) {
 		"wipes in a row, every member dead at once with nothing killed between, before the party gives up the run")
 	flags.IntVar(&o.members, "party", 3,
 		fmt.Sprintf("how many bots play, each its own character in one party: 1 to %d", len(memberNames)))
+	flags.IntVar(&o.level, "level", 1, fmt.Sprintf("starting level for every party member: 1 to %d", game.MaxLevel))
 	flags.BoolVar(&o.quiet, "quiet", false, "print only the report, not the run's progress")
 	flags.BoolVar(&o.hoard, "hoard", false, "verify personal chests, earned rune craft, paid repair and saved chests after restart (party 3)")
 	if err := flags.Parse(args); err != nil {
@@ -70,6 +73,8 @@ func parseFlags(name string, args []string) (options, error) {
 		return o, fmt.Errorf("-timeout must be positive, got %v", o.timeout)
 	case o.members < 1 || o.members > len(memberNames):
 		return o, fmt.Errorf("-party must be in 1..%d, got %d", len(memberNames), o.members)
+	case o.level < 1 || o.level > int(game.MaxLevel):
+		return o, fmt.Errorf("-level must be in 1..%d, got %d", game.MaxLevel, o.level)
 	case o.hoard && o.members != 3:
 		return o, errors.New("-hoard requires -party 3")
 	case o.maxWipes < 1:

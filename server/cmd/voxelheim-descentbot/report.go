@@ -54,6 +54,7 @@ func writeReport(out io.Writer, pt *party, failure error) {
 		names[i] = m.c.name
 	}
 	fmt.Fprintf(&b, "party: %d (%s)\n", len(pt.members), strings.Join(names, ", "))
+	fmt.Fprintf(&b, "party starting level: %d\n", lead.opts.level)
 	fmt.Fprintf(&b, "instance seed: %d\n", lead.lay.seed)
 	if failure != nil {
 		fmt.Fprintf(&b, "RESULT: did not finish: %v\n", failure)
@@ -110,17 +111,30 @@ func writeReport(out io.Writer, pt *party, failure error) {
 	t.mu.Unlock()
 
 	commands, immortal := 0, 0
+	grants, teleports, items := 0, 0, 0
 	for _, m := range pt.members {
 		m.stats.mu.Lock()
 		commands += len(m.stats.commands)
 		for _, line := range m.stats.commands {
-			if strings.HasPrefix(line, "/immortal") {
+			name, _, _ := strings.Cut(line, " ")
+			switch name {
+			case "/immortal":
 				immortal++
+			case "/addexperience":
+				grants++
+			case "/teleport":
+				teleports++
+			case "/additem":
+				items++
 			}
 		}
 		m.stats.mu.Unlock()
 	}
 	fmt.Fprintf(&b, "development commands sent: %d (/immortal: %d)\n", commands, immortal)
+	// Keep the level-1 report compatible apart from its new level line.
+	if lead.opts.level > 1 || grants > 0 {
+		fmt.Fprintf(&b, "development command uses: /teleport: %d, /additem: %d, /addexperience: %d\n", teleports, items, grants)
+	}
 
 	fmt.Fprintf(&b, "\nrune inscription read %v, world.InstanceRuneOrder %v, lit runes per stone %v\n",
 		lead.rune.read, lead.rune.want, lead.rune.lit)
