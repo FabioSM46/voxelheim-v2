@@ -33,6 +33,7 @@ func TestCommandsDefaultToDisabledAndChangeNothing(t *testing.T) {
 
 	for _, line := range []string{
 		"/additem 1 1",
+		"/addexperience 50",
 		"/teleport 0 100 0",
 		"/immortal true",
 		"/help",
@@ -302,7 +303,7 @@ func TestHelpUnknownAndTheSharedRateLimitArePrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help: %v", err)
 	}
-	for _, shape := range []string{"/help", "/teleport <x> <y> <z>", "/additem <item-id> <count>"} {
+	for _, shape := range []string{"/help", "/teleport <x> <y> <z>", "/additem <item-id> <count>", "/addexperience <amount>"} {
 		if !strings.Contains(help.PrivateText, shape) {
 			t.Errorf("help = %q, missing %q", help.PrivateText, shape)
 		}
@@ -452,5 +453,100 @@ func TestImmortalIsAcceptedWhileDeadAndSurvivesNoSession(t *testing.T) {
 	h.hurt(other, 4)
 	if got := h.vitals(other); got.Health != got.MaxHealth-4 {
 		t.Errorf("second player's health = %d, want %d — immortality leaked between sessions", got.Health, got.MaxHealth-4)
+	}
+}
+
+func TestAddExperienceUsesLifetimeAwardsAndRefreshesAppearance(t *testing.T) {
+	t.Parallel()
+	h, player, _ := commandPlayer(t, true)
+	watcher, _ := h.join(2, [3]float32{1.5, 64, 0.5})
+	h.sim.mu.Lock()
+	watcher.described[player.entityID] = 1
+	h.sim.mu.Unlock()
+	outcome, err := player.Chat("/addexperience 150")
+	if err != nil || outcome.command != "/addexperience" || outcome.PrivateText != "Added 150 experience; total 150, level 3." {
+		t.Fatalf("award = %+v, %v", outcome, err)
+	}
+	if got := player.Record().Experience; got != 150 {
+		t.Fatalf("saved experience = %d, want 150", got)
+	}
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if player.health != maxHealthFor(3) {
+		t.Errorf("level-up health = %d, want %d", player.health, maxHealthFor(3))
+	}
+	if _, held := watcher.described[player.entityID]; held {
+		t.Error("observer still caches the old level")
+	}
+}
+
+func TestAddExperienceRefusesInvalidAmountsWithoutMutation(t *testing.T) {
+	t.Parallel()
+	for _, line := range []string{
+		"/addexperience", "/addexperience 1 extra", "/addexperience none",
+		"/addexperience 0", "/addexperience -1", "/addexperience 1.5",
+		"/addexperience 18446744073709551616",
+	} {
+		t.Run(line, func(t *testing.T) {
+			_, player, _ := commandPlayer(t, true)
+			before := player.Record()
+			outcome, err := player.Chat(line)
+			if err != nil || outcome.PrivateText == "" || outcome.command != "" {
+				t.Fatalf("refusal = %+v, %v", outcome, err)
+			}
+			if got := player.Record(); !reflect.DeepEqual(got, before) {
+				t.Fatalf("refusal changed life: %+v", got)
+			}
+		})
+	}
+}
+
+func TestAddExperienceCapsTheTotalWithoutOverflow(t *testing.T) {
+	t.Parallel()
+	_, player, _ := commandPlayer(t, true)
+	for _, line := range []string{"/addexperience 10", "/addexperience 18446744073709551615", "/addexperience 1"} {
+		outcome, err := player.Chat(line)
+		if err != nil || outcome.command != "/addexperience" {
+			t.Fatalf("award = %+v, %v", outcome, err)
+		}
+	}
+	if got := player.Record().Experience; got != ExperienceCap {
+		t.Fatalf("saved experience = %d, want cap %d", got, ExperienceCap)
+	}
+}
+
+func TestAddExperienceSharesTheDevelopmentCommandGates(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{"disabled", "dead", "leaving", "rate limited"} {
+		t.Run(state, func(t *testing.T) {
+			h, player, _ := commandPlayer(t, state != "disabled")
+			h.sim.mu.Lock()
+			switch state {
+			case "dead":
+				player.health = 0
+				player.lifeState = vnet.LifeStateDead
+			case "leaving":
+				player.leaving = true
+			}
+			h.sim.mu.Unlock()
+			if state == "rate limited" {
+				for range ChatBurst {
+					if _, err := player.Chat("/help"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			outcome, err := player.Chat("/addexperience 150")
+			if state == "rate limited" {
+				if !errors.Is(err, ErrChatTooFast) {
+					t.Fatalf("rate limit error = %v", err)
+				}
+			} else if err != nil || !strings.Contains(outcome.PrivateText, state) {
+				t.Fatalf("refusal = %+v, %v", outcome, err)
+			}
+			if got := player.Record().Experience; got != 0 {
+				t.Fatalf("refused award saved %d experience", got)
+			}
+		})
 	}
 }
