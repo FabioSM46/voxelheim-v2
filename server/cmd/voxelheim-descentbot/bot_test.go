@@ -84,13 +84,34 @@ func TestTheSoloSiegeIsTwelvePacksOfThree(t *testing.T) {
 }
 
 func TestTheHumanEstimateReplacesOnlyTheBossFights(t *testing.T) {
-	got, ok := humanEstimate(3, 20*time.Minute, 5*time.Minute, 6*time.Minute)
+	got, ok := humanEstimate(3, 0, 20*time.Minute, 5*time.Minute, 6*time.Minute)
 	want := 9*time.Minute + time.Duration((206.65+324.70)*float64(time.Second))
 	if d := got - want; !ok || d < -time.Millisecond || d > time.Millisecond {
 		t.Fatalf("estimate %v (%t), want %v", got, ok, want)
 	}
-	if _, ok := humanEstimate(2, 20*time.Minute, 0, 0); ok {
+	if _, ok := humanEstimate(2, 0, 20*time.Minute, 0, 0); ok {
 		t.Fatal("a pair has an estimate, but no reader was ever measured at two")
+	}
+}
+
+// A healer is a fifth of a blade against a whole member's health (#1370): three with one
+// healer kill at 2.2 blades, so both fights take 3/2.2 as long as the readers'.
+func TestTheHumanEstimateCountsAHealerAsAFifthOfABlade(t *testing.T) {
+	for _, kind := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
+		if got := partyBlades(3, 1, kind); math.Abs(got-2.2) > 1e-9 {
+			t.Fatalf("three with a healer swing as %.3f blades, want 2.2", got)
+		}
+	}
+	got, ok := humanEstimate(3, 1, 20*time.Minute, 5*time.Minute, 6*time.Minute)
+	slower := 3 / 2.2
+	want := 9*time.Minute + time.Duration((206.65+324.70)*slower*float64(time.Second))
+	if d := got - want; !ok || d < -time.Millisecond || d > time.Millisecond {
+		t.Fatalf("estimate %v (%t), want %v", got, ok, want)
+	}
+	for _, healers := range []int{-1, 3} {
+		if _, ok := humanEstimate(3, healers, 20*time.Minute, 0, 0); ok {
+			t.Fatalf("a party of three with %d healers has an estimate", healers)
+		}
 	}
 }
 

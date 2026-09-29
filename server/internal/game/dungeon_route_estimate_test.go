@@ -86,7 +86,14 @@ func tieredBlows(kind vnet.MobKind) int {
 
 // blowSeconds is how long a party of members takes to land blows among them.
 func blowSeconds(blows, members int) float64 {
-	return float64(blows) * readerSwingSeconds() / (float64(members) * readerPace(members))
+	return bladeSeconds(blows, members, float64(members))
+}
+
+// bladeSeconds is blowSeconds for a party of members that swings as blades iron blades:
+// members of them when every member holds one, fewer when a member holds a sceptre
+// (dungeon_route_healer_estimate_test.go).
+func bladeSeconds(blows, members int, blades float64) float64 {
+	return float64(blows) * readerSwingSeconds() / (blades * readerPace(members))
 }
 
 // routeWalkSeconds is the route's walking, falling and swimming for one seed.
@@ -164,6 +171,13 @@ func placedSeconds(members int) float64 {
 // the cave holds them from the first wave to the last spider's death.
 func siegeSeconds(t *testing.T, seed int64, members int) float64 {
 	t.Helper()
+	return siegeBladeSeconds(t, seed, members, float64(members))
+}
+
+// siegeBladeSeconds is siegeSeconds for a party of members that swings as blades iron
+// blades against a spider.
+func siegeBladeSeconds(t *testing.T, seed int64, members int, blades float64) float64 {
+	t.Helper()
 	s := newWavesSim(t, seed)
 	cave := triggerCentre(t, s, world.CaveTrigger)
 	party := make([]*Player, members)
@@ -182,7 +196,7 @@ func siegeSeconds(t *testing.T, seed int64, members int) float64 {
 			if first == 0 {
 				first = tick
 			}
-			kill := tick + uint64(math.Ceil(blowSeconds(len(wave)*perSpider, members)*rate))
+			kill := tick + uint64(math.Ceil(bladeSeconds(len(wave)*perSpider, members, blades)*rate))
 			downAt[kill] = append(downAt[kill], wave...)
 		}
 		for _, id := range downAt[tick] {
