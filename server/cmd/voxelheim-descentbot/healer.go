@@ -12,9 +12,9 @@ const (
 	// Heal below three quarters: leave a reserve before the next blow without
 	// spending every attack topping off minor wounds. This is bot policy only.
 	healerHealthFraction = 0.75
-	// Twenty-four blocks is a conservative aiming range (1.5 seconds at OrbSpeed),
-	// well inside the server's lifetime. Longer shots miss moving bodies too often.
-	healerRange = 24.0
+	// Twenty blocks leaves four blocks of margin inside OrbSpeed * OrbLifetime
+	// (24 blocks). Longer shots miss moving bodies or expire too often.
+	healerRange = 20.0
 	healerEvery = game.SceptreCooldown + 50*time.Millisecond
 	// Delivery can lag the flight by several ticks. This bounds attribution, not
 	// gameplay: the wire does not identify the source of a positive health delta.
@@ -156,6 +156,7 @@ type healerState struct {
 type healerTotals struct {
 	allies, creatures uint64
 	restored          uint64
+	replacements      uint64
 }
 
 type healObservation struct {
