@@ -328,6 +328,17 @@ func (p *pilot) ensureSceptre(ctx context.Context) error {
 	if worn.ItemID != uint16(game.ItemWoodenSceptre) || worn.Count != 1 || worn.MaxDurability == 0 || worn.Durability != 0 {
 		return fmt.Errorf("healer main hand is not a worn wooden sceptre")
 	}
+	// Granting the fresh item and retaining the exhausted one needs two pack
+	// slots: same-ID durable items cannot be swapped by MoveInventory.
+	free := 0
+	for i, stack := range state.Stacks {
+		if i < int(protocol.InventorySlots-protocol.EquipmentSlots) && stack.Count == 0 {
+			free++
+		}
+	}
+	if free < 2 {
+		return fmt.Errorf("sceptre replacement needs two empty pack slots")
+	}
 	answer, err := p.c.command(ctx, fmt.Sprintf("/additem %d 1", game.ItemWoodenSceptre))
 	if err != nil {
 		return err
@@ -350,11 +361,32 @@ func (p *pilot) ensureSceptre(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	state, revision = p.c.inventoryAnswer()
+	park := -1
+	for i, stack := range state.Stacks {
+		if i < int(protocol.InventorySlots-protocol.EquipmentSlots) && stack.Count == 0 {
+			park = i
+			break
+		}
+	}
+	if park < 0 {
+		return fmt.Errorf("sceptre replacement has no empty pack slot for the worn item")
+	}
+	if err := p.c.send(protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: mainHandSlot, To: uint8(park), Count: 1})); err != nil {
+		return err
+	}
+	if err := p.waitHealerInventory(ctx, revision, func(state protocol.InventoryState) bool {
+		return len(state.Stacks) > int(mainHandSlot) && state.Stacks[mainHandSlot].Count == 0 && state.Stacks[park] == worn
+	}); err != nil {
+		return err
+	}
 	_, revision = p.c.inventoryAnswer()
 	if err := p.c.send(protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: uint8(from), To: mainHandSlot, Count: 1})); err != nil {
 		return err
 	}
-	if err := p.waitHealerInventory(ctx, revision, usableSceptre); err != nil {
+	if err := p.waitHealerInventory(ctx, revision, func(state protocol.InventoryState) bool {
+		return usableSceptre(state) && state.Stacks[from].Count == 0 && state.Stacks[park] == worn
+	}); err != nil {
 		return err
 	}
 	p.c.mu.Lock()
