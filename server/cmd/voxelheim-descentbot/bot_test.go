@@ -1,7 +1,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"math"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,7 +132,7 @@ func TestFlagsRefuseARunWithNoServer(t *testing.T) {
 		}
 	}
 	o, err := parseFlags("bot", []string{"-server", "voxelheimd"})
-	if err != nil || o.maxWipes != 3 || o.viewDistance != 4 || o.members != 3 {
+	if err != nil || o.maxWipes != 3 || o.viewDistance != 4 || o.members != 3 || o.level != 1 {
 		t.Fatalf("defaults %+v, %v", o, err)
 	}
 }
@@ -162,5 +169,126 @@ func TestAWalkAlongTheWorldBecomesTheControlsForTheFacing(t *testing.T) {
 	}
 	if x, z := relative([2]float64{0, 1}, yaw); math.Abs(math.Abs(x)-1) > 1e-9 || math.Abs(z) > 1e-9 {
 		t.Fatalf("walking across the facing is (%.3f, %.3f), want a pure strafe", x, z)
+	}
+}
+
+func TestLevelFlagRefusesValuesOutsideTheServerCurve(t *testing.T) {
+	for _, value := range []string{"0", "-1", "31", "65537", "bad", "1.5"} {
+		if _, err := parseFlags("bot", []string{"-server", "voxelheimd", "-level", value}); err == nil {
+			t.Errorf("accepted -level %s", value)
+		}
+	}
+	for _, level := range []int{1, 2, 21, 30} {
+		o, err := parseFlags("bot", []string{"-server", "voxelheimd", "-level", fmt.Sprint(level)})
+		if err != nil || o.level != level {
+			t.Fatalf("level %d parsed as %d: %v", level, o.level, err)
+		}
+	}
+}
+
+func TestStartingExperienceUsesEveryServerLevelBoundary(t *testing.T) {
+	var total uint32
+	for level := 1; level <= int(game.MaxLevel); level++ {
+		if got := startingExperience(level); got != total {
+			t.Errorf("level %d requests %d, want %d", level, got, total)
+		}
+		total += uint32(level) * game.ExperiencePerLevelStep
+	}
+	if startingExperience(21) != 10500 || startingExperience(30) != game.ExperienceCap {
+		t.Fatal("reference level or cap diverged")
+	}
+}
+
+func TestLevelOneNeverSendsAnExperienceCommand(t *testing.T) {
+	// There is deliberately no connection: level 1 must perform no write or read.
+	r := &runner{opts: options{level: 1}}
+	if err := r.prepareLevel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExperienceProvisioningRequiresTheAuthoritativeLevel(t *testing.T) {
+	for _, state := range []string{"confirmed", "refused", "too high", "unconfirmed"} {
+		t.Run(state, func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer func() { _ = local.Close(); _ = remote.Close() }()
+			stats := newRunStats(newTally())
+			c := &client{conn: local, level: 1, stats: stats, chat: make(chan string, 1)}
+			r := &runner{pilot: &pilot{c: c}, opts: options{level: 21}}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- r.prepareLevel(ctx) }()
+			if err := remote.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			frame, err := transport.ReadFrame(remote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message, err := protocol.Decode(frame)
+			if err != nil || message.Chat == nil || message.Chat.Text != "/addexperience 10500" {
+				t.Fatalf("request %+v, %v", message, err)
+			}
+			if state == "refused" {
+				c.chat <- "Development commands are disabled."
+			} else {
+				c.chat <- "Added 10500 experience; total 10500, level 21."
+				select {
+				case err := <-result:
+					t.Fatalf("finished without authoritative vitals: %v", err)
+				default:
+				}
+				if state == "unconfirmed" {
+					cancel()
+				} else {
+					level := uint16(21)
+					if state == "too high" {
+						level++
+					}
+					c.mu.Lock()
+					c.level = level
+					c.mu.Unlock()
+				}
+			}
+			if err := <-result; (err == nil) != (state == "confirmed") {
+				t.Fatalf("%s: %v", state, err)
+			}
+			if len(stats.commands) != 1 || stats.commands[0] != "/addexperience 10500" {
+				t.Fatalf("command accounting: %v", stats.commands)
+			}
+		})
+	}
+}
+
+func TestReportStatesStartingLevelAndCountsExperienceGrants(t *testing.T) {
+	for _, level := range []int{1, 21} {
+		var members []*runner
+		for i := range 3 {
+			stats := newRunStats(newTally())
+			stats.command("/teleport 1 2 3")
+			stats.command("/additem 1 1")
+			if level > 1 {
+				stats.command("/addexperience 10500")
+			}
+			members = append(members, &runner{
+				pilot: &pilot{c: &client{name: memberNames[i]}, stats: stats},
+				opts:  options{level: level}, server: &serverProcess{commandLine: "fixture"},
+			})
+		}
+		var report strings.Builder
+		writeReport(&report, newParty(members), nil)
+		text := report.String()
+		if !strings.Contains(text, fmt.Sprintf("party starting level: %d\n", level)) {
+			t.Fatal("report omitted party level")
+		}
+		if level == 1 {
+			if !strings.Contains(text, "development commands sent: 6 (/immortal: 0)\n") || strings.Contains(text, "development command uses:") {
+				t.Fatal("level 1 changed the command report")
+			}
+		} else if !strings.Contains(text, "development commands sent: 9 (/immortal: 0)\n") ||
+			!strings.Contains(text, "development command uses: /teleport: 3, /additem: 3, /addexperience: 3\n") {
+			t.Fatal("report lost development command counts")
+		}
 	}
 }
